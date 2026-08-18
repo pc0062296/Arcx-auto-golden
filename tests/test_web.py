@@ -1,4 +1,4 @@
-"""Web UI: 路由、渲染、以及「唯讀」這個硬性性質。"""
+"""Web UI: routing, rendering, and the hard read-only property."""
 
 import json
 import os
@@ -64,13 +64,13 @@ class WebTest(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code
 
-    # -- 路由 ----------------------------------------------------------
+    # -- Routing -------------------------------------------------------
 
     def test_home_lists_runs(self):
         code, body = self.get("/")
         self.assertEqual(code, 200)
         self.assertIn("demo", body)
-        self.assertIn("需要你決定", body)
+        self.assertIn("needs your decision", body)
 
     def test_run_page(self):
         code, body = self.get("/run/demo")
@@ -88,13 +88,14 @@ class WebTest(unittest.TestCase):
         code, body = self.get("/run/demo/index/1001/case/NMOS_1")
         self.assertEqual(code, 200)
         self.assertIn("NETLIST_MISSING", body)
-        # evidence 裡的實際路徑必須看得到 —— 沒有證據的判定無法被檢驗
+        # The real paths from the evidence have to be visible: a verdict
+        # without evidence cannot be checked
         self.assertIn("blocking_naming_qcap", body)
 
     def test_case_page_shows_check_docstring(self):
-        """docstring 就是 UI 上的說明。"""
+        """A check's docstring is what the UI shows."""
         _code, body = self.get("/run/demo/index/1001/case/NMOS_1")
-        self.assertIn("假成功", body)
+        self.assertIn("false success", body)
 
     def test_api_returns_raw_state(self):
         code, body = self.get("/api/state/demo")
@@ -108,7 +109,7 @@ class WebTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["ok"])
 
-    # -- 錯誤處理 ------------------------------------------------------
+    # -- Error handling ------------------------------------------------
 
     def test_unknown_run_is_404(self):
         self.assertEqual(self.status_of("/run/nope"), 404)
@@ -123,22 +124,25 @@ class WebTest(unittest.TestCase):
         self.assertEqual(self.status_of("/nothing"), 404)
 
     def test_path_traversal_rejected(self):
-        """run id 用「列出既有 run 再比對」查表, 不把輸入拼進路徑。"""
+        """run ids are looked up in the existing runs, never concatenated
+        into a path.
+        """
         for attack in ("/run/..%2f..%2fetc", "/api/state/..%2f..%2fetc",
                        "/run/%2e%2e%2f%2e%2e%2fetc/index/x"):
             self.assertEqual(self.status_of(attack), 404, attack)
 
-    # -- 唯讀 ----------------------------------------------------------
+    # -- Read only -----------------------------------------------------
 
     def test_no_write_endpoints(self):
-        """UI 是唯讀的。所有寫入型動作走 commands/ 投遞給 daemon
-        (architecture 決策 1: daemon 是唯一寫入者)。
+        """The UI is read only. Write actions are posted to the daemon
+        through commands/ (architecture decision 1: the daemon is the single
+        writer).
         """
         request = urllib.request.Request(
             self.base + "/run/demo", method="POST", data=b"x")
         try:
             urllib.request.urlopen(request, timeout=10)
-            self.fail("POST 不應該被接受")
+            self.fail("POST should not be accepted")
         except urllib.error.HTTPError as exc:
             self.assertIn(exc.code, (400, 404, 405, 501))
 
@@ -151,11 +155,11 @@ class WebTest(unittest.TestCase):
 
 
 class PageRenderTest(unittest.TestCase):
-    """頁面渲染是純函數, 可以直接餵資料測。"""
+    """Page rendering is pure, so it can be tested by feeding it data."""
 
     def test_empty_home(self):
         body = pages.render_home([], refresh=0)
-        self.assertIn("還沒有任何監控中的 run", body)
+        self.assertIn("no run is being monitored yet", body)
 
     def test_html_is_escaped(self):
         state = {
@@ -174,28 +178,28 @@ class PageRenderTest(unittest.TestCase):
             "run_id": "r", "updated_at": 0, "daemon": {},
             "totals": {"states": {}, "cases": 0, "indexes": 0,
                        "attention": 0, "issues": 0, "severities": {}},
-            "lsf": {"available": False, "note": "bjobs 不見了"},
+            "lsf": {"available": False, "note": "bjobs is gone"},
             "indexes": [], "issues": [],
         }
         body = pages.render_run(state, refresh=0)
-        self.assertIn("LSF 資料不可用", body)
-        self.assertIn("bjobs 不見了", body)
+        self.assertIn("LSF data unavailable", body)
+        self.assertIn("bjobs is gone", body)
 
     def test_daemon_error_banner(self):
         state = {
             "run_id": "r", "updated_at": 0,
-            "daemon": {"last_error": "Traceback: 爆了"},
+            "daemon": {"last_error": "Traceback: boom"},
             "totals": {"states": {}, "cases": 0, "indexes": 0,
                        "attention": 0, "issues": 0, "severities": {}},
             "lsf": {"available": True}, "indexes": [], "issues": [],
         }
         body = pages.render_run(state, refresh=0)
-        self.assertIn("上一次掃描失敗", body)
+        self.assertIn("the last scan failed", body)
 
     def test_issue_summary_groups_by_id(self):
-        """200 個 case 犯同一個錯時, 要看到的是聚合而不是 200 行。"""
+        """When 200 cases hit one problem, show the aggregate, not 200 lines."""
         issues = [
-            {"id": "NETLIST_MISSING", "severity": "FATAL", "title": "缺失",
+            {"id": "NETLIST_MISSING", "severity": "FATAL", "title": "missing",
              "case_id": "C%d" % i, "index_key": "1000"}
             for i in range(12)
         ]
@@ -211,16 +215,20 @@ class PageRenderTest(unittest.TestCase):
         self.assertIn("(+6)", body)
 
     def test_silent_time_escalates_visually(self):
-        """安靜越久標記越醒目 —— 系統講清楚時間, 判斷交給人。"""
+        """The longer the quiet, the louder the marker: the system states the
+        number, the judgement stays human.
+        """
         self.assertIn("bad", pages._silent_cell({"silent_sec": 9 * 3600}))
         self.assertIn("warn", pages._silent_cell({"silent_sec": 5 * 3600}))
         self.assertNotIn("bad", pages._silent_cell({"silent_sec": 60}))
 
     def test_stale_daemon_is_flagged(self):
-        """daemon 靜默死掉時畫面會停在最後一刻看起來一切正常 —— 最危險的情況。"""
+        """A daemon that dies quietly freezes the display at the last moment,
+        looking perfectly healthy -- the most dangerous state of all.
+        """
         import time as _time
         html = pages._daemon_health({"pid": 1}, _time.time() - 3600)
-        self.assertIn("未更新", html)
+        self.assertIn("no update", html)
 
 
 def _tree(root):

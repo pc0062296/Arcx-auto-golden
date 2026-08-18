@@ -1,6 +1,6 @@
-"""FsAdapter: run folder 掃描。
+"""FsAdapter: scanning a run folder.
 
-對應使用者提供的真實 ls -a:
+Mirrors the real ls -a:
     .queue.NDIO_1  .run.PDIO_1  .complete.NTN_1
     NDIO_1/  PDIO_1/  NTN_1/
     QC_Cc/  QC_Ct/  QC_Spice/
@@ -19,7 +19,7 @@ from tests.fixtures.fake_run import CaseSpec, make_index_run_folder
 
 
 class RealLayoutTest(unittest.TestCase):
-    """直接對應使用者給的真實 ls -a。"""
+    """A direct mirror of the real ls -a."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -45,7 +45,7 @@ class RealLayoutTest(unittest.TestCase):
         self.assertEqual(obs.cases["NTN_1"].markers, frozenset({MarkerKind.COMPLETE}))
 
     def test_case_run_dir_located(self):
-        """rerun 時要刪的就是這些目錄。"""
+        """These are exactly the directories a rerun deletes."""
         obs = self.fs.scan_index_run_folder(self.folder, "1000")
         for case_id in ("NDIO_1", "PDIO_1", "NTN_1"):
             case = obs.cases[case_id]
@@ -63,16 +63,17 @@ class RealLayoutTest(unittest.TestCase):
         self.assertNotIn("cmd_folder", obs.unmatched_entries)
 
     def test_hidden_dirs_are_not_cases(self):
-        """我們自己的 .arcx_auto/ 不能被當成 case。"""
+        """Our own .arcx_auto/ must not be mistaken for a case."""
         os.makedirs(os.path.join(self.folder, ".arcx_auto"))
         obs = self.fs.scan_index_run_folder(self.folder, "1000")
         self.assertNotIn(".arcx_auto", obs.cases)
 
 
 class CmdFileMappingTest(unittest.TestCase):
-    """log -> cmd_file -> case 的對應。
+    """The log -> cmd_file -> case mapping.
 
-    log 檔名只有流水號, 與 case 沒有任何關係, 所以這條鏈是唯一可靠的對應方式。
+    A log filename carries only a sequence number and says nothing about its
+    case, so this chain is the only reliable mapping.
     """
 
     def setUp(self):
@@ -94,11 +95,12 @@ class CmdFileMappingTest(unittest.TestCase):
             "submit_bjob_cmd_file_2.log"))
 
     def test_numbering_order_is_not_assumed(self):
-        """編號順序與 case 名稱排序無關 —— 系統不能偷偷用編號猜。
+        """Sequence order is unrelated to case name order: nothing may guess
+        the case from the number.
 
-        這裡 cmd_file_1 指向 ZZZ_LAST, cmd_file_2 指向 AAA_FIRST。
-        若實作用了任何「第 N 個 log 對第 N 個 case (排序後)」的捷徑,
-        這個測試就會失敗。
+        Here cmd_file_1 points at ZZZ_LAST and cmd_file_2 at AAA_FIRST. Any
+        shortcut of the form "the Nth log belongs to the Nth case once sorted"
+        fails this test.
         """
         folder = make_index_run_folder(self.tmp.name, "1001", [
             CaseSpec("ZZZ_LAST", "running"),
@@ -118,7 +120,9 @@ class CmdFileMappingTest(unittest.TestCase):
         self.assertTrue(case.cmd_file.endswith("cmd_folder/cmd_file_1"))
 
     def test_unresolvable_log_is_reported(self):
-        """有 log 但 cmd_file 缺失 -> 有一個 case 我們監控不到, 必須讓人看到。"""
+        """A log with no cmd_file means a case we cannot monitor, which has
+        to be visible.
+        """
         folder = make_index_run_folder(self.tmp.name, "1001", [
             CaseSpec("DIODE_X", "no_cmd_file"),
         ])
@@ -139,14 +143,14 @@ class CmdFileMappingTest(unittest.TestCase):
             self.assertEqual(self.fs.read_cmd_exec_path(path), expected, line)
 
     def test_relative_cd_ignored(self):
-        """相對路徑的 cd 無法判定 case, 不能拿來猜。"""
+        """A relative cd cannot identify the case and must not be guessed at."""
         path = os.path.join(self.tmp.name, "cmd_rel")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("#!/bin/csh -f\ncd ../somewhere\n")
         self.assertIsNone(self.fs.read_cmd_exec_path(path))
 
     def test_cd_inside_run_folder_preferred(self):
-        """script 有多個 cd 時, 採用位於 run folder 底下的那一個。"""
+        """With several cd lines, take the one under the run folder."""
         run_folder = os.path.join(self.tmp.name, "run")
         os.makedirs(run_folder)
         path = os.path.join(self.tmp.name, "cmd_multi")
@@ -168,7 +172,7 @@ class CmdFileMappingTest(unittest.TestCase):
 
 
 class DiscoveryUnionTest(unittest.TestCase):
-    """case 來源取 marker / run dir / log 三者的聯集。"""
+    """Cases come from the union of markers, run dirs and logs."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -178,9 +182,10 @@ class DiscoveryUnionTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_case_discovered_from_dir_alone(self):
-        """只有 run dir、沒有 marker 也沒有 log。
+        """A run dir with no marker and no log.
 
-        代表「case 建立了但從未被提交」—— 目前流程最容易靜默漏掉的失敗。
+        It means the case exists but was never submitted, the failure the
+        current process misses most easily.
         """
         folder = make_index_run_folder(self.tmp.name, "1001", [
             CaseSpec("NDIO_1", "running"),
@@ -210,7 +215,7 @@ class DiscoveryUnionTest(unittest.TestCase):
         self.assertTrue(case.marker_inconsistent)
 
     def test_cases_sorted_naturally(self):
-        """NDIO_2 必須排在 NDIO_10 前面。"""
+        """NDIO_2 has to sort before NDIO_10."""
         folder = make_index_run_folder(self.tmp.name, "1001", [
             CaseSpec("NDIO_%d" % i, "complete") for i in (1, 2, 10, 11)
         ])
@@ -219,7 +224,9 @@ class DiscoveryUnionTest(unittest.TestCase):
                          ["NDIO_1", "NDIO_2", "NDIO_10", "NDIO_11"])
 
     def test_unknown_marker_is_flagged_separately(self):
-        """.fail.X 這類未知 marker 不正常, 必須獨立標出而不是混進雜訊。"""
+        """An unknown marker such as .fail.X is abnormal and must be flagged
+        separately rather than mixed into the noise.
+        """
         folder = make_index_run_folder(self.tmp.name, "1001",
                                        [CaseSpec("NDIO_1", "running")])
         open(os.path.join(folder, ".fail.NDIO_9"), "w").close()
@@ -228,7 +235,9 @@ class DiscoveryUnionTest(unittest.TestCase):
         self.assertNotIn(".fail.NDIO_9", obs.unmatched_entries)
 
     def test_unknown_marker_still_reveals_the_case(self):
-        """未知 marker 仍然證明這個 case 存在 —— 不能讓它從 case 清單裡消失。"""
+        """An unknown marker still proves the case exists; it must not vanish
+        from the case list.
+        """
         folder = make_index_run_folder(self.tmp.name, "1001",
                                        [CaseSpec("NDIO_1", "running")])
         open(os.path.join(folder, ".fail.NDIO_9"), "w").close()
@@ -246,7 +255,9 @@ class DiscoveryUnionTest(unittest.TestCase):
             self.fs.scan_index_run_folder(folder, "1001").unknown_markers, ())
 
     def test_unknown_files_are_reported(self):
-        """慣例之外的檔案要浮出來 —— 發現 Arcx 行為變動的早期訊號。"""
+        """Files outside the conventions must surface: they are the early
+        signal that Arcx behaviour changed.
+        """
         folder = make_index_run_folder(self.tmp.name, "1001",
                                        [CaseSpec("NDIO_1")])
         open(os.path.join(folder, "something_new.txt"), "w").close()
@@ -268,7 +279,9 @@ class DiscoveryUnionTest(unittest.TestCase):
 
 
 class ConfigurableLayoutTest(unittest.TestCase):
-    """慣例全部可設定 —— Arcx 或環境有變動時只改設定, 不動程式。"""
+    """Every convention is configurable, so a change in Arcx or in the
+    environment is a settings change rather than a code change.
+    """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

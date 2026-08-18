@@ -1,10 +1,11 @@
-"""把一次掃描的結果轉成 state.json 的內容。
+"""Turn one scan result into the contents of state.json.
 
-state.json 是 daemon 與 UI 之間唯一的介面。刻意做成**自我完備的純資料**:
-UI 不需要匯入任何 service, 也不需要重新計算任何東西 —— 它只是渲染。
+state.json is the only interface between the daemon and the UI, and it is
+deliberately **self-contained plain data**: the UI imports no service and
+recomputes nothing, it only renders.
 
-再次強調 (architecture 決策 2): 這是快取, 不是真相。整份刪掉後
-daemon 重新掃描就能還原。
+Again (architecture decision 2): this is a cache, not the truth. Delete it and
+the next daemon scan rebuilds it.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from arcx_auto.services.monitor import ScanResult
 
 SCHEMA_VERSION = 1
 
-#: UI 上的排序: 需要人處理的排前面
+#: Display order in the UI: things needing attention come first
 STATE_DISPLAY_ORDER = [
     CaseState.FAILED,
     CaseState.LOST,
@@ -41,7 +42,7 @@ def build_state_payload(
     result: ScanResult,
     daemon_info: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """產生 state.json。"""
+    """Build the state.json payload."""
     issues_by_case: Dict[str, List[Issue]] = {}
     for report in result.qa_reports:
         for case_id in report.case_results:

@@ -1,12 +1,12 @@
-"""把 QA 檢查跑在一整個 index run folder 上。
+"""Run the QA checks across one whole index run folder.
 
-決定「什麼時候跑哪一組檢查」:
+Deciding which group runs when:
 
-    LIVE  每個 case 每次掃描都跑 (成本低, 只用已有的觀測)
-    POST  只在 case 走到 COMPLETED_MARKER 之後跑一次 (要進 run dir 讀檔)
+    LIVE  every case, every scan (cheap; uses observations we already have)
+    POST  once, after a case reaches COMPLETED_MARKER (reads the run dir)
 
-POST 的結果會被快取 (key = case_id + attempt), 因為它不會再變 ——
-除非 rerun, 而 rerun 會讓 attempt 加一。
+POST results are cached by (case_id, attempt) because they cannot change --
+except through a rerun, which increments the attempt.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from arcx_auto.services.qa.registry import REGISTRY, QaRegistry
 
 @dataclass(frozen=True)
 class IndexQaReport:
-    """一個 index run folder 的完整 QA 結果。"""
+    """The complete QA result for one index run folder."""
 
     index_key: str
     run_folder: str
@@ -56,7 +56,7 @@ class IndexQaReport:
         return tuple(issues)
 
     def merged_case_result(self, case_id: str) -> QaResult:
-        """把一個 case 的 LIVE + POST 結果合併成一份, 方便判定完整性。"""
+        """Merge a case's LIVE and POST results for the completeness decision."""
         results = self.case_results.get(case_id, ())
         issues: List[Issue] = []
         ran: List[str] = []
@@ -79,9 +79,9 @@ class IndexQaReport:
 
 
 class QaRunner:
-    """執行 QA 檢查。"""
+    """Runs the QA checks."""
 
-    #: 哪些狀態代表「Arcx 認為這個 case 收工了」, 值得跑 POST 檢查
+    #: States meaning "Arcx considers this case finished", worth a POST pass
     POST_STATES = (CaseState.COMPLETED_MARKER, CaseState.DONE, CaseState.FAILED)
 
     def __init__(
@@ -92,7 +92,7 @@ class QaRunner:
         self.settings = settings or Settings()
         self.registry = registry or REGISTRY
         self.disabled = tuple(getattr(self.settings.qa, "disabled_checks", ()) or ())
-        # (case_id, attempt) -> POST 結果。POST 不會變, 除非 rerun。
+        # (run_folder, case_id, attempt) -> POST result; stable until a rerun
         self._post_cache: Dict[Tuple[str, str, int], QaResult] = {}
 
     def run_config(
@@ -100,13 +100,13 @@ class QaRunner:
         arcx_config: Optional[ArcxConfig],
         now: Optional[float] = None,
     ) -> QaResult:
-        """PRE: 只檢查 arcx.cfg, 不需要任何 run folder。"""
+        """PRE: check arcx.cfg only, with no run folder involved."""
         now = now if now is not None else time.time()
         context = ConfigContext(
             config=arcx_config, settings=self.settings,
             cache=_FsCache(), now=now,
         )
-        target = arcx_config.source_path if arcx_config else "(無 arcx.cfg)"
+        target = arcx_config.source_path if arcx_config else "(no arcx.cfg)"
         return self.registry.run(
             context, IssueScope.GLOBAL, IssueStage.PRE, target,
             disabled=self.disabled,
@@ -121,7 +121,7 @@ class QaRunner:
         run_root: Optional[str] = None,
         now: Optional[float] = None,
     ) -> QaResult:
-        """PRE: 這批工作現在送得出去嗎。"""
+        """PRE: can this batch go out right now?"""
         now = now if now is not None else time.time()
         context = PreflightContext(
             plan=plan, run_dir=run_dir, settings=self.settings,

@@ -1,18 +1,22 @@
-"""檔案鎖。
+"""File locking.
 
-兩個用途:
+Two uses:
 
-  1. **daemon 單一實例**。系統的核心不變式是「daemon 是唯一的寫入者」
-     (architecture 決策 1), 兩個 daemon 同時跑會直接破壞它。
+  1. **A single daemon instance.** The core invariant is that the daemon is the
+     only writer (architecture decision 1); two daemons at once break it
+     outright.
 
-  2. **run folder 互斥**。防止同一個 index 被跑兩次 —— 使用者列為
-     不可妥協的原則之一。
+  2. **Run folder exclusion.** Stops the same index from being run twice, one
+     of the non-negotiable rules.
 
-用 fcntl.flock: 它由 kernel 管理, process 死掉 (含被 kill -9) 時會自動釋放,
-不會留下需要人工清理的 stale lock。鎖檔內容只是給人看的診斷資訊, 不是鎖本身。
+fcntl.flock is used because the kernel owns it: the lock is released
+automatically when the process dies, including kill -9, so no stale lock ever
+needs manual cleanup. The file content is diagnostic information for humans,
+not the lock itself.
 
-注意: flock 在 NFS 上的行為依 mount 選項而異。run folder 的鎖是「盡力而為」
-的保護, 真正的安全來自 daemon 單一寫入者這個架構性質。
+Note that flock behaviour on NFS depends on mount options. The run folder lock
+is best-effort protection; the real safety comes from the single-writer daemon
+being an architectural property.
 """
 
 from __future__ import annotations
@@ -26,25 +30,25 @@ from typing import Any, Dict, Optional
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - Windows, 本專案不支援
+except ImportError:  # pragma: no cover - Windows is not supported
     fcntl = None  # type: ignore
 
 
 class LockBusy(Exception):
-    """鎖已被其他 process 持有。"""
+    """The lock is held by another process."""
 
     def __init__(self, path: str, holder: Optional[Dict[str, Any]] = None) -> None:
         self.path = path
         self.holder = holder or {}
         who = ""
         if holder:
-            who = " (持有者: pid=%s host=%s since=%s)" % (
+            who = " (held by pid=%s host=%s since=%s)" % (
                 holder.get("pid"), holder.get("host"), holder.get("since"))
-        super().__init__("無法取得鎖 %s%s" % (path, who))
+        super().__init__("could not acquire lock %s%s" % (path, who))
 
 
 class FileLock:
-    """非阻塞的 advisory lock。用 with 陳述式使用。"""
+    """A non-blocking advisory lock. Use it as a context manager."""
 
     def __init__(self, path: str, purpose: str = "") -> None:
         self.path = os.path.abspath(os.path.expanduser(path))
@@ -53,7 +57,7 @@ class FileLock:
 
     def acquire(self) -> "FileLock":
         if fcntl is None:  # pragma: no cover
-            raise RuntimeError("這個平台沒有 fcntl, 無法取得檔案鎖")
+            raise RuntimeError("this platform has no fcntl; file locking is unavailable")
 
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
@@ -66,7 +70,7 @@ class FileLock:
                 raise LockBusy(self.path, holder) from exc
             raise
 
-        # 鎖已到手, 寫入診斷資訊給人看 (不是鎖本身)
+        # Lock acquired; record diagnostics for humans (not the lock itself)
         os.ftruncate(fd, 0)
         os.write(fd, json.dumps({
             "pid": os.getpid(),

@@ -1,8 +1,8 @@
-"""LsfAdapter: bjobs / busers 輸出解析與優雅降級。"""
+"""LsfAdapter: parsing bjobs / busers output, and degrading gracefully."""
 
 import unittest
 
-from arcx_auto.adapters.lsf import LsfAdapter, _extract_job_ids
+from arcx_auto.adapters.lsf import LsfAdapter, parse_jobs_in_path
 from arcx_auto.domain.enums import LsfState
 from arcx_auto.domain.models import LsfJobView
 
@@ -43,7 +43,9 @@ class BjobsParseTest(unittest.TestCase):
 
 class BusersParseTest(unittest.TestCase):
     def test_njobs_column_located_by_header(self):
-        """依欄位名而非固定位置解析 —— busers 的欄位順序會因版本而異。"""
+        """Locate the column by name, not by position: the busers column
+        order varies between versions.
+        """
         adapter = LsfAdapter()
         lines = [ln for ln in BUSERS_OUTPUT.splitlines() if ln.strip()]
         header = lines[0].split()
@@ -52,7 +54,7 @@ class BusersParseTest(unittest.TestCase):
 
 
 class BelongsToTest(unittest.TestCase):
-    """wave 目錄是 LSF job 的歸屬邊界 (架構 §8)。"""
+    """The wave directory is the ownership boundary for LSF jobs."""
 
     def test_matches_by_exec_cwd(self):
         job = LsfJobView(job_id="1", state=LsfState.RUN,
@@ -71,7 +73,7 @@ class BelongsToTest(unittest.TestCase):
         self.assertFalse(job.belongs_to("/work/run/wave_001"))
 
     def test_prefix_is_path_aware_not_string_prefix(self):
-        """/work/run/wave_0011 不屬於 /work/run/wave_001。"""
+        """/work/run/wave_0011 is not under /work/run/wave_001."""
         job = LsfJobView(job_id="1", state=LsfState.RUN,
                          exec_cwd="/work/run/wave_0011/1000")
         self.assertFalse(job.belongs_to("/work/run/wave_001"))
@@ -84,7 +86,7 @@ class StateSemanticsTest(unittest.TestCase):
         self.assertFalse(LsfState.RUN.is_suspended)
 
     def test_active_states_include_suspended(self):
-        """suspended 的 job 仍佔用資源, 不能當成結案。"""
+        """A suspended job still holds resources and is not finished."""
         self.assertTrue(LsfState.SSUSP.is_active)
         self.assertTrue(LsfState.PEND.is_active)
         self.assertFalse(LsfState.DONE.is_active)
@@ -92,7 +94,9 @@ class StateSemanticsTest(unittest.TestCase):
 
 
 class DegradationTest(unittest.TestCase):
-    """LSF 不可用時必須降級而非丟例外 —— 監控不能因為 bjobs 抽風而停擺。"""
+    """When LSF is unavailable the adapter degrades instead of raising:
+    monitoring must not stop because bjobs had a bad moment.
+    """
 
     def test_missing_command_reports_error(self):
         adapter = LsfAdapter()
@@ -110,13 +114,40 @@ class DegradationTest(unittest.TestCase):
         self.assertIsNotNone(error)
 
 
-class JobIdExtractionTest(unittest.TestCase):
-    def test_extracts_and_dedupes(self):
-        text = "Job <12345> is running\nJob <12345> again\nJob <67890> pending\n"
-        self.assertEqual(_extract_job_ids(text), ["12345", "67890"])
+class JobsInPathTest(unittest.TestCase):
+    """bjobs_manage.py -jp reports a count, not a job list.
 
-    def test_empty_output(self):
-        self.assertEqual(_extract_job_ids(""), [])
+        grep all jobs...
+        finished, total 304 jobs      <- every job
+        total 299 jobs in path        <- scoped to the path, this one
+
+    The distinction matters: this feeds the drain safety gate, and treating
+    "could not tell" as "no jobs left" would delete files while jobs are still
+    running -- the most destructive mistake this system could make.
+    """
+
+    REAL_OUTPUT = ("grep all jobs...\n"
+                   "finished, total 304 jobs\n"
+                   "total 299 jobs in path\n")
+
+    def test_parses_the_in_path_count(self):
+        self.assertEqual(parse_jobs_in_path(self.REAL_OUTPUT), 299)
+
+    def test_does_not_pick_the_total_count(self):
+        """304 is every job on the cluster; 299 is the one we need."""
+        self.assertNotEqual(parse_jobs_in_path(self.REAL_OUTPUT), 304)
+
+    def test_zero_is_a_real_answer(self):
+        self.assertEqual(parse_jobs_in_path(
+            "grep all jobs...\nfinished, total 4 jobs\ntotal 0 jobs in path\n"), 0)
+
+    def test_unrecognised_output_is_none_not_zero(self):
+        """None means unknown. Never confuse it with zero."""
+        self.assertIsNone(parse_jobs_in_path("something unexpected"))
+        self.assertIsNone(parse_jobs_in_path(""))
+
+    def test_singular_wording_accepted(self):
+        self.assertEqual(parse_jobs_in_path("total 1 job in path"), 1)
 
 
 if __name__ == "__main__":

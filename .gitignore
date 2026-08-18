@@ -7,6 +7,6 @@ dist/
 .venv/
 venv/
 
-# 本地執行產物
+# local run artifacts
 arcx_runs/
 *.state.json

@@ -1,14 +1,14 @@
-"""CLI 進入點。
+"""CLI entry point.
 
-Phase 0 (監控) + Phase 2a (分波計畫) 的所有指令都是**唯讀**的:
-不寫入任何 run folder, 不提交任何 job。目的是先驗證系統對
-marker / log / dir_map / special.cfg 的理解是否正確。
+Commands and what they do:
 
-    arcx-auto status  --run-folder <path>...      掃描 index run folder
-    arcx-auto status  --wave-dir <path>           掃描整個 wave 目錄
-    arcx-auto plan    --dir-map <file> --index .. 產生分波計畫 (不執行)
-    arcx-auto inspect dir-map <file>              解析 dir_map
-    arcx-auto inspect index <path>...             解析 special.cfg + 數 GDS
+    arcx-auto status     scan run folders and report case states
+    arcx-auto plan       produce a wave plan (computes only, never submits)
+    arcx-auto submit     check -> create wave dirs -> submit (dry run by default)
+    arcx-auto daemon     keep monitoring and write state for the web UI
+    arcx-auto web        serve the local read-only dashboard
+    arcx-auto check-cfg  validate arcx.cfg before submitting
+    arcx-auto inspect    parse dir_map / special.cfg to verify assumptions
 """
 
 from __future__ import annotations
@@ -46,117 +46,133 @@ from arcx_auto.services.wave_planner import plan_waves
 
 
 # --------------------------------------------------------------------------
-# 參數
+# Argument parsing
 # --------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="arcx-auto",
-        description="Arcx RC extraction 自動化監控與分波工具 (Phase 0 + 2a, 唯讀)",
+        description="Arcx RC extraction monitoring, planning and submission",
     )
     parser.add_argument("--version", action="version", version=__version__)
-    parser.add_argument("-c", "--config", help="設定檔路徑 (.yaml 或 .json)")
+    parser.add_argument("-c", "--config", help="settings file (.yaml or .json)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # -- status --------------------------------------------------------
-    status = sub.add_parser("status", help="掃描 run folder 並顯示 case 狀態")
+    status = sub.add_parser("status", help="scan run folders and show states")
     target = status.add_mutually_exclusive_group(required=True)
     target.add_argument("--run-folder", action="append", default=[],
-                        help="index run folder (可重複指定)")
+                        help="index run folder (repeatable)")
     target.add_argument("--wave-dir",
-                        help="wave 目錄, 會自動掃描底下所有 index run folder")
+                        help="wave directory; every index run folder under it")
     status.add_argument("--state-file",
-                        help="狀態快取檔。提供後 stall 偵測才能跨次呼叫累積計時")
+                        help="state cache file; needed for stall timing to "
+                             "accumulate across invocations")
     status.add_argument("--watch", type=float, metavar="SEC",
-                        help="每 SEC 秒重新掃描一次 (Ctrl-C 結束)")
-    status.add_argument("--detail", action="store_true", help="列出每個 case")
-    status.add_argument("--json", action="store_true", help="輸出 JSON")
+                        help="rescan every SEC seconds (Ctrl-C to stop)")
+    status.add_argument("--detail", action="store_true", help="list every case")
+    status.add_argument("--json", action="store_true", help="output JSON")
     status.add_argument("--no-lsf", action="store_true",
-                        help="不查詢 LSF (離線測試用)")
+                        help="do not query LSF (for offline use)")
     status.add_argument("--arcx-cfg",
-                        help="arcx.cfg 路徑。QA 需要它才知道該檢查哪些產出物; "
-                             "未指定時會在 wave 目錄下自動尋找")
+                        help="path to arcx.cfg; QA needs it to know which "
+                             "artifacts to check. Found automatically in the "
+                             "wave directory when omitted")
     status.add_argument("--no-qa", action="store_true",
-                        help="只做觀測, 不跑 QA 檢查")
+                        help="observe only, run no QA checks")
     status.add_argument("--issues", action="store_true",
-                        help="列出所有 QA issue")
+                        help="list every QA issue")
 
     # -- plan ----------------------------------------------------------
-    plan = sub.add_parser("plan", help="產生分波計畫 (不建立任何目錄、不提交)")
-    plan.add_argument("--dir-map", required=True, help="dir_map 檔案路徑")
+    plan = sub.add_parser("plan", help="produce a wave plan (never submits)")
+    plan.add_argument("--dir-map", required=True, help="path to dir_map")
     plan.add_argument("--index", nargs="+", default=[],
-                      help="要執行的 index (可多選)")
-    plan.add_argument("--all", action="store_true", help="使用 dir_map 內全部 index")
+                      help="indices to run (repeatable)")
+    plan.add_argument("--all", action="store_true",
+                      help="use every index in dir_map")
     plan.add_argument("--arcx-cfg", default="arcx.cfg",
-                      help="arcx.cfg 路徑 (只用於顯示指令)")
-    plan.add_argument("--max-slots", type=int, help="單波 slot 上限")
+                      help="path to arcx.cfg (only used to show the command)")
+    plan.add_argument("--max-slots", type=int, help="slot cap per wave")
     plan.add_argument("--mode", choices=["auto", "off"], default="auto",
-                      help="auto=自動分波, off=不分波全部一次送出")
+                      help="auto splits into waves; off submits everything at once")
     plan.add_argument("--show-command", action="store_true",
-                      help="顯示每個 wave 會執行的 Arcx 指令")
-    plan.add_argument("--json", action="store_true", help="輸出 JSON")
+                      help="show the Arcx command each wave would run")
+    plan.add_argument("--json", action="store_true", help="output JSON")
 
     # -- submit --------------------------------------------------------
     submit = sub.add_parser(
-        "submit", help="檢查 -> 建立 wave 目錄 -> 逐波提交 (預設為 dry-run)")
+        "submit",
+        help="check -> create wave dirs -> submit wave by wave (dry run by default)")
     submit.add_argument("--dir-map", required=True)
     submit.add_argument("--arcx-cfg", required=True)
     submit.add_argument("--index", nargs="+", default=[],
-                        help="要執行的 index (可多選)")
+                        help="indices to run (repeatable)")
     submit.add_argument("--all", action="store_true",
-                        help="使用 dir_map 內全部 index")
-    submit.add_argument("--max-slots", type=int, help="單波 slot 上限")
+                        help="use every index in dir_map")
+    submit.add_argument("--max-slots", type=int, help="slot cap per wave")
     submit.add_argument("--mode", choices=["auto", "off"], default="auto")
-    submit.add_argument("--run-id", help="這次提交的名稱 (預設由時間產生)")
-    submit.add_argument("--run-root", help="wave 目錄的根 (預設取自設定)")
+    submit.add_argument("--run-id", help="name for this submission "
+                        "(defaults to a timestamp)")
+    submit.add_argument("--run-root", help="root for wave directories "
+                        "(defaults to settings)")
     submit.add_argument("--max-waves", type=int,
-                        help="最多送出幾個 wave (預設全部)")
+                        help="submit at most this many waves (default: all)")
     submit.add_argument("--no-wait", action="store_true",
-                        help="閘門擋住時直接結束, 不等待")
+                        help="stop instead of waiting when the gate blocks")
     submit.add_argument(
         "--yes", action="store_true",
-        help="真的執行。**不加這個參數就是 dry-run** —— 只檢查與顯示指令, "
-             "不建立任何目錄、不提交任何 job")
+        help="actually do it. **Without this flag it is a dry run** that only "
+             "checks and prints the commands, creating nothing and "
+             "submitting nothing")
 
     # -- daemon --------------------------------------------------------
     daemon = sub.add_parser(
-        "daemon", help="持續監控並把狀態寫進 state root (供 Web UI 讀取)")
-    daemon.add_argument("--run-id", help="這次監控的名稱 (預設由時間產生)")
+        "daemon",
+        help="keep monitoring and write state for the web UI to read")
+    daemon.add_argument("--run-id", help="name for this monitoring session "
+                        "(defaults to a timestamp)")
     daemon.add_argument("--wave-dir", action="append", default=[],
-                        help="要監控的 wave 目錄 (可重複)")
+                        help="wave directory to monitor (repeatable)")
     daemon.add_argument("--run-folder", action="append", default=[],
-                        help="要監控的 index run folder (可重複)")
+                        help="index run folder to monitor (repeatable)")
     daemon.add_argument("--arcx-cfg",
-                        help="arcx.cfg 路徑 (預設在 wave 目錄下自動尋找)")
+                        help="path to arcx.cfg (found in the wave dir by default)")
     daemon.add_argument("--interval", type=float,
-                        help="固定掃描間隔 (秒)。預設依是否有 case 在跑分層調整")
-    daemon.add_argument("--once", action="store_true", help="只掃一次就結束")
-    daemon.add_argument("--no-lsf", action="store_true", help="不查詢 LSF")
+                        help="fixed scan interval in seconds; by default it "
+                             "adapts to whether cases are running")
+    daemon.add_argument("--once", action="store_true", help="scan once and exit")
+    daemon.add_argument("--no-lsf", action="store_true", help="do not query LSF")
 
     # -- web -----------------------------------------------------------
-    web = sub.add_parser("web", help="啟動本機 Web UI (唯讀, 只綁 127.0.0.1)")
+    web = sub.add_parser("web",
+                         help="serve the local web UI (read only, 127.0.0.1)")
     web.add_argument("--host", default="127.0.0.1",
-                     help="預設只聽 loopback。改成別的位址等於對外開放服務。")
+                     help="loopback only by default; any other address "
+                          "publishes this as a service")
     web.add_argument("--port", type=int, default=8765)
     web.add_argument("--refresh", type=int, default=30,
-                     help="頁面自動刷新間隔 (秒), 0 為關閉")
+                     help="page auto-refresh in seconds, 0 to disable")
 
     # -- check-cfg -----------------------------------------------------
     check = sub.add_parser("check-cfg",
-                           help="提交前檢查 arcx.cfg (PRE 檢查, 不需要 run folder)")
-    check.add_argument("path", help="arcx.cfg 路徑")
+                           help="validate arcx.cfg before submitting "
+                                "(no run folder needed)")
+    check.add_argument("path", help="path to arcx.cfg")
     check.add_argument("--json", action="store_true")
 
     # -- inspect -------------------------------------------------------
-    inspect = sub.add_parser("inspect", help="解析輸入檔案 (驗證格式理解是否正確)")
+    inspect = sub.add_parser("inspect",
+                             help="parse input files to verify our assumptions")
     inspect_sub = inspect.add_subparsers(dest="subject", required=True)
 
-    dm = inspect_sub.add_parser("dir-map", help="解析 dir_map")
+    dm = inspect_sub.add_parser("dir-map", help="parse dir_map")
     dm.add_argument("path")
-    dm.add_argument("--verify", action="store_true", help="檢查每個 path 是否存在")
+    dm.add_argument("--verify", action="store_true",
+                    help="check that each path exists")
     dm.add_argument("--json", action="store_true")
 
-    idx = inspect_sub.add_parser("index", help="解析 index path 的 special.cfg 與 GDS")
+    idx = inspect_sub.add_parser("index",
+                                 help="parse an index path: special.cfg and GDS")
     idx.add_argument("path", nargs="+")
     idx.add_argument("--json", action="store_true")
 
@@ -210,7 +226,7 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
         else:
             if interval:
                 print("\n" + "=" * 72)
-                print("掃描時間: %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
+                print("scanned at %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
             print(render.render_status(
                 snapshots, now=time.time(), detail=args.detail,
                 lsf_note=lsf_note, observations=observations,
@@ -222,7 +238,7 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _scan_once(args, settings, fs, collector, store):
-    """一次掃描。業務邏輯全在 MonitorService 裡, 這裡只負責前後的 I/O。"""
+    """One scan. The logic lives in MonitorService; this only does the I/O."""
     monitor = MonitorService(
         settings=settings, collector=collector, enable_qa=not args.no_qa)
     if store:
@@ -236,7 +252,7 @@ def _scan_once(args, settings, fs, collector, store):
     )
 
     if args.wave_dir and not result.observations:
-        print("  (wave 目錄底下沒有找到任何 index run folder: %s)"
+        print("  (no index run folder found under the wave directory: %s)"
               % args.wave_dir, file=sys.stderr)
 
     if store:
@@ -247,11 +263,12 @@ def _scan_once(args, settings, fs, collector, store):
 
 
 def _load_arcx_cfg(args, settings: Settings) -> Optional[ArcxConfig]:
-    """找出 arcx.cfg。
+    """Locate arcx.cfg.
 
-    優先順序: --arcx-cfg > <wave_dir>/arcx.cfg > <run_folder>/../arcx.cfg
-    找不到不是錯誤 —— QA 會產生 CFG_EXPECTATION_UNAVAILABLE 這個
-    UNKNOWN issue, 明確說「我不知道該檢查什麼」而不是默默放行。
+    Order: --arcx-cfg > <wave_dir>/arcx.cfg > <run_folder>/../arcx.cfg
+    Not finding one is not an error: QA raises CFG_EXPECTATION_UNAVAILABLE,
+    an UNKNOWN issue that says "I do not know what to check" instead of
+    quietly passing.
     """
     candidates: List[str] = []
     if getattr(args, "arcx_cfg", None):
@@ -289,7 +306,7 @@ def cmd_plan(args: argparse.Namespace, settings: Settings) -> int:
         index_keys = list(args.index)
 
     if not index_keys:
-        print("錯誤: 請用 --index 指定 index, 或用 --all 選取全部", file=sys.stderr)
+        print("error: name indices with --index, or use --all", file=sys.stderr)
         return 2
 
     specs: List[IndexSpec] = []
@@ -298,7 +315,7 @@ def cmd_plan(args: argparse.Namespace, settings: Settings) -> int:
         if path is None:
             specs.append(IndexSpec(
                 index_key=key, path="", gds_count=0, cpu_per_case=0,
-                error="dir_map 內找不到這個 index",
+                error="index not found in dir_map",
             ))
             continue
         specs.append(arcx.build_index_spec(key, path))
@@ -330,8 +347,8 @@ def cmd_plan(args: argparse.Namespace, settings: Settings) -> int:
 # --------------------------------------------------------------------------
 
 def cmd_submit(args: argparse.Namespace, settings: Settings) -> int:
-    """提交流程。**預設是 dry-run** —— 這是系統第一個會寫入磁碟的指令,
-    所以要求使用者明確加 --yes 才會動手。
+    """The submission flow. **A dry run by default** -- this is the first
+    command in the system that writes to disk, so it takes an explicit --yes.
     """
     arcx = ArcxAdapter(settings.layout, settings.plan)
     dir_map = arcx.parse_dir_map(args.dir_map)
@@ -340,7 +357,7 @@ def cmd_submit(args: argparse.Namespace, settings: Settings) -> int:
 
     index_keys = dir_map.keys_sorted() if args.all else list(args.index)
     if not index_keys:
-        print("錯誤: 請用 --index 指定 index, 或用 --all 選取全部", file=sys.stderr)
+        print("error: name indices with --index, or use --all", file=sys.stderr)
         return 2
 
     specs = []
@@ -349,7 +366,7 @@ def cmd_submit(args: argparse.Namespace, settings: Settings) -> int:
         if path is None:
             specs.append(IndexSpec(index_key=key, path="", gds_count=0,
                                    cpu_per_case=0,
-                                   error="dir_map 內找不到這個 index"))
+                                   error="index not found in dir_map"))
         else:
             specs.append(arcx.build_index_spec(key, path))
 
@@ -395,7 +412,8 @@ def cmd_submit(args: argparse.Namespace, settings: Settings) -> int:
 
 def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
     if not args.wave_dir and not args.run_folder:
-        print("錯誤: 至少要指定一個 --wave-dir 或 --run-folder", file=sys.stderr)
+        print("error: give at least one --wave-dir or --run-folder",
+              file=sys.stderr)
         return 2
 
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
@@ -410,9 +428,9 @@ def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
         once=args.once,
     )
     daemon = Daemon(options, settings=settings)
-    print("監控中 run_id=%s  state=%s" % (run_id, daemon.store.dir))
+    print("monitoring run_id=%s  state=%s" % (run_id, daemon.store.dir))
     if not args.once:
-        print("Web UI: arcx-auto web    (Ctrl-C 停止 daemon)")
+        print("web UI: arcx-auto web    (Ctrl-C stops the daemon)")
     return daemon.run()
 
 
@@ -427,9 +445,10 @@ def cmd_web(args: argparse.Namespace, settings: Settings) -> int:
     print("Web UI: %s" % url)
     print("state root: %s" % options.state_root)
     if options.host not in ("127.0.0.1", "localhost", "::1"):
-        print("  ! 注意: 綁在 %s 等於對外開放這個服務。" % options.host,
+        print("  ! note: binding to %s publishes this service to others."
+              % options.host,
               file=sys.stderr)
-    print("Ctrl-C 結束。")
+    print("Ctrl-C to stop.")
     try:
         serve(options)
     except KeyboardInterrupt:
@@ -442,9 +461,9 @@ def cmd_web(args: argparse.Namespace, settings: Settings) -> int:
 # --------------------------------------------------------------------------
 
 def cmd_check_cfg(args: argparse.Namespace, settings: Settings) -> int:
-    """提交前的 arcx.cfg 檢查。
+    """Validate arcx.cfg before submitting.
 
-    有 FATAL 時回傳 exit code 1 —— 這樣可以直接串進提交前的 script。
+    Exits 1 when there is a FATAL, so it can be chained into a submit script.
     """
     config = parse_arcx_cfg(args.path)
     result = QaRunner(settings).run_config(config)
@@ -510,10 +529,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         settings, warnings = load_settings(args.config)
     except (FileNotFoundError, RuntimeError) as exc:
-        print("設定載入失敗: %s" % exc, file=sys.stderr)
+        print("failed to load settings: %s" % exc, file=sys.stderr)
         return 2
     for warning in warnings:
-        print("  ! 設定: %s" % warning, file=sys.stderr)
+        print("  ! settings: %s" % warning, file=sys.stderr)
 
     handlers = {
         "status": cmd_status,
@@ -528,7 +547,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         return handler(args, settings)
     except KeyboardInterrupt:
-        print("\n中斷。", file=sys.stderr)
+        print("\ninterrupted.", file=sys.stderr)
         return 130
 
 

@@ -1,11 +1,12 @@
-"""把 preflight → workspace → launch → gate 串成一次完整的提交。
+"""Wire preflight -> workspace -> launch -> gate into one submission.
 
-這是 Phase 2b 的編排層。它是系統中**第一個會寫入磁碟的流程**, 所以
-每一步都遵守同一套規則:
+This is the orchestration layer and the **first flow in the system that
+writes to disk**, so every step follows the same rules:
 
-  * 有 FATAL 就完全不動手 —— 不留半成品
-  * 每一個寫入型動作都寫進 audit
-  * dry-run 走完全部決策但不碰磁碟, 讓人先看到會發生什麼
+  * any FATAL means nothing is touched at all -- no half-built state
+  * every write action is recorded in the audit log
+  * a dry run makes every decision but touches no disk, so what would
+    happen can be seen first
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from arcx_auto.services.workspace import WaveWorkspace, WorkspaceBuilder, Worksp
 
 @dataclass
 class SubmitOutcome:
-    """一次提交的結果。"""
+    """The result of one submission."""
 
     run_id: str
     run_dir: str
@@ -54,7 +55,7 @@ class SubmitOutcome:
 
 
 class Submitter:
-    """執行一次提交。"""
+    """Runs one submission."""
 
     def __init__(
         self,
@@ -82,8 +83,9 @@ class Submitter:
         run_root: Optional[str] = None,
         now: Optional[float] = None,
     ) -> SubmitOutcome:
-        """只跑檢查, 不碰磁碟。dry-run 與正式提交共用同一條檢查路徑 ——
-        兩條路徑會走歪, 而走歪的那次就是出事的那次。
+        """Checks only, no disk access. A dry run and a real submission
+        share one checking path -- two paths would drift, and the drifted
+        one that bites.
         """
         now = now if now is not None else time.time()
         config = parse_arcx_cfg(arcx_cfg) if arcx_cfg else None
@@ -110,7 +112,7 @@ class Submitter:
         on_progress: Optional[Callable[[str], None]] = None,
         now: Optional[float] = None,
     ) -> SubmitOutcome:
-        """完整流程。"""
+        """The full flow."""
         now = now if now is not None else time.time()
         run_root = os.path.abspath(os.path.expanduser(run_root))
         run_dir = os.path.join(run_root, run_id)
@@ -125,7 +127,7 @@ class Submitter:
         store = RunStore(self.settings.expanded_state_root(), run_id)
         store.ensure()
 
-        # --- 建立 workspace ------------------------------------------
+        # --- Build the workspaces ------------------------------------
         if dry_run:
             outcome.workspaces = []
         else:
@@ -142,11 +144,12 @@ class Submitter:
                 "action": "workspace_built",
                 "run_id": run_id,
                 "waves": [w.wave_name for w in outcome.workspaces],
-                "reason": "使用者提交",
+                "reason": "user submission",
             })
-            say("已建立 %d 個 wave 目錄於 %s" % (len(outcome.workspaces), run_dir))
+            say("created %d wave director(ies) under %s"
+                % (len(outcome.workspaces), run_dir))
 
-        # --- 逐波提交 -------------------------------------------------
+        # --- Submit wave by wave --------------------------------------
         controller = SubmissionController(
             [w.name for w in plan.waves], self.settings.gate)
         workspaces = {w.wave_name: w for w in outcome.workspaces}
@@ -163,12 +166,13 @@ class Submitter:
 
             if not decision.allow:
                 if dry_run:
-                    # 預覽絕不真的等待 —— dry-run 的目的就是一次看完所有 wave
-                    # 會執行什麼。照實印出閘門的判斷, 然後當作放行繼續往下走。
-                    say("%s 實際執行時會等待: %s"
+                    # A preview never actually waits: the point of a dry run
+                    # is to see every wave in one go. Print the gate decision
+                    # and carry on as if released.
+                    say("%s would wait here: %s"
                         % (wave.wave_name, decision.reason))
                 else:
-                    say("%s 等待中: %s" % (wave.wave_name, decision.reason))
+                    say("%s waiting: %s" % (wave.wave_name, decision.reason))
                     if not wait_for_gate:
                         break
                     self.sleep(max(1.0, decision.wait_hint_sec))
@@ -190,7 +194,8 @@ class Submitter:
             if result.ok:
                 controller.mark_submitted(wave.wave_name, result.job_id)
             else:
-                controller.mark_failed(wave.wave_name, result.error or "提交失敗")
+                controller.mark_failed(
+                    wave.wave_name, result.error or "submission failed")
                 outcome.error = result.error
                 break
             done += 1
@@ -207,8 +212,8 @@ class Submitter:
         if workspace is None:
             if not dry_run:
                 return LaunchResult(wave_name=wave_name, ok=False,
-                                    error="找不到 workspace")
-            # dry-run: 用假的 workspace 只為了組出指令給人看
+                                    error="no workspace found")
+            # dry run: a stand-in workspace, only to assemble the command
             workspace = _preview_workspace(wave_name, plan, run_id, self.settings)
 
         result = self.launcher.launch(workspace, run_id, dry_run=dry_run)
@@ -222,11 +227,12 @@ class Submitter:
             "wave": wave_name,
             "job_id": result.job_id,
             "command": list(result.command),
-            "reason": "使用者提交",
+            "reason": "user submission",
             "error": result.error,
         })
-        say("%s 已提交, job id = %s" % (wave_name, result.job_id or "?")
-            if result.ok else "%s 提交失敗: %s" % (wave_name, result.error))
+        say("%s submitted, job id = %s" % (wave_name, result.job_id or "?")
+            if result.ok else "%s submission failed: %s"
+            % (wave_name, result.error))
         return result
 
     def _njobs(self) -> Optional[int]:
@@ -236,7 +242,7 @@ class Submitter:
     def _write_submission_state(self, store: RunStore, run_id: str, run_dir: str,
                                 controller: SubmissionController,
                                 outcome: SubmitOutcome) -> None:
-        """把提交進度寫進 run store, 讓 Web UI 與 daemon 看得到。"""
+        """Write submission progress into the run store for UI and daemon."""
         if outcome.dry_run:
             return
         state = store.read_state()
@@ -252,7 +258,7 @@ class Submitter:
 
 def _preview_workspace(wave_name: str, plan: WavePlan, run_id: str,
                        settings: Settings) -> WaveWorkspace:
-    """dry-run 用的假 workspace —— 只是為了把指令組出來給人看。"""
+    """A stand-in workspace for a dry run, only to assemble the command."""
     wave = next((w for w in plan.waves if w.name == wave_name), None)
     keys = wave.index_keys if wave else ()
     base = os.path.join(settings.expanded_run_root(), run_id, wave_name)

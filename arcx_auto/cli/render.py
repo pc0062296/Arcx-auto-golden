@@ -1,4 +1,4 @@
-"""終端輸出渲染。純函數: 資料 -> 字串。"""
+"""Terminal rendering. Pure functions: data in, string out."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from arcx_auto.util.textfmt import (
     render_table,
 )
 
-# 狀態顯示順序: 需要注意的排前面, 讓人一眼看到問題
+# Display order: things needing attention first, so problems stand out
 _STATE_ORDER = [
     CaseState.FAILED,
     CaseState.LOST,
@@ -45,12 +45,13 @@ def render_status(
     qa_reports: Optional[Sequence[object]] = None,
     show_issues: bool = False,
 ) -> str:
-    """狀態總覽。"""
+    """The status overview."""
     lines: List[str] = []
 
     if lsf_note:
-        lines.append("  ! LSF 資料不可用: %s" % lsf_note)
-        lines.append("    -> LOST / SUSPENDED 判定已停用, 只依 marker 與 log 判斷。")
+        lines.append("  ! LSF data unavailable: %s" % lsf_note)
+        lines.append("    -> LOST / SUSPENDED detection is disabled; "
+                     "only markers and logs are used.")
         lines.append("")
 
     totals: Dict[str, int] = {}
@@ -58,11 +59,11 @@ def render_status(
         for state, count in snapshot.count_by_state().items():
             totals[state] = totals.get(state, 0) + count
 
-    lines.append("== 總覽 ==")
+    lines.append("== overview ==")
     lines.append(_render_state_summary(totals))
     lines.append("")
 
-    lines.append("== 各 index run folder ==")
+    lines.append("== index run folders ==")
     rows = []
     for snapshot in snapshots:
         counts = snapshot.count_by_state()
@@ -78,7 +79,7 @@ def render_status(
             snapshot.error or "",
         ])
     lines.append(render_table(
-        ["index", "cases", "完成", "執行中", "排隊", "需注意", "備註"],
+        ["index", "cases", "done", "running", "queued", "attention", "note"],
         rows,
         aligns=["left", "right", "right", "right", "right", "right", "left"],
     ))
@@ -97,9 +98,9 @@ def render_status(
             ])
     if attention_rows:
         lines.append("")
-        lines.append("== 需要注意的 case (%d) ==" % len(attention_rows))
+        lines.append("== cases needing attention (%d) ==" % len(attention_rows))
         lines.append(render_table(
-            ["index", "case", "狀態", "停留", "log 靜止", "原因"],
+            ["index", "case", "state", "in state", "log quiet", "reason"],
             attention_rows,
         ))
 
@@ -131,15 +132,16 @@ def render_status(
                     _completeness_label(completeness),
                 ])
             lines.append(render_table(
-                ["case", "狀態", "LSF", "job id", "log 大小", "靜止", "rerun 判定"],
+                ["case", "state", "LSF", "job id", "log size", "quiet",
+                 "rerun verdict"],
                 rows,
                 aligns=["left", "left", "left", "right", "right", "right", "left"],
             ))
     return "\n".join(lines)
 
 
-#: 嚴重度顯示順序與標記。UNKNOWN 刻意排在 WARN 之上 ——
-#: 「檢查不了」比「有小問題」更需要人來看。
+#: Severity display order and markers. UNKNOWN sits above WARN on purpose:
+#: "could not check" needs a human more than "a minor problem" does.
 _SEVERITY_ORDER = [Severity.FATAL, Severity.UNKNOWN, Severity.WARN, Severity.INFO]
 _SEVERITY_MARK = {
     Severity.FATAL: "!!",
@@ -150,11 +152,12 @@ _SEVERITY_MARK = {
 
 
 def _render_qa_issues(reports: Sequence[object], show_all: bool = False) -> str:
-    """QA 發現的問題。
+    """Problems QA found.
 
-    預設只列 FATAL / UNKNOWN (需要人處理的); --issues 才列全部。
-    同 id 的 issue 會被聚合 —— 200 個 case 犯同一個錯時, 工程師需要看到的是
-    「NETLIST_MISSING x 200」而不是 200 行一樣的訊息。
+    By default only FATAL and UNKNOWN are listed, the ones needing action;
+    --issues lists everything. Issues sharing an id are grouped: when 200
+    cases hit the same problem an engineer needs "NETLIST_MISSING x 200",
+    not 200 identical lines.
     """
     issues: List[Issue] = []
     for report in reports:
@@ -194,11 +197,11 @@ def _render_qa_issues(reports: Sequence[object], show_all: bool = False) -> str:
         ])
 
     total = sum(len(g) for g in grouped.values())
-    header = "== QA 問題 (%d) ==" % total
+    header = "== QA issues (%d) ==" % total
     if not show_all:
-        header += "   (只顯示 FATAL/UNKNOWN, 加 --issues 看全部)"
+        header += "   (FATAL/UNKNOWN only; add --issues for all)"
     return header + "\n" + render_table(
-        ["嚴重度", "issue id", "數量", "說明", "對象"],
+        ["severity", "issue id", "count", "description", "targets"],
         rows,
         aligns=["left", "left", "right", "left", "left"],
         max_col_width=44,
@@ -206,80 +209,84 @@ def _render_qa_issues(reports: Sequence[object], show_all: bool = False) -> str:
 
 
 def _render_scan_issues(observations: Sequence["IndexRunObservation"]) -> str:
-    """顯示掃描時無法歸類的東西。
+    """Things the scan could not classify.
 
-    這兩類是「Arcx 的檔案慣例變了」或「有 case 我們監控不到」的早期訊號,
-    靜默忽略的話, 系統會在自己已經瞎掉的情況下回報一切正常。
+    These two are the early signal that Arcx file conventions changed, or that
+    a case cannot be monitored at all. Ignoring them silently would let the
+    system report all-clear while it is partly blind.
     """
     rows = []
     for obs in observations:
         for name, case_id in obs.unknown_markers:
             rows.append([
-                obs.index_key, "!! 未知 marker", name,
-                "已知只有 queue/run/complete; case=%s 需人工確認" % case_id,
+                obs.index_key, "!! unknown marker", name,
+                "only queue/run/complete are known; case=%s needs a look"
+                % case_id,
             ])
         for name in obs.unresolved_logs:
             rows.append([
-                obs.index_key, "log 無法對應到 case", name,
-                "找不到或無法解析對應的 cmd_file",
+                obs.index_key, "log unmapped to a case", name,
+                "its cmd_file is missing or unparseable",
             ])
         for name in obs.unmatched_entries:
-            rows.append([obs.index_key, "無法歸類的檔案", name, "不符合任何已知慣例"])
+            rows.append([obs.index_key, "unclassified file", name,
+                         "matches no known convention"])
     if not rows:
         return ""
-    return "== 掃描異常 (%d) ==\n" % len(rows) + render_table(
-        ["index", "類型", "名稱", "說明"], rows, max_col_width=50
+    return "== scan anomalies (%d) ==\n" % len(rows) + render_table(
+        ["index", "kind", "name", "description"], rows, max_col_width=50
     )
 
 
 def _render_state_summary(totals: Dict[str, int]) -> str:
     if not totals:
-        return "  (沒有觀測到任何 case)"
+        return "  (no cases observed)"
     rows = []
     for state in _STATE_ORDER:
         count = totals.get(state.value, 0)
         if count:
             rows.append([state.value, str(count),
-                         "需注意" if state.needs_attention else ""])
+                         "attention" if state.needs_attention else ""])
     for state_name, count in sorted(totals.items()):
         if state_name not in {s.value for s in _STATE_ORDER}:
             rows.append([state_name, str(count), ""])
-    return render_table(["狀態", "數量", ""], rows, aligns=["left", "right", "left"])
+    return render_table(["state", "count", ""], rows,
+                        aligns=["left", "right", "left"])
 
 
 def _completeness_label(completeness: Completeness) -> str:
     return {
-        Completeness.COMPLETE: "保留",
-        Completeness.INCOMPLETE: "刪除重跑",
-        Completeness.UNKNOWN: "刪除重跑 (存疑)",
+        Completeness.COMPLETE: "keep",
+        Completeness.INCOMPLETE: "delete and rerun",
+        Completeness.UNKNOWN: "delete and rerun (uncertain)",
     }[completeness]
 
 
 def _case_sort(case_id: str):
-    """case id 是 cell 名稱, 用自然排序避免 NDIO_10 排在 NDIO_2 前面。"""
+    """Case ids are cell names; natural sort keeps NDIO_2 before NDIO_10."""
     from arcx_auto.adapters.fs import natural_key
     return natural_key(case_id)
 
 
 # --------------------------------------------------------------------------
-# 分波計畫
+# Wave plan
 # --------------------------------------------------------------------------
 
 def render_plan(plan: WavePlan, show_command: bool = False,
                 commands: Optional[Dict[str, str]] = None) -> str:
     lines: List[str] = []
-    lines.append("== 分波計畫 ==")
-    lines.append("  模式          : %s" % plan.mode.value)
-    lines.append("  單波 slot 上限: %d" % plan.max_slots_per_wave)
-    lines.append("  wave 數       : %d" % len(plan.waves))
-    lines.append("  index 總數    : %d" % sum(len(w.indices) for w in plan.waves))
-    lines.append("  case 總數     : %d" % plan.total_cases)
-    lines.append("  slot 總數     : %d" % plan.total_slots)
+    lines.append("== wave plan ==")
+    lines.append("  mode          : %s" % plan.mode.value)
+    lines.append("  slots per wave: %d" % plan.max_slots_per_wave)
+    lines.append("  waves         : %d" % len(plan.waves))
+    lines.append("  indices       : %d" % sum(len(w.indices) for w in plan.waves))
+    lines.append("  cases         : %d" % plan.total_cases)
+    lines.append("  slots         : %d" % plan.total_slots)
     lines.append("")
 
     rows = []
     for wave in plan.waves:
-        over = " ⚠ 超量" if wave.total_slots > plan.max_slots_per_wave else ""
+        over = " (over cap)" if wave.total_slots > plan.max_slots_per_wave else ""
         rows.append([
             wave.name,
             str(len(wave.indices)),
@@ -288,13 +295,13 @@ def render_plan(plan: WavePlan, show_command: bool = False,
             ", ".join(wave.index_keys),
         ])
     lines.append(render_table(
-        ["wave", "index 數", "case 數", "slots", "index"],
+        ["wave", "indices", "cases", "slots", "index"],
         rows,
         aligns=["left", "right", "right", "right", "left"],
     ))
 
     lines.append("")
-    lines.append("== 各 index 明細 ==")
+    lines.append("== index detail ==")
     detail_rows = []
     for wave in plan.waves:
         for spec in wave.indices:
@@ -308,7 +315,7 @@ def render_plan(plan: WavePlan, show_command: bool = False,
                 spec.path,
             ])
     lines.append(render_table(
-        ["wave", "index", "GDS", "cpu/case", "slots", "關鍵字", "path"],
+        ["wave", "index", "GDS", "cpu/case", "slots", "keywords", "path"],
         detail_rows,
         aligns=["left", "left", "right", "right", "right", "left", "left"],
         max_col_width=70,
@@ -316,22 +323,23 @@ def render_plan(plan: WavePlan, show_command: bool = False,
 
     if plan.excluded:
         lines.append("")
-        lines.append("== 被排除的 index (%d) ==" % len(plan.excluded))
+        lines.append("== excluded indices (%d) ==" % len(plan.excluded))
         lines.append(render_table(
-            ["index", "原因", "path"],
-            [[s.index_key, s.error or "資料不完整", s.path] for s in plan.excluded],
+            ["index", "reason", "path"],
+            [[s.index_key, s.error or "incomplete data", s.path]
+             for s in plan.excluded],
             max_col_width=70,
         ))
 
     if plan.warnings:
         lines.append("")
-        lines.append("== 警告 (%d) ==" % len(plan.warnings))
+        lines.append("== warnings (%d) ==" % len(plan.warnings))
         for warning in plan.warnings:
             lines.append("  ! %s" % warning)
 
     if show_command and commands:
         lines.append("")
-        lines.append("== 各 wave 會執行的指令 (dry-run, 未實際執行) ==")
+        lines.append("== commands each wave would run (dry-run, not executed) ==")
         for wave in plan.waves:
             lines.append("  %s:" % wave.name)
             lines.append("    cwd: <run_root>/<run_id>/%s" % wave.name)
@@ -345,16 +353,16 @@ def render_plan(plan: WavePlan, show_command: bool = False,
 # --------------------------------------------------------------------------
 
 def render_submit(outcome, dry_run: bool = False) -> str:
-    """提交結果報告。"""
+    """The submission report."""
     lines: List[str] = []
 
-    for label, result in (("arcx.cfg 檢查", outcome.cfg_check),
-                          ("提交前檢查", outcome.preflight)):
+    for label, result in (("arcx.cfg checks", outcome.cfg_check),
+                          ("pre-submission checks", outcome.preflight)):
         if result is None:
             continue
         lines.append("== %s ==" % label)
         if not result.issues:
-            lines.append("  ✓ 全部通過")
+            lines.append("  OK  all checks passed")
         else:
             rows = []
             for issue in sorted(
@@ -368,13 +376,14 @@ def render_submit(outcome, dry_run: bool = False) -> str:
                     issue.id,
                     issue.message,
                 ])
-            lines.append(render_table(["嚴重度", "issue id", "說明"], rows,
+            lines.append(render_table(
+                ["severity", "issue id", "description"], rows,
                                       max_col_width=60))
             for issue in result.issues:
                 if issue.severity != Severity.FATAL or not issue.evidence:
                     continue
                 lines.append("")
-                lines.append("  [%s] 證據:" % issue.id)
+                lines.append("  [%s] evidence:" % issue.id)
                 for key, value in sorted(issue.evidence.items()):
                     if isinstance(value, list):
                         for item in value[:10]:
@@ -384,53 +393,58 @@ def render_submit(outcome, dry_run: bool = False) -> str:
         lines.append("")
 
     if outcome.blocked:
-        lines.append("  ✗ 有 FATAL 問題, 已中止 —— 沒有建立任何目錄, 也沒有提交任何 job")
+        lines.append("  BLOCKED  FATAL problems found; nothing was created "
+                     "and no job was submitted")
         return "\n".join(lines)
 
     if outcome.error:
-        lines.append("  ✗ %s" % outcome.error)
+        lines.append("  ERROR  %s" % outcome.error)
 
-    lines.append("== 提交 ==")
+    lines.append("== submission ==")
     lines.append("  run id : %s" % outcome.run_id)
-    lines.append("  目錄   : %s" % outcome.run_dir)
-    lines.append("  模式   : %s" % ("dry-run (未實際執行)" if dry_run else "正式提交"))
+    lines.append("  directory : %s" % outcome.run_dir)
+    lines.append("  mode      : %s"
+                 % ("dry-run (nothing executed)" if dry_run else "live"))
 
     if outcome.launches:
         rows = []
         for launch in outcome.launches:
             rows.append([
                 launch.wave_name,
-                "dry-run" if launch.dry_run else ("成功" if launch.ok else "失敗"),
+                "dry-run" if launch.dry_run else ("ok" if launch.ok else "failed"),
                 launch.job_id or "-",
                 launch.error or " ".join(launch.command),
             ])
         lines.append("")
-        lines.append(render_table(["wave", "結果", "job id", "指令 / 錯誤"], rows,
+        lines.append(render_table(
+            ["wave", "result", "job id", "command / error"], rows,
                                   max_col_width=90))
 
     if outcome.pending_waves:
         lines.append("")
-        lines.append("  尚未提交的 wave (%d): %s"
+        lines.append("  waves not yet submitted (%d): %s"
                      % (len(outcome.pending_waves),
                         ", ".join(outcome.pending_waves)))
-        lines.append("  閘門會在 quota 降低或達到等待上限後放行。")
+        lines.append("  the gate releases them once the quota drops or the "
+                     "wait limit is reached.")
 
     if dry_run:
         lines.append("")
-        lines.append("  這是 dry-run。確認無誤後加上 --yes 才會實際建立目錄並提交。")
+        lines.append("  This was a dry run. Add --yes to create the "
+                     "directories and submit for real.")
     elif outcome.submitted_count:
         lines.append("")
-        lines.append("  接下來: arcx-auto daemon --run-id %s --wave-dir %s/wave_001"
+        lines.append("  next: arcx-auto daemon --run-id %s --wave-dir %s/wave_001"
                      % (outcome.run_id, outcome.run_dir))
 
     return "\n".join(lines)
 
 
 def render_cfg_check(config, result) -> str:
-    """arcx.cfg 的 PRE 檢查報告。"""
+    """The arcx.cfg PRE check report."""
     lines: List[str] = []
-    lines.append("== arcx.cfg 檢查 ==")
-    lines.append("  來源: %s" % (config.source_path if config else "-"))
+    lines.append("== arcx.cfg checks ==")
+    lines.append("  source: %s" % (config.source_path if config else "-"))
 
     if config and config.blocks:
         lines.append("")
@@ -438,20 +452,21 @@ def render_cfg_check(config, result) -> str:
         for block in config.blocks:
             rows.append([
                 block.name,
-                "啟用" if block.enabled else "停用",
-                block.flow or "(缺 QC_FLOW)",
+                "enabled" if block.enabled else "disabled",
+                block.flow or "(no QC_FLOW)",
                 block.output_dir_name or "-",
                 str(len(block.settings)),
                 ",".join(block.disabled_keys) or "-",
             ])
         lines.append(render_table(
-            ["block", "狀態", "QC_FLOW", "產出目錄", "設定數", "已停用的設定"],
+            ["block", "state", "QC_FLOW", "output dir", "settings",
+             "disabled settings"],
             rows, max_col_width=44,
         ))
 
     lines.append("")
     if result.passed and not result.issues:
-        lines.append("  ✓ 全部通過")
+        lines.append("  OK  all checks passed")
         return "\n".join(lines)
 
     rows = []
@@ -465,15 +480,15 @@ def render_cfg_check(config, result) -> str:
             issue.id,
             issue.message,
         ])
-    lines.append("== 問題 (%d) ==" % len(result.issues))
-    lines.append(render_table(["嚴重度", "issue id", "說明"], rows,
+    lines.append("== problems (%d) ==" % len(result.issues))
+    lines.append(render_table(["severity", "issue id", "description"], rows,
                               max_col_width=60))
 
     for issue in result.issues:
         if not issue.evidence:
             continue
         lines.append("")
-        lines.append("  [%s] 證據:" % issue.id)
+        lines.append("  [%s] evidence:" % issue.id)
         for key, value in sorted(issue.evidence.items()):
             if isinstance(value, list):
                 if not value:
@@ -490,7 +505,8 @@ def render_cfg_check(config, result) -> str:
 
     if result.fatal:
         lines.append("")
-        lines.append("  ✗ 有 %d 項 FATAL, 不建議提交" % len(result.fatal))
+        lines.append("  BLOCKED  %d FATAL problem(s); submitting is not "
+                     "advisable" % len(result.fatal))
     return "\n".join(lines)
 
 
@@ -499,8 +515,8 @@ def render_dir_map(dir_map: DirMap, verify: bool = False) -> str:
 
     lines: List[str] = []
     lines.append("== dir_map ==")
-    lines.append("  來源  : %s" % dir_map.source_path)
-    lines.append("  index : %d 筆" % len(dir_map.entries))
+    lines.append("  source: %s" % dir_map.source_path)
+    lines.append("  index : %d entries" % len(dir_map.entries))
     if dir_map.meta:
         lines.append("  meta  : %s" % ", ".join(
             "%s=%s" % (k, v) for k, v in sorted(dir_map.meta.items())
@@ -512,14 +528,15 @@ def render_dir_map(dir_map: DirMap, verify: bool = False) -> str:
         path = dir_map.entries[key]
         status = ""
         if verify:
-            status = "ok" if os.path.isdir(os.path.expanduser(path)) else "路徑不存在"
+            status = ("ok" if os.path.isdir(os.path.expanduser(path))
+                      else "path not found")
         rows.append([key, path, status])
-    headers = ["index", "path"] + (["檢查"] if verify else [""])
+    headers = ["index", "path"] + (["check"] if verify else [""])
     lines.append(render_table(headers, rows, max_col_width=80))
 
     if dir_map.warnings:
         lines.append("")
-        lines.append("== 警告 (%d) ==" % len(dir_map.warnings))
+        lines.append("== warnings (%d) ==" % len(dir_map.warnings))
         for warning in dir_map.warnings:
             lines.append("  ! %s" % warning)
     return "\n".join(lines)
@@ -527,7 +544,7 @@ def render_dir_map(dir_map: DirMap, verify: bool = False) -> str:
 
 def render_index_specs(specs: Sequence[IndexSpec]) -> str:
     lines: List[str] = []
-    lines.append("== index 資源需求 ==")
+    lines.append("== index resource requirements ==")
     rows = []
     for spec in specs:
         rows.append([
@@ -539,7 +556,7 @@ def render_index_specs(specs: Sequence[IndexSpec]) -> str:
             spec.error or ("; ".join(spec.warnings) if spec.warnings else "ok"),
         ])
     lines.append(render_table(
-        ["index", "GDS", "cpu/case", "slots", "關鍵字", "狀態"],
+        ["index", "GDS", "cpu/case", "slots", "keywords", "state"],
         rows,
         aligns=["left", "right", "right", "right", "left", "left"],
         max_col_width=70,

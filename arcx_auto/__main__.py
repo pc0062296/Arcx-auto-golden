@@ -1,4 +1,4 @@
-"""讓 `python -m arcx_auto` 可以直接執行。"""
+"""Allow `python -m arcx_auto`."""
 
 import sys
 

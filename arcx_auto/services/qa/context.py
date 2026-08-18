@@ -1,13 +1,14 @@
-"""QA 檢查的執行環境。
+"""The execution environment for a QA check.
 
-設計目的: 讓一條 QA function 通常只有 3~10 行。
-QA 作者不需要碰 os.path、不需要處理例外、不需要擔心重複 I/O ——
-全部由 context 負責。
+The goal is that a QA function is usually three to ten lines. Its author
+never touches os.path, never handles exceptions, and never worries about
+repeating I/O -- the context takes care of all of it.
 
-三個性質:
-  * **有快取**: 同一個 case 被十條檢查掃過, 每個目錄只真的 scandir 一次
-  * **不丟例外**: 讀不到就回 None / "" / [], 不是 crash
-  * **路徑相對化**: 所有 rel path 都相對 case run dir, 檢查裡不會出現絕對路徑
+Three properties:
+  * **cached**: ten checks over one case still scandir each directory once
+  * **never raises**: unreadable means None / "" / [], not a crash
+  * **relative paths**: every rel path is relative to the case run dir, so
+    absolute paths never appear inside a check
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from arcx_auto.services.qa.expectations import expected_artifacts, expected_flow
 
 
 class _FsCache:
-    """目錄內容與 stat 的快取。一個 index 掃描週期共用一份。"""
+    """Directory listing and stat cache, shared across one scan of an index."""
 
     def __init__(self) -> None:
         self._listing: Dict[str, List[str]] = {}
@@ -54,7 +55,7 @@ class _FsCache:
 
 
 class _BaseContext:
-    """CaseContext / IndexContext 的共用部分。"""
+    """What CaseContext and IndexContext have in common."""
 
     def __init__(self, root: str, settings: Settings, cache: _FsCache,
                  now: float) -> None:
@@ -63,10 +64,11 @@ class _BaseContext:
         self.qa: QaSettings = settings.qa
         self.now = now
         self._cache = cache
-        # 由 registry 在呼叫每條檢查前填入, 讓 fail()/warn() 能自動帶上 id
+        # Filled in by the registry before each check so that fail()/warn()
+        # can carry the right id automatically
         self._current: Dict[str, Any] = {}
 
-    # -- 檔案存取 (全部相對 root) -------------------------------------
+    # -- File access (everything relative to root) ---------------------
 
     def abspath(self, rel: str = "") -> str:
         return os.path.join(self.root, rel) if rel else self.root
@@ -90,7 +92,7 @@ class _BaseContext:
         return self._cache.listdir(self.abspath(rel))
 
     def glob(self, pattern: str, rel_dir: str = "") -> List[str]:
-        """在某個目錄下比對檔名。回傳相對 root 的路徑。"""
+        """Match filenames in a directory. Returns paths relative to root."""
         names = self._cache.listdir(self.abspath(rel_dir))
         hits = [n for n in names if fnmatch.fnmatch(n, pattern)]
         return [os.path.join(rel_dir, n) if rel_dir else n for n in sorted(hits)]
@@ -124,7 +126,7 @@ class _BaseContext:
             return text.count("\n")
         return sum(1 for line in text.splitlines() if line.startswith(prefix))
 
-    # -- 產出 Issue ---------------------------------------------------
+    # -- Producing issues ----------------------------------------------
 
     def _issue(self, severity: Severity, message: str,
                evidence: Optional[Dict[str, Any]] = None) -> Issue:
@@ -153,17 +155,17 @@ class _BaseContext:
 
     def unknown(self, message: str,
                 evidence: Optional[Dict[str, Any]] = None) -> Issue:
-        """「我檢查不了」。絕不能用 pass 代替 —— 見 Severity.UNKNOWN 的說明。"""
+        """"I could not check". Never substitute a pass -- see Severity.UNKNOWN."""
         return self._issue(Severity.UNKNOWN, message, evidence)
 
     def at(self, severity: Severity, message: str,
            evidence: Optional[Dict[str, Any]] = None) -> Issue:
-        """嚴重度由檢查自己算出來時使用 (例如依安靜時間分級)。"""
+        """Used when the check computes its own severity, e.g. by quiet time."""
         return self._issue(severity, message, evidence)
 
 
 class CaseContext(_BaseContext):
-    """單一 case 的檢查環境。root = case run dir。"""
+    """Check environment for one case. root is the case run dir."""
 
     def __init__(
         self,
@@ -187,7 +189,7 @@ class CaseContext(_BaseContext):
         self._expected: Optional[Tuple[Tuple[ExpectedArtifact, ...],
                                        Tuple[str, ...]]] = None
 
-    # -- 便捷屬性 -----------------------------------------------------
+    # -- Convenience ----------------------------------------------------
 
     @property
     def state(self) -> CaseState:
@@ -199,17 +201,17 @@ class CaseContext(_BaseContext):
 
     @property
     def silent_for(self) -> float:
-        """log 已經多久沒有成長 (秒)。"""
+        """How long the log has not grown, in seconds."""
         return self.case.silent_for(self.now)
 
     @property
     def expected_artifacts(self) -> Tuple[ExpectedArtifact, ...]:
-        """從 arcx.cfg 推導出的期望產出物。cfg 不可用時回空 tuple。"""
+        """Artifacts derived from arcx.cfg; empty when the cfg is unavailable."""
         return self._expectations()[0]
 
     @property
     def expectation_problems(self) -> Tuple[str, ...]:
-        """cfg 本身的問題 (block 沒 QC_FLOW、flow 不認得)。"""
+        """Faults in the cfg itself (no QC_FLOW, unknown flow)."""
         return self._expectations()[1]
 
     @property
@@ -222,10 +224,11 @@ class CaseContext(_BaseContext):
         return [a for a in self.expected_artifacts if not self.exists(a.relpath)]
 
     def artifacts_ready(self) -> bool:
-        """所有期望產出物都在且大小足夠。
+        """Whether every expected artifact exists and is large enough.
 
-        用來判斷「安靜但其實已經跑完了」—— 這種情況不該被當成卡住。
-        cfg 不可用時回 False (不知道就不要說它好了)。
+        Used to recognise "quiet but actually finished", which should not be
+        treated as stuck. Returns False when the cfg is unavailable: not
+        knowing is not the same as being fine.
         """
         if not self.expected_artifacts:
             return False
@@ -246,9 +249,9 @@ class CaseContext(_BaseContext):
 
 
 class ConfigContext(_BaseContext):
-    """PRE 檢查的環境。root = arcx.cfg 所在目錄。
+    """Environment for PRE checks. root is the directory holding arcx.cfg.
 
-    不需要 run folder —— PRE 在提交前跑, 那時候什麼都還沒建立。
+    No run folder is needed: PRE runs before submission, when nothing exists.
     """
 
     def __init__(
@@ -270,10 +273,12 @@ class ConfigContext(_BaseContext):
 
 
 class PreflightContext(_BaseContext):
-    """提交前檢查的環境。root = 這次 run 的目標目錄 (尚未建立)。
+    """Environment for the pre-submission checks.
 
-    它不看 run folder (那時候還沒有), 而是看「要建立的地方」與外部資源:
-    磁碟、LSF、既有的 wave。
+    root is this run's target directory, which does not exist yet.
+    It does not look at run folders (there are none yet) but at where things
+    are about to be created, and at external resources: disk, LSF, existing
+    waves.
     """
 
     def __init__(
@@ -298,13 +303,13 @@ class PreflightContext(_BaseContext):
         self._njobs_cached = False
         self._njobs: Optional[int] = None
 
-    # -- 外部資源 -----------------------------------------------------
+    # -- External resources ---------------------------------------------
 
     def disk_free_ratio(self) -> Optional[float]:
-        """目標檔案系統的剩餘空間比例。
+        """Free space ratio on the target filesystem.
 
-        目錄還不存在時往上找第一個存在的祖先 —— statvfs 要的是掛載點,
-        不是最終路徑。
+        Walks up to the first existing ancestor when the directory does not
+        exist yet: statvfs wants a mount point, not the final path.
         """
         path = self.run_dir
         while path and not os.path.exists(path):
@@ -321,7 +326,7 @@ class PreflightContext(_BaseContext):
         return float(st.f_bavail) / float(st.f_blocks)
 
     def current_njobs(self) -> Optional[int]:
-        """帳號目前的 NJOBS。查一次就快取, 不重複打 LSF。"""
+        """The account's current NJOBS. Queried once and cached."""
         if self._njobs_cached:
             return self._njobs
         self._njobs_cached = True
@@ -332,7 +337,7 @@ class PreflightContext(_BaseContext):
         return value
 
     def existing_index_usage(self) -> List[Dict[str, Any]]:
-        """掃既有的 wave manifest, 找出這次要用的 index 是否已被使用過。"""
+        """Scan existing wave manifests for indices this run wants to use."""
         wanted = {
             spec.index_key
             for wave in self.plan.waves
@@ -367,7 +372,7 @@ class PreflightContext(_BaseContext):
 
 
 class IndexContext(_BaseContext):
-    """一個 index run folder 的檢查環境。root = run folder。"""
+    """Check environment for one index run folder. root is the run folder."""
 
     def __init__(
         self,

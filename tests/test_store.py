@@ -1,7 +1,8 @@
-"""SnapshotStore 與原子寫入。
+"""SnapshotStore and atomic writes.
 
-核心性質 (架構決策 2): 快取損毀時必須靜默重來, 絕不讓監控停擺 ——
-檔案系統才是唯一真相, 快取只是用來累積 stall 計時。
+The core property (architecture decision 2): a damaged cache must silently
+start over and never stop monitoring -- the filesystem is the truth, and the
+cache only accumulates stall timing.
 """
 
 import json
@@ -55,7 +56,9 @@ class RoundTripTest(unittest.TestCase):
         self.assertEqual(SnapshotStore(self.path).load(), {})
 
     def test_schema_mismatch_discards_cache(self):
-        """版本不符就整份丟掉 —— 快取而已, 不需要遷移邏輯。"""
+        """A version mismatch discards everything: it is only a cache, so
+        migration logic would be dead weight.
+        """
         with open(self.path, "w") as handle:
             json.dump({"schema_version": 99, "index_runs": {"x": {}}}, handle)
         self.assertEqual(SnapshotStore(self.path).load(), {})

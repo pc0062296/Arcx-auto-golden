@@ -1,9 +1,11 @@
-"""設定模型與載入。
+"""Settings model and loading.
 
-設計原則:
-  * 預設值全部寫在 dataclass 裡, **不依賴設定檔存在**。沒有設定檔也能跑。
-  * PyYAML 是選用相依。內網環境若沒有 PyYAML, 可以改用 .json 設定檔。
-  * 使用者設定與預設值做 deep merge, 只覆寫有寫到的欄位。
+Design rules:
+  * Defaults live in the dataclasses, so **no settings file is required**.
+  * PyYAML is optional. Without it, use a .json settings file with the same
+    structure.
+  * User settings are deep merged onto the defaults; only the fields present
+    are overridden.
 """
 
 from __future__ import annotations
@@ -20,99 +22,100 @@ DEFAULT_SETTINGS_PATHS: Tuple[str, ...] = (
 
 
 # --------------------------------------------------------------------------
-# 各區段
+# Sections
 # --------------------------------------------------------------------------
 
 @dataclass
 class LayoutSettings:
-    """index run folder 內的檔案慣例 (architecture §9.3)。
-
-    全部以 regex 描述, 因為 Arcx 版本或設定不同時, 命名可能微調。
-    """
+    """File conventions inside an index run folder (architecture 9.3)."""
 
     # .queue.NDIO_1 / .run.PDIO_1 / .complete.NTN_1
-    # case id 是 cell 名稱, 不是流水號, 所以這裡必須用寬鬆的 .+
+    # Case ids are cell names, not sequence numbers, so this has to stay loose.
     marker_regex: str = r"^\.(?P<kind>queue|run|complete)\.(?P<case>.+)$"
-    # 比 marker_regex 更寬鬆: 任何 .<word>.<something> 都算「看起來像 marker」。
-    # 用來抓出已知三種以外的 marker —— 那不正常, 必須明確顯示而不是當成雜訊。
+    # Looser than marker_regex: anything shaped like .<word>.<something>.
+    # Used to surface markers outside the known three, which are abnormal and
+    # must be reported explicitly rather than treated as noise.
     marker_any_regex: str = r"^\.(?P<kind>[A-Za-z_][A-Za-z0-9_]*)\.(?P<case>.+)$"
 
     # submit_bjob_cmd_file_1.log
-    #   -> 依編號配對 cmd_folder/cmd_file_1
-    #   -> 讀該 script 的 `cd <path>` 得知這個 log 屬於哪個 case
-    # 檔名本身**不含** case 名稱, 編號與 case 之間也沒有固定關係,
-    # 所以唯一可靠的對應方式就是讀 cmd_file。
+    #   -> pair by number with cmd_folder/cmd_file_1
+    #   -> read that script's `cd <path>` to learn which case the log belongs to
+    # The log filename contains no case name, and the numbering has no fixed
+    # relationship to any ordering, so reading the cmd_file is the only
+    # reliable mapping.
     log_regex: str = r"^submit_bjob_cmd_file_(?P<num>\d+)\.log$"
     cmd_dir_name: str = "cmd_folder"
     cmd_file_template: str = "cmd_file_{num}"
     cmd_cd_regex: str = r"^\s*cd\s+[\"']?(?P<path>[^\s\"';#]+)"
     cmd_file_head_bytes: int = 16384
 
-    # QC_Cc/ QC_Ct/ QC_Spice/  —— Arcx 整理的 report, 不是 case dir
+    # QC_Cc/ QC_Ct/ QC_Spice/ -- reports Arcx assembles, not case dirs
     report_dir_regex: str = r"^QC_.+$"
 
-    # case run dir 的名字就是 cell 名稱, 沒有共同樣式可以比對,
-    # 因此改用排除法: run folder 底下不符合這些樣式的目錄就是 case run dir。
-    # (rerun 時要刪的就是這些目錄)
+    # Case run dirs are named after the cell, so there is no shared pattern to
+    # match. They are identified by exclusion instead: any directory in the run
+    # folder that is not one of these. (A rerun deletes exactly these dirs.)
     non_case_dir_regexes: List[str] = field(
         default_factory=lambda: [r"^QC_.+$", r"^cmd_folder$", r"^\..*$"]
     )
 
-    # Arcx 自己在 wave 目錄下建立的 index run folder
+    # Index run folders Arcx creates under a wave directory
     index_run_folder_regex: str = r"^(?P<index>[^./].*)$"
 
-    # index path 內的 GDS 檔 (用來算 case 數)
+    # GDS files inside an index path, used to count cases
     gds_globs: List[str] = field(
         default_factory=lambda: ["*.gds", "*.gds.gz", "*.GDS", "*.gds.bz2"]
     )
-    # index path 內的 Arcx 資源設定檔
+    # Arcx resource settings file inside an index path
     special_cfg_name: str = "special.cfg"
     special_cfg_cpu_key: str = "O_QCAP_LSF_NUM"
 
-    # dir_map 內不是真實 index 的保留 key
+    # Keys in dir_map that are not real indices
     dir_map_reserved_keys: List[str] = field(default_factory=lambda: ["min", "max"])
 
 
 @dataclass
 class MonitorSettings:
-    """監控與狀態判定門檻。"""
+    """Monitoring and state thresholds."""
 
-    # log 連續多久沒有成長就視為 STALLED
+    # How long a log may stay the same size before the case counts as stalled
     stall_threshold_sec: float = 3600.0
-    # QUEUED 超過多久值得注意 (僅提示, 不改變狀態)
+    # How long a PEND is worth noticing (informational only)
     long_pend_warn_sec: float = 7200.0
-    # LSF job 消失後, 等多久才敢判定 LOST
-    # (給 NFS attribute cache 與 Arcx 收尾一點緩衝)
+    # How long to wait after an LSF job disappears before declaring it LOST.
+    # Gives NFS attribute caching and Arcx's own tidy-up some slack.
     lost_grace_sec: float = 300.0
-    # 讀 log 開頭幾個 byte 來推斷 case 歸屬
+    # How many bytes of a log to read when inferring case ownership
     log_head_bytes: int = 8192
-    # 分層 polling 間隔
+    # Tiered polling
     poll_active_sec: float = 30.0
     poll_idle_sec: float = 300.0
 
 
 @dataclass
 class PlanSettings:
-    """分波計畫參數 (architecture §5)。"""
+    """Wave planning (architecture 5)."""
 
-    # 單一 wave 的 slot 上限。slots = O_QCAP_LSF_NUM x gds_count
+    # Slot cap per wave. slots = O_QCAP_LSF_NUM * gds_count
     max_slots_per_wave: int = 200
-    # path 中含有這些關鍵字的 index 優先排入前面的 wave
+    # Indices whose path contains one of these are planned into earlier waves
     priority_keywords: List[str] = field(default_factory=lambda: ["sram", "ro"])
-    # 關鍵字比對是否忽略大小寫
     keyword_ignore_case: bool = True
-    # 找不到 special.cfg 時的保守預設 (0 = 視為錯誤, 不猜)
+    # Fallback when special.cfg is missing. 0 means "treat as an error, do not
+    # guess" -- a wrong guess here silently mis-sizes every wave.
     default_cpu_per_case: int = 0
 
 
 @dataclass
 class GateSettings:
-    """提交閘門 (architecture §5.4)。
+    """Submission gate (architecture 5.4).
 
-    放行 = 已過 min_interval AND ( NJOBS < quota_threshold OR 已過 max_wait )
+        release = min_interval elapsed
+                  AND ( NJOBS < quota_threshold OR max_wait elapsed )
 
-    純 OR 有漏洞: 時間到了但 quota 仍滿, 照送會塞爆 queue。
-    這個組合同時涵蓋「不會太密集」「不會塞爆」「不會無限期卡住」。
+    A plain OR has a hole: once the timer expires, submitting while the quota
+    is still full floods the queue anyway. This combination covers all three of
+    "not too dense", "not flooding", and "never stuck forever".
     """
 
     min_interval_sec: float = 600.0
@@ -122,24 +125,24 @@ class GateSettings:
 
 @dataclass
 class LsfSettings:
-    """LSF 相關指令 (architecture §9.4)。"""
+    """LSF commands (architecture 9.4)."""
 
     bjobs_cmd: str = "bjobs"
     busers_cmd: str = "busers"
     bkill_cmd: str = "bkill"
     bsub_cmd: str = "bsub"
-    # 列出/刪除某路徑底下所有 job 的自製工具
+    # In-house tool that lists / deletes every job under a path
     bjobs_manage_cmd: str = "bjobs_manage.py"
     bjobs_manage_list_flag: str = "-jp"
     bjobs_manage_delete_flag: str = "-djp"
-    # 外部指令逾時
     command_timeout_sec: float = 60.0
-    # Arcx 固定參數 (使用者確認可寫死)
+
+    # Arcx invocation. These are fixed by convention.
     arcx_cmd: str = "Arcx"
     arcx_fixed_args: List[str] = field(default_factory=lambda: ["-lsf0", "-nt", "50"])
     arcx_rerun_args: List[str] = field(default_factory=lambda: ["-keep_dir"])
 
-    # drain 安全門: 連續幾次確認 0 job 才算靜止
+    # Drain safety gate: how many consecutive zero readings mean "quiescent"
     quiescent_confirm_times: int = 3
     quiescent_interval_sec: float = 30.0
     quiescent_timeout_sec: float = 900.0
@@ -147,14 +150,14 @@ class LsfSettings:
 
 @dataclass
 class FlowProfile:
-    """一個 EDA tool flow 在 case run dir 內留下什麼。
+    """What one EDA tool flow leaves behind in a case run dir.
 
-    路徑樣板可用的變數:
-        {flow}   QC_FLOW 的值, 例如 calQCAP
-        {block}  arcx.cfg 內的 block 名稱
-        {case}   case id (cell 名稱), 例如 NTN_1
+    Template variables:
+        {flow}   the QC_FLOW value, e.g. calQCAP
+        {block}  the block name from arcx.cfg
+        {case}   the case id (cell name), e.g. NTN_1
 
-    新增一種 EDA tool = 在設定裡加一個 profile, 不需要改程式。
+    Adding a new EDA tool is a settings change, not a code change.
     """
 
     work_dir: str = "work_{flow}"
@@ -164,36 +167,39 @@ class FlowProfile:
 
 @dataclass
 class ReportSettings:
-    """index run folder 底下的 QC_* report 目錄。"""
+    """QC_* report directories under an index run folder."""
 
-    # 一定會存在的, 缺了就是 FATAL
+    # Always present; missing means FATAL
     required_dirs: List[str] = field(default_factory=lambda: ["QC_Cc", "QC_Ct"])
-    # 有的話要檢查內容, 沒有也不算錯 (未來再補其他 QC_* 的邏輯)
+    # Checked when present, but absence is fine
     optional_dirs: List[str] = field(default_factory=lambda: ["QC_Spice"])
     # QC_Cc/Report_QC_Cc
     main_file_template: str = "Report_{dir}"
-    # QC_Cc/Report_QC_Cc_Summary_SCCB3  —— 後綴會變, 所以用 glob
+    # QC_Cc/Report_QC_Cc_Summary_SCCB3 -- the suffix is just naming, so glob,
+    # but there is exactly one per directory, so more than one is also wrong.
     summary_glob_template: str = "Report_{dir}_Summary_*"
 
 
 @dataclass
 class QuietSettings:
-    """「多久沒寫 log」的分級門檻。
+    """Thresholds for "the log has not grown in a while".
 
-    刻意做成**分級顯示**而不是二元判定: 單一 case 的 runtime 從 10 分鐘到
-    3 天都有, 而且存在「不寫 log 但產出物已經齊了」的正常情況。
-    系統負責把「安靜多久」講清楚並隨時間升級醒目程度, 判斷交給人。
+    Graded rather than binary on purpose: a single case can take ten minutes or
+    three days, and there is a legitimate pattern where the log goes quiet
+    because the artifacts are already written. The system states how long it
+    has been quiet and escalates the visual weight; the judgement stays human.
     """
 
-    warn_after_sec: float = 14400.0      # 4h  —— 少見, 值得看一眼
-    stalled_after_sec: float = 28800.0   # 8h  —— 基本上可判定卡住
-    # 產出物都齊了才安靜下來, 通常只是在收尾 -> 降一級, 避免誤報
+    warn_after_sec: float = 14400.0      # 4h  -- uncommon, worth a look
+    stalled_after_sec: float = 28800.0   # 8h  -- effectively stuck
+    # Quiet with every artifact already present usually just means tidy-up,
+    # so downgrade one level rather than crying wolf.
     downgrade_when_artifacts_ready: bool = True
 
 
 @dataclass
 class QaSettings:
-    """QA 檢查設定。"""
+    """QA checks."""
 
     flows: Dict[str, FlowProfile] = field(default_factory=lambda: {
         "calQCAP": FlowProfile(netlists=["CCI_DB.spice"]),
@@ -202,62 +208,78 @@ class QaSettings:
     min_netlist_bytes: int = 1
     reports: ReportSettings = field(default_factory=ReportSettings)
     quiet: QuietSettings = field(default_factory=QuietSettings)
-    # arcx.cfg 中要在提交前驗證「檔案/目錄存在」的設定 key。
-    # 只列出明確的 key 而不是「看起來像路徑就檢查」—— 後者會對輸出路徑、
-    # 樣板字串等等產生大量假警報, 假警報多了就沒人看了。
+
+    # Which arcx.cfg keys to verify as existing files/directories before
+    # submission. An explicit list rather than "anything that looks like a
+    # path": the latter produces false alarms on output paths and on values
+    # like TOOL_VERSION_LVS that are a command plus arguments, and once there
+    # are false alarms nobody reads the warnings.
+    #
+    # Lines disabled with a leading 0, or commented out with #, are skipped:
+    # those settings never take effect, so checking them is pure noise.
     verify_cfg_paths: bool = True
     cfg_path_keys: List[str] = field(default_factory=lambda: [
         "RCX_TECH_QTF",
         "RCX_LAYER_NAME_MAP",
         "LVS_DFM_DIR",
-        # 使用者的清單寫 LVS_DECK, 真實範例寫 LVS_DECL。兩個都留著 ——
-        # 不存在的 key 不會被檢查, 所以多列一個沒有成本, 少列一個會漏掉。
+        # Both spellings are kept: an absent key is simply not checked, so
+        # listing one extra costs nothing while omitting one misses a check.
         "LVS_DECK",
         "LVS_DECL",
         "LVS_QUERY_CMD",
         "RCX_STAR_CMD",
     ])
-    # 這些 key 即使在上面清單裡也跳過 (臨時排除用)
     cfg_path_check_skip_keys: List[str] = field(default_factory=list)
-    # 要停用的檢查 id。放在設定裡, 這樣不需要刪程式就能關掉一條規則。
+    # Check ids to disable. Here rather than by deleting code.
     disabled_checks: List[str] = field(default_factory=list)
 
 
 @dataclass
 class PreflightSettings:
-    """提交前檢查的門檻。"""
+    """Thresholds for the pre-submission checks."""
 
-    # 目標檔案系統剩餘空間低於這個比例就擋下來。
-    # 磁碟爆掉是 RC extraction 的頭號隱形殺手 —— job 會在跑到一半時死掉,
-    # 而且是以看不出原因的方式死。
+    # Block submission below this free-space ratio on the target filesystem.
+    # A full disk is the number one silent killer of RC extraction: jobs die
+    # part way through, in a way that does not say why.
     min_disk_free_ratio: float = 0.05
     warn_disk_free_ratio: float = 0.15
-    # 目前 NJOBS 已達 quota_threshold 的這個比例就警告 (送出去只會卡在 PEND)
+    # Warn once NJOBS reaches this fraction of the gate threshold, since
+    # submitting then only produces a pile of PEND.
     quota_warn_ratio: float = 0.8
 
 
 @dataclass
 class LaunchSettings:
-    """提交 Arcx 時的 bsub 參數。
+    """bsub parameters used when submitting Arcx.
 
-    Arcx 本身也 bsub 出去 (架構 A1 的 (c) 方案), 這樣 daemon 隨時可以重啟,
-    不會影響正在跑的工作。這裡的參數是給**外層那個 Arcx 協調 job** 用的,
-    不是給它底下的 RC extraction 子 job。
+    Matches the shape used by hand:
+
+        bsub -q LVSRCE-0E.q -oo Arcx.log "Arcx -p arcx.cfg -d ... --run"
+
+    Arcx itself is submitted to LSF (architecture decision A1c) so that our
+    daemon can restart without disturbing running work. The outer job is only
+    a coordinator and reserves no memory or CPU -- Arcx submits the real work
+    as further LSF jobs.
     """
 
-    # 外層 Arcx job 只做協調, 資源需求不高
-    bsub_args: List[str] = field(default_factory=list)
+    queue: str = "LVSRCE-0E.q"
+    # Relative to the wave directory, which is bsub's cwd.
+    # -oo overwrites, so a rerun does not stack onto the previous attempt.
+    output_file: str = "Arcx.log"
+    # Empty disables -J. The job id in launch.json is the authoritative handle;
+    # a name is only there to make bjobs output readable.
     job_name_template: str = "arcx_{run_id}_{wave}"
-    # 相對 wave 目錄
-    output_file: str = ".arcx_auto/arcx_bsub.log"
+    # Anything else to pass to bsub, e.g. ["-R", "rusage[mem=2048]"]
+    bsub_args: List[str] = field(default_factory=list)
 
 
 @dataclass
 class ExportSettings:
-    """公用碟匯出 (architecture §9.5)。
+    """Export to the shared disk (architecture 9.5).
 
-    公用碟只放衍生資料 —— 真相永遠在 ~/.arcx-auto/ 與 run folder,
-    這裡隨時可以整個刪掉重建。路徑之後會換碟, 所以必須可設定。
+    The shared disk only ever holds derived data. The truth lives in
+    ~/.arcx-auto/ and in the run folders, so this can be deleted and rebuilt at
+    any time. The path is expected to change, hence configurable.
     """
 
     shared_root: str = "/tmp1/.auto_golden"
@@ -268,7 +290,7 @@ class ExportSettings:
 
 @dataclass
 class Settings:
-    """根設定。"""
+    """Root settings object."""
 
     state_root: str = "~/.arcx-auto"
     run_root: str = "./arcx_runs"
@@ -291,25 +313,25 @@ class Settings:
 
 
 # --------------------------------------------------------------------------
-# 載入
+# Loading
 # --------------------------------------------------------------------------
 
 def _apply_overrides(target: Any, data: Dict[str, Any], path: str = "") -> List[str]:
-    """把 dict 套用到 dataclass 實例上, 回傳未知欄位的警告清單。"""
+    """Apply a dict onto a dataclass instance; return warnings for unknown keys."""
     warnings: List[str] = []
     known = {f.name: f for f in fields(target)}
     for key, value in data.items():
         where = "%s.%s" % (path, key) if path else key
         if key not in known:
-            warnings.append("未知設定欄位: %s" % where)
+            warnings.append("unknown settings field: %s" % where)
             continue
         current = getattr(target, key)
         if is_dataclass(current) and isinstance(value, dict):
             warnings.extend(_apply_overrides(current, value, where))
         elif isinstance(current, dict) and isinstance(value, dict):
-            # 例如 qa.flows: {calQCAP: {...}} —— 值本身是 dataclass 時,
-            # 逐項合併而不是整個換掉, 這樣使用者只覆寫一個 flow 的一個欄位
-            # 也不會把其他預設值弄丟。
+            # e.g. qa.flows: {calQCAP: {...}} -- merge item by item instead of
+            # replacing wholesale, so overriding one field of one flow does not
+            # drop the other defaults.
             merged = dict(current)
             for sub_key, sub_value in value.items():
                 existing = merged.get(sub_key)
@@ -331,10 +353,10 @@ def _apply_overrides(target: Any, data: Dict[str, Any], path: str = "") -> List[
 
 
 def _prototype(mapping: Dict[str, Any]) -> Optional[type]:
-    """從既有的值推斷這個 dict 裡裝的是哪種 dataclass。
+    """Infer which dataclass a dict of settings holds.
 
-    用於「使用者新增了一個預設值裡沒有的 flow」的情況 —— 我們需要知道
-    該用哪個型別去建立它。
+    Needed when the user adds an entry that is not in the defaults, such as a
+    new flow: we have to know what type to build it as.
     """
     for value in mapping.values():
         if is_dataclass(value) and not isinstance(value, type):
@@ -349,9 +371,10 @@ def _read_config_file(path: str) -> Dict[str, Any]:
         return json.loads(text) or {}
     try:
         import yaml  # type: ignore
-    except ImportError as exc:  # pragma: no cover - 取決於環境
+    except ImportError as exc:  # pragma: no cover - environment dependent
         raise RuntimeError(
-            "讀取 YAML 設定需要 PyYAML。請改用 .json 設定檔, 或安裝 PyYAML。"
+            "reading a YAML settings file needs PyYAML; "
+            "use a .json settings file instead, or install PyYAML"
         ) from exc
     return yaml.safe_load(text) or {}
 
@@ -360,10 +383,10 @@ def load_settings(
     path: Optional[str] = None,
     search_defaults: bool = True,
 ) -> Tuple[Settings, List[str]]:
-    """載入設定。
+    """Load settings, returning (settings, warnings).
 
-    回傳 (settings, warnings)。找不到任何設定檔時回傳純預設值 ——
-    這是刻意的: 沒有設定檔也要能跑。
+    With no settings file anywhere the pure defaults are returned: running
+    without a config file is a supported case, not an error.
     """
     settings = Settings()
     warnings: List[str] = []
@@ -377,8 +400,8 @@ def load_settings(
     for candidate in candidates:
         resolved = os.path.abspath(os.path.expanduser(candidate))
         if not os.path.isfile(resolved):
-            if path:  # 使用者明確指定卻不存在 -> 應該報錯而不是靜默忽略
-                raise FileNotFoundError("設定檔不存在: %s" % resolved)
+            if path:  # explicitly requested but missing -> an error, not silence
+                raise FileNotFoundError("settings file not found: %s" % resolved)
             continue
         data = _read_config_file(resolved)
         warnings.extend(_apply_overrides(settings, data))

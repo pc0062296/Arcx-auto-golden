@@ -1,7 +1,8 @@
-"""目標執行環境是 Python 3.9.10。
+"""The target runtime is Python 3.9.10.
 
-開發機可能是較新的版本, 所以用 AST 的 feature_version 明確擋住
-3.10+ 才有的語法 (match / PEP 604 的 X | Y 等) 進到程式碼裡。
+The development machine may be newer, so the AST feature_version is used to
+block 3.10+ only syntax (match, PEP 604 X | Y and so on) from entering the
+code base.
 """
 
 import ast
@@ -22,22 +23,26 @@ class Py39CompatTest(unittest.TestCase):
                     ast.parse(source, filename=str(path), feature_version=TARGET)
                 except SyntaxError as exc:
                     failures.append("%s: %s" % (path.relative_to(ROOT), exc))
-        self.assertEqual(failures, [], "以下檔案用到 3.10+ 語法:\n" + "\n".join(failures))
+        self.assertEqual(
+            failures, [],
+            "these files use 3.10+ syntax:\n" + "\n".join(failures))
 
     def test_no_third_party_imports_in_core(self):
-        """核心必須零第三方相依 —— 內網環境安裝套件是摩擦。
+        """The core must have zero third-party dependencies: installing
 
-        PyYAML 只在讀 .yaml 設定檔時才 import (lazy), 不算核心相依。
+        PyYAML is imported lazily and only when reading a .yaml settings
+        file, so it does not count as a core dependency.
         """
         allowed_stdlib_prefixes = (
-            # 每加一個都要有意識地過一次 —— 這個清單就是相依性的閘門
+            # Every addition here is a conscious decision: this list is the
+            # dependency gate
             "arcx_auto", "os", "re", "sys", "time", "json", "typing",
             "dataclasses", "enum", "argparse", "subprocess", "shutil",
             "tempfile", "getpass", "unicodedata", "fnmatch", "pathlib",
             "collections", "itertools", "functools", "contextlib", "io",
             "ast", "unittest", "threading", "hashlib", "uuid", "errno",
             "math", "textwrap", "traceback", "logging",
-            # daemon 與 web (Phase 1b) 用到的
+            # used by the daemon and the web UI
             "socket", "fcntl", "signal", "http", "urllib", "html",
         )
         offenders = []
@@ -53,11 +58,13 @@ class Py39CompatTest(unittest.TestCase):
                     root = name.split(".")[0]
                     if root == "__future__" or root in allowed_stdlib_prefixes:
                         continue
-                    # yaml 是 lazy import (只在讀 .yaml 時), 允許
+                    # yaml is a lazy import, only when reading .yaml
                     if root == "yaml":
                         continue
                     offenders.append("%s: %s" % (path.relative_to(ROOT), name))
-        self.assertEqual(offenders, [], "核心出現第三方相依:\n" + "\n".join(offenders))
+        self.assertEqual(
+            offenders, [],
+            "third-party imports in the core:\n" + "\n".join(offenders))
 
 
 if __name__ == "__main__":

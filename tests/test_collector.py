@@ -1,7 +1,8 @@
-"""Collector: LSF job 對回 case。
+"""Collector: mapping LSF jobs back to cases.
 
-Arcx 送出的子 job 沒有可辨識的 job name, 但 cmd_folder/cmd_file_N 裡的
-`cd <path>` 直接給出執行路徑, 是確定性的依據。
+The child jobs Arcx submits carry no identifiable job name, but the
+`cd <path>` line in cmd_folder/cmd_file_N states the execution path
+directly, which is deterministic.
 """
 
 import os
@@ -35,7 +36,7 @@ class AttachLsfTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_match_by_output_file(self):
-        """方式 1: output_file 直接等於該 case 的 log —— 最可靠。"""
+        """Method 1: output_file is exactly this case's log -- most reliable."""
         log = os.path.join(self.folder, "submit_bjob_cmd_file_1.log")
         job = LsfJobView(job_id="777", state=LsfState.RUN, output_file=log,
                          exec_cwd=self.folder)
@@ -44,7 +45,7 @@ class AttachLsfTest(unittest.TestCase):
         self.assertIsNone(obs.cases["PDIO_1"].lsf)
 
     def test_match_by_cmd_file_exec_path(self):
-        """方式 2: job 的 cwd 落在 cmd_file 指出的執行路徑底下。"""
+        """Method 2: the job cwd sits under the path from the cmd_file."""
         job = LsfJobView(job_id="888", state=LsfState.SSUSP,
                          exec_cwd=os.path.join(self.folder, "PDIO_1"))
         obs = self.collector.collect_index_run(self.folder, "1000", lsf_jobs=[job])
@@ -53,17 +54,18 @@ class AttachLsfTest(unittest.TestCase):
         self.assertIsNone(obs.cases["NDIO_1"].lsf)
 
     def test_match_by_nested_subdirectory(self):
-        """job 實際跑在 case run dir 的子目錄裡也算。"""
+        """A job running in a subdirectory of the case run dir still counts."""
         job = LsfJobView(job_id="666", state=LsfState.RUN,
                          exec_cwd=os.path.join(self.folder, "NDIO_1", "deep", "x"))
         obs = self.collector.collect_index_run(self.folder, "1000", lsf_jobs=[job])
         self.assertEqual(obs.cases["NDIO_1"].lsf.job_id, "666")
 
     def test_parent_arcx_job_not_attached_to_cases(self):
-        """在 index run folder 執行的 parent Arcx job 不能被掛到任何 case 上。
+        """The parent Arcx job, which runs in the index run folder, must not
 
-        它的 cwd 是所有 case 目錄的上層; 若用雙向前綴比對就會被掛到每一個 case,
-        讓整張狀態表顯示同一個 job —— 比對不到還糟。
+        Its cwd is an ancestor of every case dir, so a bidirectional prefix
+        match would attach it to all of them and the whole table would show
+        one job -- worse than matching nothing.
         """
         parent = LsfJobView(job_id="555", state=LsfState.RUN,
                             exec_cwd=self.folder)
@@ -79,7 +81,9 @@ class AttachLsfTest(unittest.TestCase):
         self.assertIsNone(obs.cases["NDIO_1"].lsf)
 
     def test_sibling_wave_job_not_matched(self):
-        """/work/wave_0011 不屬於 /work/wave_001 —— 前綴比對必須是路徑感知的。"""
+        """/work/wave_0011 is not under /work/wave_001: prefix matching has
+        to be path aware.
+        """
         job = LsfJobView(job_id="123", state=LsfState.RUN,
                          exec_cwd=self.folder + "1/NDIO_1")
         obs = self.collector.collect_index_run(self.folder, "1000", lsf_jobs=[job])

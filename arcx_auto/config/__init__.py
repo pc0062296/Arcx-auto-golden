@@ -1,7 +1,8 @@
-"""設定層。
+"""Configuration layer.
 
-所有「對外部世界的假設」都集中在這裡, 不寫死在程式邏輯中 ——
-Arcx 或環境的慣例有變動時, 只需要改設定, 不需要動程式碼。
+Every assumption about the outside world lives here rather than being hard
+coded in logic, so that a change in Arcx conventions or in the environment is
+a settings change, not a code change.
 """
 
 from arcx_auto.config.settings import (

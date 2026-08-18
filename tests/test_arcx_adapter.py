@@ -1,7 +1,8 @@
-"""ArcxAdapter: dir_map 與 special.cfg 的解析。
+"""ArcxAdapter: parsing dir_map and special.cfg.
 
-這些測試直接對應使用者提供的真實檔案格式 —— 格式理解錯了,
-後面所有東西都是錯的, 所以這裡刻意把怪癖 (缺漏逗號等) 都測到。
+These tests mirror the real file formats exactly. Misreading a format makes
+everything downstream wrong, so the quirks (a missing comma and so on) are
+deliberately covered here.
 """
 
 import os
@@ -44,7 +45,9 @@ class DirMapTest(unittest.TestCase):
         })
 
     def test_min_max_are_meta_not_index(self):
-        """min/max 是保留 key —— 誤當成 index 會導致 Arcx 收到不存在的參數。"""
+        """min and max are reserved keys; treating them as indices would
+        hand Arcx an index that does not exist.
+        """
         result = self.adapter.parse_dir_map(self._write(REAL_DIR_MAP))
         self.assertNotIn("min", result.entries)
         self.assertNotIn("max", result.entries)
@@ -52,17 +55,20 @@ class DirMapTest(unittest.TestCase):
         self.assertEqual(result.meta["max"], "1014")
 
     def test_missing_trailing_comma_is_tolerated(self):
-        """真實範例中 "min" 那行沒有結尾逗號, 解析不能因此失敗。"""
+        """The real sample has no trailing comma on the "min" line, and
+        parsing must not fail because of it.
+        """
         result = self.adapter.parse_dir_map(self._write(REAL_DIR_MAP))
         self.assertEqual(len(result.entries), 2)
 
     def test_warns_when_range_has_gaps(self):
-        """min/max 宣告 1000-1014 但只有 2 筆 -> 應該警告。
+        """min/max declare 1000-1014 but only 2 entries exist -> warn.
 
-        這種缺漏人工看不出來, 但會讓某些 index 靜默地跑不到。
+        A gap like this is invisible to the eye but makes some indices
+        silently never run.
         """
         result = self.adapter.parse_dir_map(self._write(REAL_DIR_MAP))
-        self.assertTrue(any("缺少" in w for w in result.warnings), result.warnings)
+        self.assertTrue(any("missing" in w for w in result.warnings), result.warnings)
 
     def test_comments_are_ignored(self):
         text = REAL_DIR_MAP.replace(
@@ -103,7 +109,7 @@ class SpecialCfgTest(unittest.TestCase):
         self.assertEqual(warnings, [])
 
     def test_slots_is_cpu_times_gds_count(self):
-        """slots = O_QCAP_LSF_NUM x GDS 數 —— 分波的核心公式。"""
+        """slots = O_QCAP_LSF_NUM * GDS count -- the core planning formula."""
         path = make_index_source(self.tmp.name, "1000", gds_count=5, cpu_per_case=7)
         spec = self.adapter.build_index_spec("1000", path)
         self.assertEqual(spec.gds_count, 5)
@@ -111,7 +117,7 @@ class SpecialCfgTest(unittest.TestCase):
         self.assertEqual(spec.slots, 35)
 
     def test_missing_special_cfg_marks_index_unusable(self):
-        """缺 special.cfg 不能猜, 必須排除並說明原因。"""
+        """A missing special.cfg must not be guessed at: exclude and explain."""
         path = os.path.join(self.tmp.name, "broken")
         os.makedirs(path)
         open(os.path.join(path, "a.gds"), "w").close()
@@ -127,7 +133,7 @@ class SpecialCfgTest(unittest.TestCase):
     def test_nonexistent_path(self):
         spec = self.adapter.build_index_spec("9999", "/definitely/not/here")
         self.assertFalse(spec.usable)
-        self.assertIn("不存在", spec.error or "")
+        self.assertIn("does not exist", spec.error or "")
 
     def test_priority_keyword_from_path(self):
         adapter = ArcxAdapter(plan=PlanSettings(priority_keywords=["sram", "ro"]))
@@ -155,7 +161,7 @@ class CommandTest(unittest.TestCase):
         )
 
     def test_rerun_command_adds_keep_dir(self):
-        """rerun 必須帶 -keep_dir, 否則會清掉已完成的 case。"""
+        """A rerun must carry -keep_dir or finished cases get wiped."""
         adapter = ArcxAdapter()
         argv = adapter.build_run_command("arcx.cfg", ["1000"], rerun=True,
                                          lsf_settings=LsfSettings())

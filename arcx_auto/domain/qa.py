@@ -1,15 +1,16 @@
-"""QA 的 domain 型別 —— 純資料, 零 I/O。
+"""QA domain types -- pure data, zero I/O.
 
-核心區分 (見 docs/architecture.md §7):
+The core distinction (docs/architecture.md 7):
 
-    State  唯一、互斥   —— 「這個 case 現在在哪」, 由 StateEngine 判定
-    Issue  可多個並存   —— 「這個 case 有什麼問題」, 由 QA function 產出
+    State  unique and exclusive  -- "where this case is now", from StateEngine
+    Issue  many can coexist      -- "what is wrong with it", from QA functions
 
-一個 case 可以同時是 COMPLETED_MARKER 狀態, 又帶著
-ARTIFACT_MISSING + MARKER_INCONSISTENT 兩個 issue。
+A case can be in COMPLETED_MARKER state while carrying both an
+ARTIFACT_MISSING and a MARKER_INCONSISTENT issue.
 
-最終狀態由 StateResolver 從 (base_state, issues) 推導, 方向單向,
-所以會一直增加的判斷邏輯全部集中在 QA function 裡, StateEngine 保持精簡。
+The final state is derived by StateResolver from (base_state, issues). The
+direction is one way, so the judgement logic that keeps growing all lives in QA
+functions and StateEngine stays small.
 """
 
 from __future__ import annotations
@@ -22,11 +23,11 @@ from arcx_auto.domain.enums import Completeness, IssueScope, IssueStage, Severit
 
 @dataclass(frozen=True)
 class Issue:
-    """一個 QA 檢查發現的問題。
+    """A problem found by one QA check.
 
-    ``evidence`` 是給人看的證據 (檔案路徑、實際值 vs 期望值), 會原樣存進
-    qa/<case>.json 並顯示在 UI 上 —— 三天後回頭問「當初為什麼判它失敗」時,
-    答案必須還在。
+    ``evidence`` is for humans: file paths, actual versus expected values. It is
+    stored verbatim in qa/<case>.json and shown in the UI, because three days
+    later "why did it decide this failed" has to still have an answer.
     """
 
     id: str
@@ -38,7 +39,7 @@ class Issue:
     index_key: Optional[str] = None
     case_id: Optional[str] = None
     evidence: Dict[str, Any] = field(default_factory=dict)
-    doc: str = ""                 # 檢查的 docstring, 直接顯示在 UI 上
+    doc: str = ""                 # the check's docstring, shown in the UI
 
     @property
     def is_fatal(self) -> bool:
@@ -46,25 +47,25 @@ class Issue:
 
     @property
     def blocks_success(self) -> bool:
-        """這個問題是否足以否定「成功」。
+        """Whether this is enough to deny "succeeded".
 
-        UNKNOWN 嚴重度的檢查 (「我檢查不了」) 也算 —— 檢查不了絕不能當成通過。
+        UNKNOWN counts: "I could not check" must never be treated as a pass.
         """
         return self.severity in (Severity.FATAL, Severity.UNKNOWN)
 
 
 @dataclass(frozen=True)
 class QaResult:
-    """一個 case (或 index) 跑完所有 QA 檢查後的結果。"""
+    """Everything one case (or index) produced from a QA run."""
 
-    target: str                                # case_id 或 index_key
+    target: str                                # case_id or index_key
     scope: IssueScope = IssueScope.CASE
     stage: IssueStage = IssueStage.POST
     issues: Tuple[Issue, ...] = ()
     checked_at: float = 0.0
     attempt: int = 1
     checks_run: Tuple[str, ...] = ()
-    checks_failed: Tuple[str, ...] = ()        # QA function 自己爆炸的
+    checks_failed: Tuple[str, ...] = ()        # QA functions that threw
 
     @property
     def fatal(self) -> Tuple[Issue, ...]:
@@ -83,19 +84,20 @@ class QaResult:
         return not any(i.blocks_success for i in self.issues)
 
     def completeness(self) -> Tuple[Completeness, str]:
-        """rerun 時要不要刪掉這個 case 的 run dir。
+        """Whether a rerun should delete this case's run dir.
 
-        不對稱原則 (architecture §6.1): 誤刪已完成只是浪費一次運算 (可回收),
-        漏刪未完成會讓殘缺結果被當成功交付 (不可回收)。
-        所以「檢查不了」一律偏向刪除, 不偏向保留。
+        Asymmetric on purpose (architecture 6.1): deleting something complete
+        wastes one run and the result stays correct, while keeping something
+        incomplete ships a truncated result as a success. So "could not check"
+        leans towards deleting, not towards keeping.
         """
         if self.unknown:
             return (Completeness.UNKNOWN,
-                    "有 %d 項檢查無法判定" % len(self.unknown))
+                    "%d check(s) could not decide" % len(self.unknown))
         if self.fatal:
             return (Completeness.INCOMPLETE,
                     "; ".join(i.id for i in self.fatal[:3]))
-        return (Completeness.COMPLETE, "所有必要檢查通過")
+        return (Completeness.COMPLETE, "all required checks passed")
 
     def worst_severity(self) -> Optional[Severity]:
         order = [Severity.FATAL, Severity.UNKNOWN, Severity.WARN, Severity.INFO]
@@ -107,11 +109,11 @@ class QaResult:
 
 @dataclass(frozen=True)
 class ExpectedArtifact:
-    """從 arcx.cfg 推導出來的、某個 case 應該產出的檔案。
+    """A file a case should produce, derived from arcx.cfg.
 
         <block_name>_<QC_FLOW>/work_<QC_FLOW>/<netlist>
 
-    路徑是相對 case run dir 的。
+    The path is relative to the case run dir.
     """
 
     block: str

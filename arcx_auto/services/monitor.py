@@ -1,11 +1,12 @@
-"""一次完整的監控掃描 —— CLI 與 daemon 共用的核心流程。
+"""One complete monitoring scan -- the core flow shared by the CLI and daemon.
 
-    collect  →  transition  →  QA  →  resolve  →  (呼叫端負責持久化)
-    觀測         結構性狀態     判斷    最終狀態
+    collect  ->  transition  ->  QA  ->  resolve  ->  (caller persists)
+    observe      structural       judge   final state
 
-原本這段邏輯寫在 CLI 裡, 但 L4 介面層不該有業務邏輯 —— daemon 需要
-一模一樣的流程, 抄一份就一定會走歪。抽到 L2 之後兩邊共用同一條路徑,
-也讓整個流程可以在沒有 CLI 的情況下測試。
+This logic started out in the CLI, but the L4 interface layer should hold no
+business logic and the daemon needs exactly the same flow -- a second copy
+would inevitably drift. Living in L2 means both share one path, and the flow
+can be tested without a CLI at all.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from arcx_auto.services.state_resolver import resolve_case_state
 
 @dataclass(frozen=True)
 class ScanResult:
-    """一次掃描的完整產物。"""
+    """Everything one scan produced."""
 
     scanned_at: float
     snapshots: Tuple[IndexRunSnapshot, ...] = ()
@@ -59,10 +60,11 @@ class ScanResult:
 
 
 class MonitorService:
-    """把 Collector / StateEngine / QA / StateResolver 串起來。
+    """Wires Collector, StateEngine, QA and StateResolver together.
 
-    自己持有「上一次的 snapshot」, 因為 stall 偵測需要跨次比較。
-    daemon 長期持有一個實例; CLI 每次呼叫則從 store 載入前一次的結果。
+    Holds the previous snapshots itself, because stall detection compares
+    across scans. The daemon keeps one long-lived instance; the CLI loads the
+    previous result from the store on each invocation.
     """
 
     def __init__(
@@ -78,7 +80,7 @@ class MonitorService:
         self.previous: Dict[str, IndexRunSnapshot] = {}
 
     def prime(self, snapshots: Dict[str, IndexRunSnapshot]) -> None:
-        """載入上一次的判定結果 (例如 daemon 重啟後從 store 讀回來)。"""
+        """Load the previous verdicts, e.g. after a daemon restart."""
         self.previous = dict(snapshots)
 
     def scan(
@@ -94,7 +96,7 @@ class MonitorService:
         lsf_jobs: List[LsfJobView] = []
         lsf_note: Optional[str] = None
         if not use_lsf:
-            lsf_note = "已停用 LSF 查詢"
+            lsf_note = "LSF queries disabled"
         else:
             lsf_jobs, error = self.collector.fetch_lsf_jobs()
             if error:
@@ -148,7 +150,7 @@ class MonitorService:
 
 
 def _apply_qa(snapshot: IndexRunSnapshot, report: IndexQaReport) -> IndexRunSnapshot:
-    """把 QA 結果收斂進 case 狀態 (COMPLETED_MARKER -> DONE / FAILED)。"""
+    """Fold QA results into case states (COMPLETED_MARKER -> DONE / FAILED)."""
     cases = {}
     changed = False
     for case_id, case in snapshot.cases.items():

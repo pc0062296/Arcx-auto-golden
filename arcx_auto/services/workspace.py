@@ -1,21 +1,24 @@
-"""WorkspaceBuilder —— 建立 wave 的隔離目錄。
+"""WorkspaceBuilder -- create the isolated directory for each wave.
 
     <run_root>/<run_id>/wave_001/
-      arcx.cfg                    快照 (含 sha256)
-      dir_map                     快照
+      arcx.cfg                    snapshot (with sha256)
+      dir_map                     snapshot
       .arcx_auto/
-        manifest.json             這個 wave 的完整意圖
-        special_cfg/<index>.cfg   每個 index 的 special.cfg 快照
-        lock                      防止同一個 wave 被跑兩次
-        attempts/                 rerun 前備份失敗現場的地方
-      <index run folders>/        Arcx 自己建立
+        manifest.json             this wave's full intent
+        special_cfg/<index>.cfg   snapshot of each index's special.cfg
+        lock                      stops the same wave running twice
+        attempts/                 where a rerun backs up the failed state
+      <index run folders>/        created by Arcx itself
 
-**為什麼要快照而不是直接用原檔**: 三天後回頭做 QA 或查問題時, 用的必須是
-提交當下那份 cfg。原檔在這期間被改過是常態, 而「當時到底用了什麼設定」
-是除錯的救命稻草。代價是 cfg 內的路徑必須是絕對的 (Preflight 會擋)。
+**Why snapshot instead of using the originals**: doing QA or debugging three
+days later has to read the cfg the run actually used. The original being edited
+in the meantime is normal, and "what settings were in force at the time" is the
+single most useful thing when debugging. The cost is that paths inside the cfg
+must be absolute, which Preflight enforces.
 
-**wave 目錄是三個邊界的交集**: Arcx 的隔離邊界、bjobs_manage.py 的操作邊界、
-rerun 的作用域。三者用同一個路徑前綴定義, 不需要額外的對映表。
+**The wave directory is where three boundaries coincide**: Arcx's isolation
+boundary, bjobs_manage.py's operating scope, and the scope of a rerun. One path
+prefix defines all three, so no mapping table is needed.
 """
 
 from __future__ import annotations
@@ -35,14 +38,14 @@ META_DIR = ".arcx_auto"
 
 
 class WorkspaceError(Exception):
-    """建立 workspace 時的錯誤。刻意讓它中止流程 —— 半成品的 workspace
-    比沒有 workspace 更糟。
+    """An error while building a workspace. It deliberately aborts the flow:
+    a half-built workspace is worse than none.
     """
 
 
 @dataclass(frozen=True)
 class WaveWorkspace:
-    """一個已建立好的 wave 目錄。"""
+    """A wave directory that has been created."""
 
     wave_name: str
     path: str
@@ -65,7 +68,7 @@ class WaveWorkspace:
 
 
 class WorkspaceBuilder:
-    """把 WavePlan 變成磁碟上的目錄。"""
+    """Turns a WavePlan into directories on disk."""
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or Settings()
@@ -80,10 +83,10 @@ class WorkspaceBuilder:
         run_id: str = "",
         now: Optional[float] = None,
     ) -> List[WaveWorkspace]:
-        """為 plan 中的每個 wave 建立目錄。
+        """Create a directory for every wave in the plan.
 
-        任何一個 wave 建立失敗就整個中止並丟出 WorkspaceError ——
-        留下一半的 workspace 會讓後續的狀態判斷變得無法信任。
+        If any wave fails the whole thing aborts with WorkspaceError: half a
+        workspace would make every later state judgement untrustworthy.
         """
         now = now if now is not None else time.time()
         run_dir = os.path.abspath(os.path.expanduser(run_dir))
@@ -92,7 +95,7 @@ class WorkspaceBuilder:
 
         for path, label in ((arcx_cfg, "arcx.cfg"), (dir_map, "dir_map")):
             if not os.path.isfile(path):
-                raise WorkspaceError("找不到 %s: %s" % (label, path))
+                raise WorkspaceError("%s not found: %s" % (label, path))
 
         workspaces: List[WaveWorkspace] = []
         for wave in plan.waves:
@@ -106,8 +109,10 @@ class WorkspaceBuilder:
                     dir_map: str, run_id: str, now: float) -> WaveWorkspace:
         path = os.path.join(run_dir, wave.name)
         if os.path.isdir(path) and os.listdir(path):
-            # 絕不覆蓋既有結果。Preflight 應該已經擋下來, 這裡是最後一道防線。
-            raise WorkspaceError("目標目錄已存在且非空: %s" % path)
+            # Never overwrite existing results. Preflight should have caught
+            # this already; this is the last line of defence.
+            raise WorkspaceError(
+                "target directory already exists and is not empty: %s" % path)
 
         meta_dir = os.path.join(path, META_DIR)
         special_dir = os.path.join(meta_dir, "special_cfg")
@@ -164,16 +169,17 @@ class WorkspaceBuilder:
 
     def _snapshot_special_cfgs(self, wave: Wave,
                                special_dir: str) -> Dict[str, Any]:
-        """把每個 index 的 special.cfg 也存一份。
+        """Snapshot each index's special.cfg as well.
 
-        「當初 O_QCAP_LSF_NUM 設多少」是事後檢討分波是否合理的關鍵資訊,
-        而那個檔案隨時可能被改。
+        "What was O_QCAP_LSF_NUM at the time" is the key input when reviewing
+        whether the wave sizing was sensible, and that file can change at any
+        moment.
         """
         result: Dict[str, Any] = {}
         for spec in wave.indices:
             source = os.path.join(spec.path, self.layout.special_cfg_name)
             if not os.path.isfile(source):
-                result[spec.index_key] = {"error": "找不到 %s" % source}
+                result[spec.index_key] = {"error": "%s not found" % source}
                 continue
             dest = os.path.join(special_dir, "%s.cfg" % spec.index_key)
             shutil.copy2(source, dest)
@@ -183,7 +189,7 @@ class WorkspaceBuilder:
 
 
 def sha256(path: str) -> str:
-    """檔案內容的 sha256。用來判斷快照與原檔是否已經分歧。"""
+    """sha256 of a file, used to tell a snapshot from a diverged original."""
     digest = hashlib.sha256()
     try:
         with open(path, "rb") as handle:

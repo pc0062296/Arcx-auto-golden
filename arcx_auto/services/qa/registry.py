@@ -1,29 +1,34 @@
-"""QA 檢查的註冊與執行。
+"""Registering and running QA checks.
 
-一條檢查長這樣:
+A check looks like this:
 
-    @qa_check(id="NETLIST_MISSING", title="netlist 缺失",
+    @qa_check(id="NETLIST_MISSING", title="netlist missing",
               severity=Severity.FATAL, scope=Scope.CASE, stage=Stage.POST)
     def netlist_missing(case: CaseContext):
-        '''這段 docstring 會直接顯示在 UI 上。'''
+        '''This docstring is what the UI shows.'''
         missing = case.missing_artifacts()
         if not missing:
             return None
-        return case.fail("缺少 %d 個產出物" % len(missing),
+        return case.fail("%d artifact(s) missing" % len(missing),
                          evidence={"missing": [a.relpath for a in missing]})
 
-回傳 None / [] 代表通過; 回傳 Issue 或 List[Issue] 代表發現問題。
+Returning None or [] means the check passed; an Issue or a list of Issues means
+something was found.
 
-三個關鍵性質:
+Three properties that matter:
 
-  1. **錯誤隔離。** 既然要讓工程師自己加規則, 他們寫的 function 一定會有 bug。
-     每條檢查都在 try 裡跑, 爆炸的轉成 QA_INTERNAL_ERROR issue (附 traceback)
-     並繼續跑其他檢查。一條壞規則絕不能讓整個監控停擺。
+  1. **Error isolation.** Engineers are meant to add their own rules, so some of
+     those functions will have bugs. Each check runs inside a try; one that
+     throws becomes a QA_INTERNAL_ERROR issue (with a traceback) and the rest
+     still run. One bad rule must never take down the monitoring.
 
-  2. **id 是介面。** policy.yaml 只認 id 不認實作, 所以改檢查的實作不需要動
-     policy。重複註冊同一個 id 會直接報錯 —— 靜默覆蓋是最難查的那種問題。
+  2. **The id is the interface.** policy.yaml refers to ids, not to
+     implementations, so rewriting a check does not touch policy. Registering
+     the same id twice raises immediately -- silent shadowing is the hardest
+     kind of bug to find.
 
-  3. **可停用。** 設定裡可以關掉個別檢查 (disabled_checks), 不需要刪程式。
+  3. **Checks can be disabled** from settings (disabled_checks) without
+     deleting code.
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ INTERNAL_ERROR_ID = "QA_INTERNAL_ERROR"
 
 @dataclass(frozen=True)
 class CheckSpec:
-    """一條註冊好的檢查。"""
+    """One registered check."""
 
     id: str
     func: CheckFunc
@@ -66,17 +71,17 @@ class CheckSpec:
 
 
 class QaRegistry:
-    """所有 QA 檢查的登記處。"""
+    """Where every QA check registers itself."""
 
     def __init__(self) -> None:
         self._checks: Dict[str, CheckSpec] = {}
 
-    # -- 註冊 ---------------------------------------------------------
+    # -- Registration --------------------------------------------------
 
     def register(self, spec: CheckSpec) -> None:
         if spec.id in self._checks:
             raise ValueError(
-                "QA 檢查 id 重複: %s (已由 %s 註冊)"
+                "duplicate QA check id: %s (already registered by %s)"
                 % (spec.id, self._checks[spec.id].func.__name__)
             )
         self._checks[spec.id] = spec
@@ -89,7 +94,7 @@ class QaRegistry:
         scope: IssueScope = IssueScope.CASE,
         stage: IssueStage = IssueStage.POST,
     ) -> Callable[[CheckFunc], CheckFunc]:
-        """裝飾器。"""
+        """The decorator."""
 
         def decorator(func: CheckFunc) -> CheckFunc:
             self.register(CheckSpec(
@@ -101,7 +106,7 @@ class QaRegistry:
 
         return decorator
 
-    # -- 查詢 ---------------------------------------------------------
+    # -- Queries -------------------------------------------------------
 
     def all(self) -> Tuple[CheckSpec, ...]:
         return tuple(self._checks.values())
@@ -119,7 +124,7 @@ class QaRegistry:
             and spec.id not in blocked
         )
 
-    # -- 執行 ---------------------------------------------------------
+    # -- Execution -----------------------------------------------------
 
     def run(
         self,
@@ -130,7 +135,7 @@ class QaRegistry:
         disabled: Iterable[str] = (),
         attempt: int = 1,
     ) -> QaResult:
-        """跑符合 scope/stage 的所有檢查, 收集 issue。"""
+        """Run every check matching scope and stage, collecting issues."""
         issues: List[Issue] = []
         ran: List[str] = []
         crashed: List[str] = []
@@ -140,23 +145,24 @@ class QaRegistry:
             context._current = spec.metadata()
             try:
                 outcome = spec.func(context)
-            except Exception:  # noqa: BLE001 - 刻意攔截所有例外, 見模組 docstring
+            except Exception:  # noqa: BLE001 - intentional, see module docstring
                 crashed.append(spec.id)
                 issues.append(Issue(
                     id=INTERNAL_ERROR_ID,
                     severity=Severity.UNKNOWN,
-                    message="檢查 %s 執行時發生例外" % spec.id,
+                    message="check %s raised an exception" % spec.id,
                     scope=scope,
                     stage=stage,
-                    title="QA 檢查本身出錯",
+                    title="a QA check itself failed",
                     index_key=getattr(context, "index_key", None),
                     case_id=getattr(context, "case_id", None),
                     evidence={
                         "check_id": spec.id,
                         "traceback": traceback.format_exc(limit=8),
                     },
-                    doc="一條檢查自己爆炸了。這不代表 case 有問題, 而是規則有 bug, "
-                        "但也不能當成通過 —— 所以嚴重度是 UNKNOWN。",
+                    doc="A check crashed. That does not mean the case is bad, "
+                        "it means the rule has a bug -- but it cannot count as "
+                        "a pass either, hence UNKNOWN.",
                 ))
                 continue
             finally:
@@ -184,6 +190,6 @@ def _normalize(outcome: CheckReturn) -> List[Issue]:
     return [i for i in outcome if isinstance(i, Issue)]
 
 
-# 全域 registry。checks_*.py 匯入時會把自己註冊進來。
+# The global registry. Importing checks_*.py registers into it.
 REGISTRY = QaRegistry()
 qa_check = REGISTRY.check

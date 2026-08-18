@@ -1,15 +1,17 @@
-"""Collector —— 把檔案系統與 LSF 的觀測組合成一份不可變快照。
+"""Collector -- combine filesystem and LSF observations into one snapshot.
 
-職責邊界: Collector 只負責「看到什麼」, **不做任何判斷**。
-判斷全部交給 StateEngine (純函數) 與 QA Registry。
+Scope: the Collector records **what was seen** and decides nothing. Deciding
+belongs to StateEngine (pure) and to the QA registry.
 
-LSF job 對回 case 的難處: Arcx 送出的子 job 沒有可辨識的 job name。
-但 cmd_folder/cmd_file_N 這個 script 裡的 `cd <path>` 直接給出該 job 的
-執行路徑, 是**確定性**的依據 —— 不需要去猜 log 的格式。依成本由低到高:
+Mapping LSF jobs back to cases is awkward because the child jobs Arcx submits
+carry no identifiable job name. But the `cd <path>` line inside
+cmd_folder/cmd_file_N states the job's execution path directly, which is
+**deterministic** -- no guessing at log formats. Cheapest first:
 
-  1. output_file 直接等於該 case 的 log 路徑
-  2. exec_cwd / sub_cwd 落在 cmd_file 指出的執行路徑底下
-  3. exec_cwd / sub_cwd 落在 case run dir 底下 (exec_path 解析失敗時的退路)
+  1. output_file equals the case's log path
+  2. exec_cwd / sub_cwd sits under the path the cmd_file names
+  3. exec_cwd / sub_cwd sits under the case run dir (fallback when exec_path
+     could not be resolved)
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from arcx_auto.domain.models import (
 
 
 class Collector:
-    """組合 FsAdapter + LsfAdapter 的觀測。"""
+    """Combines FsAdapter and LsfAdapter observations."""
 
     def __init__(
         self,
@@ -43,7 +45,7 @@ class Collector:
         self.lsf = lsf or LsfAdapter(self.settings.lsf)
 
     # ------------------------------------------------------------------
-    # 公開入口
+    # Public entry points
     # ------------------------------------------------------------------
 
     def collect_index_run(
@@ -53,10 +55,11 @@ class Collector:
         lsf_jobs: Optional[List[LsfJobView]] = None,
         now: Optional[float] = None,
     ) -> IndexRunObservation:
-        """觀測單一 index run folder。
+        """Observe one index run folder.
 
-        ``lsf_jobs`` 由呼叫端一次查好後傳入 —— 監控多個 run folder 時
-        絕不能每個都各查一次 bjobs (見 LsfAdapter 的批次查詢設計)。
+        ``lsf_jobs`` is fetched once by the caller and passed in: monitoring
+        several run folders must not call bjobs once per folder (see the batch
+        query design in LsfAdapter).
         """
         now = now if now is not None else time.time()
         observation = self.fs.scan_index_run_folder(run_folder, index_key, now=now)
@@ -70,7 +73,7 @@ class Collector:
         lsf_jobs: Optional[List[LsfJobView]] = None,
         now: Optional[float] = None,
     ) -> List[IndexRunObservation]:
-        """觀測一個 wave 目錄底下所有 index run folder。"""
+        """Observe every index run folder under a wave directory."""
         now = now if now is not None else time.time()
         results: List[IndexRunObservation] = []
         for index_key, path in self.fs.list_index_run_folders(wave_dir):
@@ -80,15 +83,16 @@ class Collector:
         return results
 
     def fetch_lsf_jobs(self) -> Tuple[List[LsfJobView], Optional[str]]:
-        """一次取回本帳號所有 job。回傳 (jobs, error)。
+        """Fetch every job this account owns. Returns (jobs, error).
 
-        error 非 None 時代表 LSF 資料不可用 —— 呼叫端必須把
-        ``TransitionContext.lsf_data_available`` 設為 False, 否則會誤判 LOST。
+        A non-None error means LSF data is unavailable, and the caller must set
+        ``TransitionContext.lsf_data_available`` to False or cases will be
+        falsely declared LOST.
         """
         return self.lsf.list_user_jobs()
 
     # ------------------------------------------------------------------
-    # LSF job 對應
+    # Mapping LSF jobs to cases
     # ------------------------------------------------------------------
 
     def attach_lsf(
@@ -96,11 +100,11 @@ class Collector:
         observation: IndexRunObservation,
         jobs: List[LsfJobView],
     ) -> IndexRunObservation:
-        """把 LSF job 掛到對應的 case 上。"""
+        """Attach each LSF job to the case it belongs to."""
         if not observation.cases:
             return observation
 
-        # 先縮小候選範圍: 只留下屬於這個 run folder 的 job
+        # Narrow the candidates to jobs under this run folder first
         candidates = [j for j in jobs if j.belongs_to(observation.run_folder)]
         if not candidates:
             return observation
@@ -127,17 +131,20 @@ class Collector:
         by_log: Dict[str, LsfJobView],
         by_dir: List[Tuple[str, LsfJobView]],
     ) -> Optional[LsfJobView]:
-        # 方式 1: output_file 就是這個 case 的 log —— 最可靠
+        # Method 1: output_file is this case's log -- the most reliable
         if case.log_path:
             direct = by_log.get(os.path.abspath(case.log_path))
             if direct is not None:
                 return direct
 
-        # 方式 2/3: job 的 cwd 落在 cmd_file 指出的執行路徑, 或 case run dir 底下。
+        # Methods 2 and 3: the job cwd sits under the path from the cmd_file,
+        # or under the case run dir.
         #
-        # 只接受「job 的 cwd 在 case 路徑之內」這個方向。反向比對 (job 的 cwd 是
-        # case 目錄的**上層**) 會把在 index run folder 執行的 parent Arcx job
-        # 掛到底下每一個 case 上, 讓所有 case 顯示同一個 job —— 比對不到還糟。
+        # Only this direction is accepted -- the job cwd inside the case path.
+        # Matching the other way (the job cwd being an *ancestor* of the case
+        # dir) would attach the parent Arcx job, which runs in the index run
+        # folder, to every case beneath it, so the whole table would show one
+        # job. That is worse than matching nothing.
         for base in (case.exec_path, case.case_dir):
             if not base:
                 continue

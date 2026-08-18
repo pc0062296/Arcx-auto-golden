@@ -1,236 +1,257 @@
 # Arcx Auto Golden
 
-RC extraction 自動化提交、監控、判定與重跑系統。
+Automated submission, monitoring, QA and rerun for RC extraction runs driven by
+Arcx.
 
-目標：把「人工盯梢 + 事後撈問題」變成「系統盯梢 + 人只做決策」，縮短 TAT。
+The goal is to replace "watch it by hand, then dig out the problems afterwards"
+with "the system watches, people only make decisions", and so cut turnaround
+time.
 
-完整設計請看 **[docs/architecture.md](docs/architecture.md)**。
+Full design: **[docs/architecture.md](docs/architecture.md)**.
 
 ---
 
-## 目前進度
+## Status
 
-| Phase | 內容 | 狀態 |
+| Phase | Contents | State |
 |---|---|---|
-| **0** | Domain + FsAdapter + Collector + StateEngine + `status` CLI | ✅ 已完成 |
-| **2a** | ArcxAdapter (dir_map / special.cfg) + WavePlanner + `plan` CLI | ✅ 已完成 |
-| **1a** | arcx.cfg parser + QA Registry + StateResolver + PRE 檢查 | ✅ 已完成 |
-| **1b** | Store + LockManager + Daemon + 唯讀 Web UI | ✅ 已完成 |
-| **2b** | Preflight + WorkspaceBuilder + Launcher + SubmissionController + `submit` | ✅ 已完成 |
-| 2b | Preflight + WorkspaceBuilder + Launcher + SubmissionController | 待做 |
-| 3 | Rerun Drain 狀態機 + Triage Queue | 待做 |
-| 4 | PolicyEngine 自動 remediation | 待做 |
-| 5 | Status Exporter + 公用碟總覽頁 | 待做 |
-
-> **Phase 0 與 2a 全部是唯讀的**：不寫入任何 run folder、不提交任何 job。
-> 目的是先驗證系統對 marker / log / dir_map / special.cfg 的理解是否正確 ——
-> 理解錯了，現在改最便宜。測試中有明確斷言保證這一點。
+| **0** | Domain + FsAdapter + Collector + StateEngine + `status` | done |
+| **2a** | ArcxAdapter (dir_map / special.cfg) + WavePlanner + `plan` | done |
+| **1a** | arcx.cfg parser + QA registry + StateResolver + PRE checks | done |
+| **1b** | Store + LockManager + Daemon + read-only web UI | done |
+| **2b** | Preflight + WorkspaceBuilder + Launcher + gate + `submit` | done |
+| 3 | Rerun drain state machine + triage queue | to do |
+| 4 | Policy engine and automatic remediation | to do |
+| 5 | Shared-disk export and history | to do |
 
 ---
 
-## 需求
+## Requirements
 
-* Python 3.9.10（或以上）
-* **零第三方相依**。PyYAML 只在讀 `.yaml` 設定檔時才需要；
-  沒有 PyYAML 就改用 `.json` 設定檔，結構完全相同。
+* Python 3.9.10 or newer
+* **Zero third-party dependencies.** PyYAML is needed only to read a `.yaml`
+  settings file; without it, use a `.json` settings file with the same
+  structure.
+* **Pure ASCII.** The whole tree contains no byte outside the ASCII range, and
+  a test enforces it.
 
 ---
 
-## 快速開始
+## Quick start
 
 ```bash
-# 1. 造一份假的 run folder（涵蓋完成/執行中/卡住/marker 不一致/孤兒目錄等情境）
+# 1. Build a fake run folder covering finished / running / stalled /
+#    inconsistent markers / orphan directories and so on
 python3 tests/fixtures/fake_run.py /tmp/arcx-demo
 
-# 2. 驗證 dir_map 解析
+# 2. Check that dir_map parses the way you expect
 python3 -m arcx_auto inspect dir-map /tmp/arcx-demo/dir_map --verify
 
-# 3. 看 run folder 狀態
+# 3. Look at the state of the run folders
 python3 -m arcx_auto status --wave-dir /tmp/arcx-demo/wave_001 --no-lsf --detail
 
-# 4. 產生分波計畫（只計算，不建目錄、不提交）
+# 4. Produce a wave plan (computes only; creates nothing, submits nothing)
 python3 -m arcx_auto plan --dir-map /tmp/arcx-demo/dir_map --all \
         --max-slots 100 --show-command
 ```
 
-## 對真實資料使用
+## Against real data
 
 ```bash
-# 解析真實的 dir_map，並檢查每個 index path 是否存在
+# Parse a real dir_map and check that every index path exists
 python3 -m arcx_auto inspect dir-map /path/to/dir_map --verify
 
-# 檢查某個 index 的資源需求（讀 special.cfg 的 O_QCAP_LSF_NUM + 數 GDS）
+# Inspect one index: read O_QCAP_LSF_NUM from special.cfg and count GDS files
 python3 -m arcx_auto inspect index /path/to/index1000/
 
-# 監控正在跑的 index run folder（會查 bjobs）
+# Monitor a running index run folder (queries bjobs)
 python3 -m arcx_auto status --run-folder /path/to/run/1000 --detail
 
-# 持續監控，並把狀態存進快取檔（stall 計時才能跨次呼叫累積）
+# Keep watching, persisting state so stall timing accumulates
 python3 -m arcx_auto status --wave-dir /path/to/wave_001 \
         --state-file ~/.arcx-auto/scan.json --watch 30
-
-# 分波計畫
-python3 -m arcx_auto plan --dir-map /path/to/dir_map \
-        --index 1000 1001 1002 --max-slots 200 --show-command
 ```
 
-所有指令都支援 `--json`，方便接後續工具或存檔比對。
+Every command supports `--json`.
 
-## 提交
+## Submitting
 
 ```bash
-# 1. 先看會發生什麼（預設就是 dry-run，不碰磁碟）
+# 1. See what would happen (a dry run by default; touches no disk)
 python3 -m arcx_auto submit --dir-map /path/dir_map --arcx-cfg /path/arcx.cfg \
         --all --max-slots 200 --run-id nightly
 
-# 2. 確認無誤後才真的送
+# 2. Once it looks right, do it for real
 python3 -m arcx_auto submit ... --run-id nightly --yes
 ```
 
-流程是 **檢查 → 建 wave 目錄 → 逐波過閘門 → bsub**。任一 FATAL 就完全不動手，
-不會留下半成品目錄。
+The flow is **check -> create wave directories -> pass the gate -> bsub**. Any
+FATAL stops everything before anything is created, so no half-built state is
+left behind.
 
-每個 wave 目錄裡會有 `arcx.cfg` / `dir_map` / `special.cfg` 的**快照**，
-Arcx 用快照跑而不是原檔 —— 三天後做 QA 時，用的必須是提交當下那份設定。
+Each wave directory holds a **snapshot** of `arcx.cfg`, `dir_map` and every
+`special.cfg`, and Arcx runs against the snapshot rather than the originals:
+QA three days later has to read the settings the run actually used.
 
-閘門條件：`已過 min_interval AND (NJOBS < 門檻 OR 已過 max_wait)`。
-純 OR 有漏洞（時間到了但 quota 還滿的，照送一樣塞爆），這個組合同時涵蓋
-「不會太密集」「不會塞爆」「不會無限期卡住」。
+The submitted command matches the hand-written form exactly:
 
-## 持續監控 + Web UI
-
-```bash
-# 終端機 1：daemon（唯一的寫入者）
-python3 -m arcx_auto daemon --run-id nightly --wave-dir /path/to/wave_001
-
-# 終端機 2：Web UI（唯讀，隨開隨關）
-python3 -m arcx_auto web            # 然後用 Chrome 開 http://127.0.0.1:8765/
+```
+cd <wave dir>
+bsub -q LVSRCE-0E.q -oo Arcx.log "Arcx -p <snapshot cfg> -d 1000 1002 -lsf0 -nt 50 --run"
 ```
 
-Web UI 只用標準庫 `http.server`，預設只綁 `127.0.0.1`、沒有任何寫入端點。
-四層 drill-down：所有 run → index 列表 + issue 摘要 → case 表格 → 單一 case 的證據。
+The gate releases when `min_interval elapsed AND (NJOBS < threshold OR max_wait
+elapsed)`. A plain OR has a hole -- once the timer expires, submitting while the
+quota is still full floods the queue anyway -- so this combination covers "not
+too dense", "not flooding" and "never stuck forever".
 
-daemon 可以隨時 Ctrl-C 再重啟 —— 它會從 `state.json` 接續上次的判定，
-即使那份檔案不見了也能從 run folder 重建。
+## Continuous monitoring and the web UI
 
-## 提交前檢查 arcx.cfg
+```bash
+# terminal 1: the daemon (the single writer)
+python3 -m arcx_auto daemon --run-id nightly --wave-dir /path/to/wave_001
+
+# terminal 2: the web UI (read only, open and close it freely)
+python3 -m arcx_auto web            # then open http://127.0.0.1:8765/
+```
+
+The web UI uses only the standard library `http.server`, binds to `127.0.0.1`
+by default, and has no write endpoints. Four levels of drill-down: all runs ->
+index list and issue summary -> case table -> the evidence for one case.
+
+The daemon can be stopped and restarted at any time: it resumes the previous
+verdicts from `state.json`, and rebuilds from the run folders even without it.
+
+## Validating arcx.cfg before submitting
 
 ```bash
 python3 -m arcx_auto check-cfg /path/to/arcx.cfg
 ```
 
-檢查 block 名稱是否重複、`QC_FLOW` 是否認得、引用的檔案是否存在。
-**行首旗標 `0` 或被 `#` 註解掉的行不會被檢查** —— 那些設定不生效，
-驗證它們只會製造假警報。
+Checks for duplicate block names, unknown `QC_FLOW` values, and missing
+referenced files. **Lines with a leading `0`, or commented out with `#`, are
+not checked** -- those settings never take effect, and verifying them would only
+manufacture false alarms. Exits 1 on a FATAL, so it chains into a submit script.
 
 ---
 
-## 指令總覽
+## Commands
 
-| 指令 | 用途 |
+| Command | Purpose |
 |---|---|
-| `status --run-folder PATH...` | 掃描指定的 index run folder |
-| `status --wave-dir PATH` | 掃描整個 wave 目錄底下所有 index run folder |
-| `plan --dir-map FILE --index ...` | 產生分波計畫（**不執行**） |
-| `inspect dir-map FILE` | 解析 dir_map，檢查 index 是否有缺漏 |
-| `inspect index PATH...` | 解析 special.cfg 與 GDS 數，算出 slot 需求 |
-| `check-cfg FILE` | 提交前檢查 arcx.cfg（有 FATAL 時 exit code 1） |
-| `submit --dir-map X --arcx-cfg Y` | 檢查 → 建 wave 目錄 → 逐波提交（**預設 dry-run**） |
-| `daemon --wave-dir PATH` | 持續監控，把狀態寫進 state root |
-| `web` | 啟動本機 Web UI（唯讀，只綁 127.0.0.1） |
+| `status --run-folder PATH...` | Scan the given index run folders |
+| `status --wave-dir PATH` | Scan every index run folder under a wave dir |
+| `plan --dir-map FILE --index ...` | Produce a wave plan (**never submits**) |
+| `submit --dir-map X --arcx-cfg Y` | Check, create wave dirs, submit (**dry run by default**) |
+| `daemon --wave-dir PATH` | Keep monitoring, writing state for the web UI |
+| `web` | Serve the local read-only dashboard |
+| `check-cfg FILE` | Validate arcx.cfg (exit 1 on FATAL) |
+| `inspect dir-map FILE` | Parse dir_map and report gaps |
+| `inspect index PATH...` | Parse special.cfg and count GDS, giving the slot demand |
 
-常用選項：`--json`、`--detail`、`--watch SEC`、`--state-file`、`--no-lsf`、`-c CONFIG`。
+Common options: `--json`, `--detail`, `--watch SEC`, `--state-file`, `--no-lsf`,
+`-c CONFIG`.
 
 ---
 
-## 設定
+## Configuration
 
-設定檔是**可選的**——所有欄位都有內建預設值。尋找順序：
+The settings file is optional; every field has a built-in default. Search
+order:
 
-1. `-c/--config` 明確指定
+1. `-c/--config`
 2. `./arcx_auto.yaml`
 3. `~/.arcx-auto/config/default.yaml`
 
-範本見 [`config/default.yaml`](config/default.yaml)。
-所有「對外部世界的假設」（marker 命名、log 命名、`special.cfg` 的欄位名、
-LSF 指令、公用碟路徑）都在設定裡，不寫死在程式邏輯中。
+See [`config/default.yaml`](config/default.yaml). Every assumption about the
+outside world -- marker naming, log naming, the `special.cfg` key, LSF commands,
+the shared disk path -- lives in settings rather than in code.
 
 ---
 
-## 開發
+## Development
 
 ```bash
-python3 -m unittest discover -s tests -v     # 全部測試
-python3 -m unittest tests.test_state_engine  # 單一模組
+python3 -m unittest discover -s tests -t .     # everything
+python3 -m unittest tests.test_state_engine    # one module
 ```
 
-測試**完全離線**：不需要 LSF、不需要 NFS、不需要 Arcx。
-`tests/fixtures/fake_run.py` 可以在毫秒內造出各種 run folder 情境，
-包含真實 job 要跑三天才會出現的狀況（卡住、job 消失、marker 不一致）。
+The tests are **fully offline**: no LSF, no NFS, no Arcx.
+`tests/fixtures/fake_run.py` builds any run folder situation in milliseconds,
+including the ones that take a real job three days to reach (stalled, job gone,
+inconsistent markers).
 
-### run folder 的兩個關鍵慣例
+### The two conventions that shape the code
 
 ```
-.queue.NDIO_1  .run.PDIO_1  .complete.NTN_1     marker，case id 是 cell 名稱
-NDIO_1/  PDIO_1/  NTN_1/                        case run dir（rerun 時刪這些）
-QC_Cc/  QC_Ct/  QC_Spice/                       Arcx 的 report，不是 case
-submit_bjob_cmd_file_1.log                      log，檔名只有流水號
-cmd_folder/cmd_file_1                           script，內含 `cd <case run dir>`
+.queue.NDIO_1  .run.PDIO_1  .complete.NTN_1   markers; case ids are cell names
+NDIO_1/  PDIO_1/  NTN_1/                      case run dirs (a rerun deletes these)
+QC_Cc/  QC_Ct/  QC_Spice/                     reports Arcx assembles, not cases
+submit_bjob_cmd_file_1.log                    logs, named only by number
+cmd_folder/cmd_file_1                         the script, with `cd <case run dir>`
 ```
 
-**① case id 是 cell 名稱，沒有共同樣式** → case run dir 用排除法辨識，
-排除清單在 `layout.non_case_dir_regexes`。
+**1. Case ids are cell names with no shared pattern**, so case run dirs are
+identified by exclusion; the exclusion list is `layout.non_case_dir_regexes`.
 
-**② log 檔名與 case 沒有關係** → `submit_bjob_cmd_file_1.log` 依編號配對
-`cmd_folder/cmd_file_1`，再從 script 的 `cd <path>` 取 basename 得到 case id。
-編號順序不保證等於任何排序，測試中有專門案例擋住「用編號猜」的偷懶實作。
+**2. Log filenames say nothing about their case.**
+`submit_bjob_cmd_file_1.log` pairs by number with `cmd_folder/cmd_file_1`, and
+that script's `cd <path>` names the case. The numbering matches no ordering, and
+a test with `cmd_file_1 -> ZZZ_LAST` and `cmd_file_2 -> AAA_FIRST` blocks any
+shortcut that guesses from the number.
 
-無法解析的 log 會進 `unresolved_logs` 並顯示在 `status` 的「掃描異常」區 ——
-代表有一個 case 我們監控不到，不能靜默忽略。
+A log whose case cannot be resolved lands in `unresolved_logs` and is shown
+under "scan anomalies": it means a case that cannot be monitored, which must
+never be dropped silently.
 
-### QA：期望產出物由 arcx.cfg 推導
+### QA: expected artifacts are derived from arcx.cfg
 
 ```
 arcx.cfg                                case run dir
-1 BEGIN_SETTINGS: blocking_naming_qcap    NTN_1/
-1   QC_FLOW = calQCAP                       blocking_naming_qcap_calQCAP/
+1 BEGIN_SETTING : blocking_nameing_1      NTN_1/
+1   QC_FLOW = calQCAP                       blocking_nameing_1_calQCAP/
 END_SETTINGS                                  work_calQCAP/
                                                 CCI_DB.spice
 ```
 
-規則：`<block>_<QC_FLOW>/work_<QC_FLOW>/<該 flow 的 netlist>`。
-每個 flow 產出什麼定義在 `qa.flows` —— **新增一種 EDA tool 只要改設定，不用改程式**。
+The rule is `<block>_<QC_FLOW>/work_<QC_FLOW>/<netlist for that flow>`, and what
+each flow produces is declared in `qa.flows`. **Adding an EDA tool is a settings
+change, not a code change.**
 
-要加一條檢查，在 `arcx_auto/services/qa/checks_case.py` 複製一個既有的來改：
+To add a check, copy an existing one in
+`arcx_auto/services/qa/checks_case.py`:
 
 ```python
-@qa_check(id="NETLIST_MISSING", title="netlist 缺失",
+@qa_check(id="NETLIST_MISSING", title="netlist missing",
           severity=Severity.FATAL, scope=CASE, stage=POST)
 def netlist_missing(case: CaseContext) -> Optional[Issue]:
-    """這段 docstring 會直接顯示在 UI 上。"""
+    """This docstring is what the UI shows."""
     missing = [a for a in case.expected_artifacts if not case.exists(a.relpath)]
     if not missing:
         return None
-    return case.fail("缺少 %d 個 netlist" % len(missing),
+    return case.fail("%d netlist(s) missing" % len(missing),
                      evidence={"missing": [a.relpath for a in missing]})
 ```
 
-要停用一條：設定裡的 `qa.disabled_checks` 加上它的 id，不用刪程式。
+To disable one, add its id to `qa.disabled_checks`; no code needs deleting.
 
-QA 的三個不可妥協性質：**「不知道」絕不當成通過**（`Severity.UNKNOWN`）、
-**一條壞規則不能拖垮監控**（每條檢查獨立 try）、**id 是介面**（重複註冊直接報錯）。
+Three properties the QA layer will not give up: **"could not check" never counts
+as a pass** (`Severity.UNKNOWN`), **one bad rule cannot take the monitoring
+down** (each check runs in its own try), and **the id is the interface**
+(registering a duplicate raises immediately).
 
-### 架構鐵律
+### The architectural rule
 
-依賴方向單向往下，絕不反向：
+Dependencies point one way and never back:
 
 ```
-L4 cli/       介面（薄層，無業務邏輯）
-L3 daemon/    編排（唯一寫入者）           [Phase 1]
-L2 services/  業務邏輯（可單元測試）
-L1 adapters/  唯一有 side effect 的地方
-L0 domain/    純資料 + 純函數，零 I/O
+L4 cli/, web/   interfaces (thin, no business logic)
+L3 daemon/      orchestration (the single writer)
+L2 services/    business logic (unit testable)
+L1 adapters/    the only place with side effects
+L0 domain/      pure data and pure functions, zero I/O
 ```
 
-`StateEngine` 與 `WavePlanner` 是**完全純函數** —— 這是本專案最重要的設計投資，
-因為真實 job 要跑好幾天，靠實跑來驗證判定邏輯的迭代速度無法接受。
+`StateEngine` and `WavePlanner` are **completely pure functions**. That is the
+most valuable investment in the project: real jobs take days, so validating
+decision logic by running them would never converge.

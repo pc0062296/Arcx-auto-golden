@@ -1,12 +1,13 @@
-"""Arcx 相關檔案格式與指令組裝。
+"""Arcx file formats and command assembly.
 
-涵蓋三件事:
-  1. dir_map  (Perl hash)          -> DirMap
-  2. special.cfg (key = value)     -> cpu_per_case
-  3. Arcx 指令組裝                  -> List[str]
+Three things:
+  1. dir_map  (a Perl hash)      -> DirMap
+  2. special.cfg (key = value)   -> cpu_per_case
+  3. Arcx command assembly       -> List[str]
 
-解析一律採「寬鬆比對 + 明確警告」: 格式稍有出入時盡量讀出能讀的部分,
-把疑點放進 warnings 讓人看到, 而不是丟例外讓整個流程停擺。
+Parsing is lenient with explicit warnings: read as much as possible when the
+format deviates and surface the doubts, rather than raising and stopping the
+whole flow.
 """
 
 from __future__ import annotations
@@ -19,18 +20,19 @@ from arcx_auto.adapters.fs import FsAdapter
 from arcx_auto.config.settings import LayoutSettings, PlanSettings
 from arcx_auto.domain.models import DirMap, IndexSpec
 
-# "1000" => "/path/to/index1000/"   支援單/雙引號, 容忍空白與缺漏逗號
+# "1000" => "/path/to/index1000/"  -- single or double quotes, tolerant of
+# whitespace and of a missing trailing comma
 _DIR_MAP_ENTRY_RE = re.compile(
     r"""["'](?P<key>[^"']+)["']\s*=>\s*["'](?P<value>[^"']*)["']"""
 )
-# O_QCAP_LSF_NUM = 4    支援 = 或 :, 可含引號, # 之後為註解
+# O_QCAP_LSF_NUM = 4  -- accepts = or :, optional quotes, # starts a comment
 _KV_RE = re.compile(
     r"""^\s*(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*[=:]\s*(?P<value>.*?)\s*$"""
 )
 
 
 class ArcxAdapter:
-    """Arcx 的檔案格式與指令介面。"""
+    """Arcx file formats and command interface."""
 
     def __init__(
         self,
@@ -47,7 +49,7 @@ class ArcxAdapter:
     # ------------------------------------------------------------------
 
     def parse_dir_map(self, path: str) -> DirMap:
-        """解析 Perl 格式的 dir_map。
+        """Parse the Perl-style dir_map.
 
             %dir_map =(
             "1000" => "/path/to/index1000/"  ,
@@ -57,9 +59,10 @@ class ArcxAdapter:
             );
             return 1 ;
 
-        注意 min/max 是保留 meta key, **不是真實 index**, 不可拿去跑。
-        原始檔案中 "min" 那行甚至沒有結尾逗號 —— 這正是要用 regex 逐項抽取
-        而不是嚴格解析語法的原因。
+        min and max are reserved meta keys, **not real indices**, and must
+        never be passed to Arcx. In real files the "min" line does not even
+        have a trailing comma, which is exactly why entries are extracted with
+        a regex rather than by parsing the syntax strictly.
         """
         resolved = os.path.abspath(os.path.expanduser(path))
         warnings: List[str] = []
@@ -70,10 +73,10 @@ class ArcxAdapter:
         except OSError as exc:
             return DirMap(
                 source_path=resolved,
-                warnings=("無法讀取 dir_map: %s" % exc,),
+                warnings=("cannot read dir_map: %s" % exc,),
             )
 
-        # 去掉整行註解, 避免被註解掉的條目被誤抓
+        # Drop whole-line comments so commented-out entries are not picked up
         lines = []
         for line in text.splitlines():
             stripped = line.lstrip()
@@ -94,12 +97,13 @@ class ArcxAdapter:
                 continue
             if key in entries and entries[key] != value:
                 warnings.append(
-                    "index %s 重複定義且值不同, 採用最後一筆" % key
+                    "index %s is defined twice with different values; "
+                    "last one wins" % key
                 )
             entries[key] = value
 
         if not entries:
-            warnings.append("dir_map 內沒有解析到任何 index 條目")
+            warnings.append("no index entries were parsed from dir_map")
 
         warnings.extend(self._check_dir_map_range(entries, meta))
 
@@ -114,10 +118,11 @@ class ArcxAdapter:
     def _check_dir_map_range(
         entries: Dict[str, str], meta: Dict[str, str]
     ) -> List[str]:
-        """用 min/max 檢查 index 是否有缺漏。
+        """Use min/max to detect missing indices.
 
-        min/max 宣告了預期的範圍, 實際條目少於範圍代表 dir_map 可能被改壞 ——
-        這種問題人工看不出來, 但會導致某些 index 靜默地跑不到。
+        min and max declare the expected range. Fewer entries than the range
+        suggests the dir_map was damaged -- invisible to the eye, but it makes
+        some indices silently never run.
         """
         warnings: List[str] = []
         low_raw = meta.get("min")
@@ -127,10 +132,11 @@ class ArcxAdapter:
         try:
             low, high = int(low_raw), int(high_raw)
         except ValueError:
-            warnings.append("dir_map 的 min/max 不是整數: %r / %r" % (low_raw, high_raw))
+            warnings.append(
+                "dir_map min/max are not integers: %r / %r" % (low_raw, high_raw))
             return warnings
         if low > high:
-            warnings.append("dir_map 的 min(%d) 大於 max(%d)" % (low, high))
+            warnings.append("dir_map min (%d) is greater than max (%d)" % (low, high))
             return warnings
 
         numeric = set()
@@ -144,7 +150,7 @@ class ArcxAdapter:
             preview = ", ".join(str(n) for n in missing[:10])
             suffix = " ..." if len(missing) > 10 else ""
             warnings.append(
-                "min/max 宣告 %d-%d, 但缺少 %d 個 index: %s%s"
+                "min/max declare %d-%d but %d index/indices are missing: %s%s"
                 % (low, high, len(missing), preview, suffix)
             )
         return warnings
@@ -154,14 +160,14 @@ class ArcxAdapter:
     # ------------------------------------------------------------------
 
     def parse_key_values(self, path: str) -> Tuple[Dict[str, str], List[str]]:
-        """解析 key = value 形式的設定檔。回傳 (values, warnings)。"""
+        """Parse a key = value settings file. Returns (values, warnings)."""
         warnings: List[str] = []
         values: Dict[str, str] = {}
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 raw_lines = handle.readlines()
         except OSError as exc:
-            return values, ["無法讀取 %s: %s" % (path, exc)]
+            return values, ["cannot read %s: %s" % (path, exc)]
 
         for raw in raw_lines:
             line = raw.split("#", 1)[0].strip()
@@ -176,34 +182,34 @@ class ArcxAdapter:
         return values, warnings
 
     def read_cpu_per_case(self, index_path: str) -> Tuple[int, List[str]]:
-        """從 <index_path>/special.cfg 讀出每個 case 需要的 CPU 數。
+        """Read the per-case CPU count from <index_path>/special.cfg.
 
-        對應欄位 O_QCAP_LSF_NUM (可在 settings 覆寫)。
+        The key is O_QCAP_LSF_NUM, overridable in settings.
         """
         warnings: List[str] = []
         cfg_path = os.path.join(index_path, self.layout.special_cfg_name)
         key = self.layout.special_cfg_cpu_key
 
         if not os.path.isfile(cfg_path):
-            warnings.append("找不到 %s" % cfg_path)
+            warnings.append("%s not found" % cfg_path)
             return (self.plan.default_cpu_per_case, warnings)
 
         values, parse_warnings = self.parse_key_values(cfg_path)
         warnings.extend(parse_warnings)
 
         if key not in values:
-            warnings.append("%s 內找不到 %s" % (cfg_path, key))
+            warnings.append("%s does not contain %s" % (cfg_path, key))
             return (self.plan.default_cpu_per_case, warnings)
 
         raw = values[key]
         try:
             cpu = int(float(raw))
         except ValueError:
-            warnings.append("%s = %r 不是數字" % (key, raw))
+            warnings.append("%s = %r is not a number" % (key, raw))
             return (self.plan.default_cpu_per_case, warnings)
 
         if cpu <= 0:
-            warnings.append("%s = %d 不是正數" % (key, cpu))
+            warnings.append("%s = %d is not positive" % (key, cpu))
         return (cpu, warnings)
 
     # ------------------------------------------------------------------
@@ -211,9 +217,9 @@ class ArcxAdapter:
     # ------------------------------------------------------------------
 
     def build_index_spec(self, index_key: str, index_path: str) -> IndexSpec:
-        """把一個 index 變成 WavePlanner 可以吃的資源描述。
+        """Turn one index into the resource footprint WavePlanner consumes.
 
-            slots = O_QCAP_LSF_NUM x gds_count
+            slots = O_QCAP_LSF_NUM * gds_count
         """
         resolved = os.path.abspath(os.path.expanduser(index_path))
         warnings: List[str] = []
@@ -224,12 +230,12 @@ class ArcxAdapter:
                 path=resolved,
                 gds_count=0,
                 cpu_per_case=0,
-                error="index path 不存在或不是目錄",
+                error="index path does not exist or is not a directory",
             )
 
         gds_count, _names = self.fs.count_gds(resolved)
         if gds_count == 0:
-            warnings.append("index path 內找不到任何 GDS")
+            warnings.append("no GDS files found in the index path")
 
         cpu, cpu_warnings = self.read_cpu_per_case(resolved)
         warnings.extend(cpu_warnings)
@@ -238,9 +244,10 @@ class ArcxAdapter:
 
         error: Optional[str] = None
         if gds_count == 0:
-            error = "沒有 GDS, 無法估算資源需求"
+            error = "no GDS files, cannot size the work"
         elif cpu <= 0:
-            error = "無法取得 %s, 無法估算資源需求" % self.layout.special_cfg_cpu_key
+            error = ("cannot read %s, cannot size the work"
+                     % self.layout.special_cfg_cpu_key)
 
         return IndexSpec(
             index_key=index_key,
@@ -254,7 +261,7 @@ class ArcxAdapter:
         )
 
     def match_keywords(self, path: str) -> Tuple[str, ...]:
-        """比對 path 中的優先關鍵字 (sram / ro / ...)。"""
+        """Match priority keywords (sram, ro, ...) against the path."""
         haystack = path.lower() if self.plan.keyword_ignore_case else path
         hits: List[str] = []
         for keyword in self.plan.priority_keywords:
@@ -264,7 +271,7 @@ class ArcxAdapter:
         return tuple(hits)
 
     # ------------------------------------------------------------------
-    # 指令組裝
+    # Command assembly
     # ------------------------------------------------------------------
 
     def build_run_command(
@@ -274,7 +281,7 @@ class ArcxAdapter:
         rerun: bool = False,
         lsf_settings: Optional["object"] = None,
     ) -> List[str]:
-        """組出 Arcx 執行指令。
+        """Assemble the Arcx invocation.
 
             Arcx -p arcx.cfg -d 1000 1001 -lsf0 -nt 50 --run
             Arcx -p arcx.cfg -d 1000 1001 -lsf0 -nt 50 -keep_dir --run   (rerun)

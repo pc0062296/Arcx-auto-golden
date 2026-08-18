@@ -1,7 +1,7 @@
-"""列舉型別。
+"""Enumerations.
 
-刻意使用 str 作為基底, 讓 JSON 序列化 / CLI 輸出 / 設定檔比對都能直接用字串,
-不需要額外的轉換層。
+Deliberately str-based so that JSON serialisation, CLI output and config
+comparison can all use the plain string without a conversion layer.
 """
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ from enum import Enum
 
 
 class MarkerKind(str, Enum):
-    """Arcx 在 index run folder 內建立的隱藏 marker 檔種類。
+    """Hidden marker files Arcx creates inside an index run folder.
 
-    檔名形式為 ``.<kind>.<case_id>``, 例如 ``.complete.case1``。
+    Named ``.<kind>.<case_id>``, for example ``.complete.NTN_1``.
     """
 
     QUEUE = "queue"
@@ -21,7 +21,7 @@ class MarkerKind(str, Enum):
 
 
 class LsfState(str, Enum):
-    """LSF job 狀態 (取自 bjobs 的 STAT 欄位)。"""
+    """LSF job state, from the STAT column of bjobs."""
 
     PEND = "PEND"
     RUN = "RUN"
@@ -39,7 +39,7 @@ class LsfState(str, Enum):
 
     @property
     def is_active(self) -> bool:
-        """job 仍佔用或等待資源 (尚未結案)。"""
+        """The job still holds or waits for resources; it has not finished."""
         return self in (
             LsfState.PEND,
             LsfState.RUN,
@@ -51,25 +51,27 @@ class LsfState(str, Enum):
 
 
 class CaseState(str, Enum):
-    """單一 case 的狀態。
+    """State of a single case.
 
-    比使用者原本提的 queue/run/fail/done 更細, 因為實務上最麻煩的幾類
-    (suspended / stalled / lost / 假成功) 都藏在那四態之間。
+    Finer grained than the queue/run/fail/done the user first described,
+    because in practice the troublesome categories -- suspended, stalled, lost,
+    and false success -- all hide between those four.
 
-    重點: ``COMPLETED_MARKER`` 與 ``DONE`` 刻意分開 —— ``.complete.caseN``
-    只代表 Arcx 認為它跑完了, 不代表結果正確。中間必須經過 QA 驗證 (Phase 1)。
+    Note that ``COMPLETED_MARKER`` and ``DONE`` are deliberately separate: a
+    ``.complete.<case>`` marker only means Arcx believes it finished, not that
+    the result is correct. QA has to pass in between.
     """
 
-    PENDING = "PENDING"                    # 已知有這個 case, 但還沒有任何 marker
+    PENDING = "PENDING"                    # known case, no marker yet
     QUEUED = "QUEUED"                      # .queue marker / LSF PEND
     RUNNING = "RUNNING"                    # .run marker / LSF RUN
-    SUSPENDED = "SUSPENDED"                # LSF 回報 *SUSP
-    STALLED = "STALLED"                    # 看似在跑, 但 log 長時間無成長
-    COMPLETED_MARKER = "COMPLETED_MARKER"  # .complete 出現, 尚未通過 QA
-    DONE = "DONE"                          # 通過 QA           [Phase 1]
-    FAILED = "FAILED"                      # QA 判定失敗        [Phase 1]
-    LOST = "LOST"                          # marker 停在中途, LSF job 已不存在
-    UNKNOWN = "UNKNOWN"                    # 觀測資料不足以判定
+    SUSPENDED = "SUSPENDED"                # LSF reports *SUSP
+    STALLED = "STALLED"                    # looks alive, log is not growing
+    COMPLETED_MARKER = "COMPLETED_MARKER"  # .complete present, QA not run yet
+    DONE = "DONE"                          # QA passed
+    FAILED = "FAILED"                      # QA failed
+    LOST = "LOST"                          # marker mid-flight, LSF job gone
+    UNKNOWN = "UNKNOWN"                    # not enough observation to decide
 
     @property
     def is_terminal(self) -> bool:
@@ -77,7 +79,7 @@ class CaseState(str, Enum):
 
     @property
     def is_in_flight(self) -> bool:
-        """仍在 LSF 手上 (佔用或等待資源)。"""
+        """Still in LSF's hands, holding or waiting for resources."""
         return self in (
             CaseState.QUEUED,
             CaseState.RUNNING,
@@ -87,7 +89,7 @@ class CaseState(str, Enum):
 
     @property
     def needs_attention(self) -> bool:
-        """需要人看一眼的狀態。"""
+        """States a human should look at."""
         return self in (
             CaseState.SUSPENDED,
             CaseState.STALLED,
@@ -98,11 +100,12 @@ class CaseState(str, Enum):
 
 
 class Completeness(str, Enum):
-    """rerun 時判定「這個 case 的 run dir 要不要刪掉重跑」。
+    """Whether a rerun should delete this case's run dir and redo it.
 
-    刻意保留 UNKNOWN 三態 (而非 bool): 見 docs/architecture.md §6.1 ——
-    在這個決策上, 「不確定 → 傾向刪掉重跑」是安全方向, 因為誤刪的代價
-    (浪費一次運算) 可回收, 漏刪的代價 (殘缺結果被當成功) 不可回收。
+    Three states rather than a bool on purpose (see docs/architecture.md 6.1):
+    here "not sure" leans towards deleting, because the costs are asymmetric.
+    Deleting something that was complete wastes one run; keeping something that
+    was incomplete ships a truncated result as if it had succeeded.
     """
 
     COMPLETE = "COMPLETE"
@@ -111,11 +114,12 @@ class Completeness(str, Enum):
 
 
 class Severity(str, Enum):
-    """QA issue 的嚴重度。
+    """Severity of a QA issue.
 
-    UNKNOWN 是刻意存在的一等公民: 「我檢查不了」絕不能被當成「通過」。
-    讀不到 case run dir、格式不認得、QA function 自己爆炸 —— 這些都是
-    UNKNOWN, 而 UNKNOWN 在 rerun 判定上偏向「刪掉重跑」(architecture §6.1)。
+    UNKNOWN is a deliberate first class value meaning "I could not check".
+    An unreadable run dir, an unrecognised format, or a QA function that threw
+    must never be recorded as a pass, and in rerun decisions UNKNOWN leans
+    towards deleting and rerunning (architecture 6.1).
     """
 
     INFO = "INFO"
@@ -125,7 +129,7 @@ class Severity(str, Enum):
 
 
 class IssueScope(str, Enum):
-    """QA 檢查的作用範圍。"""
+    """What a QA check looks at."""
 
     CASE = "CASE"
     INDEX = "INDEX"
@@ -134,15 +138,15 @@ class IssueScope(str, Enum):
 
 
 class IssueStage(str, Enum):
-    """QA 檢查的執行時機。"""
+    """When a QA check runs."""
 
-    PRE = "PRE"    # 提交前
-    LIVE = "LIVE"  # 執行中
-    POST = "POST"  # 完成後
+    PRE = "PRE"    # before submission
+    LIVE = "LIVE"  # while running
+    POST = "POST"  # after completion
 
 
 class WaveState(str, Enum):
-    """一個 wave (一條 Arcx 指令 + 一個隔離目錄) 的生命週期。"""
+    """Lifecycle of one wave: one Arcx command in one isolated directory."""
 
     PLANNED = "PLANNED"
     WAITING_GATE = "WAITING_GATE"
@@ -154,10 +158,11 @@ class WaveState(str, Enum):
 
 
 class PlanMode(str, Enum):
-    """分波模式。
+    """Wave planning mode.
 
-    三者共用同一個 WavePlan 結構 —— OFF 只是「只有一個 wave」的特例,
-    MANUAL 只是「分組由人指定」。下游完全不需要分支處理。
+    All three share one WavePlan shape: OFF is just "a single wave" and MANUAL
+    is just "the grouping came from a human", so nothing downstream needs to
+    branch on the mode.
     """
 
     AUTO = "AUTO"

@@ -1,20 +1,21 @@
-"""假的 run folder 產生器 —— 本專案最重要的測試工具。
+"""Fake run folder generator -- the most important test tool in the project.
 
-真實 job 要跑好幾天, 靠實跑來驗證判定邏輯的迭代速度完全無法接受。
-這個產生器讓我們可以在**毫秒內**造出各種情境, 在沒有 LSF、沒有 NFS、
-沒有 Arcx 的機器上驗證整條 Collector -> StateEngine 的判定鏈。
+Real jobs take days, so validating decision logic by running them is hopeless.
+This generator builds any situation in **milliseconds**, letting the whole
+Collector -> StateEngine chain be exercised on a machine with no LSF, no NFS
+and no Arcx.
 
-產生的結構精確複製真實的 index run folder:
+The structure it produces mirrors a real index run folder exactly:
 
-    .queue.NDIO_1                  <- marker, case id 是 cell 名稱
+    .queue.NDIO_1                  markers; the case id is a cell name
     .run.PDIO_1
     .complete.NTN_1
-    NDIO_1/  PDIO_1/  NTN_1/       <- 每個 case 的 run dir
-    QC_Cc/  QC_Ct/  QC_Spice/      <- Arcx 整理的 report
-    submit_bjob_cmd_file_1.log     <- log, 檔名只有流水號
-    cmd_folder/cmd_file_1          <- script, 內含 `cd <case run dir>`
+    NDIO_1/  PDIO_1/  NTN_1/       per-case run dirs
+    QC_Cc/  QC_Ct/  QC_Spice/      reports Arcx assembles
+    submit_bjob_cmd_file_1.log     logs, named only by sequence number
+    cmd_folder/cmd_file_1          the script, containing `cd <case run dir>`
 
-也可以直接執行來造一份 demo 資料:
+It can also be run directly to build a demo data set:
 
     python3 tests/fixtures/fake_run.py /tmp/demo
     python3 -m arcx_auto status --wave-dir /tmp/demo/wave_001 --no-lsf --detail
@@ -36,24 +37,24 @@ cd {exec_path}
 
 
 class CaseSpec:
-    """描述一個 case 要造成什麼樣子。
+    """Describes the shape one case should be built in.
 
     kind:
-        complete       .complete marker + run dir + log + cmd_file   (正常完成)
-        running        .run marker + run dir + log + cmd_file        (執行中)
-        queued         .queue marker + run dir + cmd_file            (排隊中)
-        stalled        .run marker, 但 log 的 mtime 設在很久以前      (疑似卡住)
-        inconsistent   .complete 與 .run 同時存在                     (收尾不完整)
-        orphan_dir     只有 run dir, 沒有 marker 也沒有 log           (從未被提交)
-        orphan_marker  只有 marker, 沒有 run dir                      (目錄被誤刪)
-        no_cmd_file    有 log 但 cmd_file 缺失                        (無法對應到 case)
+        complete       .complete marker + run dir + log + cmd_file
+        running        .run marker + run dir + log + cmd_file
+        queued         .queue marker + run dir + cmd_file
+        stalled        .run marker, but the log mtime is set far in the past
+        inconsistent   .complete and .run both present (tidy-up incomplete)
+        orphan_dir     only a run dir, no marker and no log (never submitted)
+        orphan_marker  only a marker, no run dir (the directory was deleted)
+        no_cmd_file    a log but no cmd_file (cannot be mapped to a case)
 
-    artifacts 控制產出物 (case run dir 內的巢狀結構):
-        full            每個 block 的 netlist 都完整
-        missing_netlist flow 目錄與 work 目錄都在, 但 netlist 沒產出來 (假成功)
-        empty_netlist   netlist 存在但是 0 byte (job 一開始就死了)
-        missing_flow    整個 <block>_<flow>/ 目錄不存在 (該 flow 根本沒跑)
-        none            什麼都沒有
+    artifacts controls what is produced inside the case run dir:
+        full            every block's netlist is complete
+        missing_netlist flow and work dirs exist but no netlist (false success)
+        empty_netlist   the netlist exists but is 0 bytes (job died at once)
+        missing_flow    the whole <block>_<flow>/ directory is absent
+        none            nothing at all
     """
 
     def __init__(
@@ -106,10 +107,11 @@ def make_index_run_folder(
     start_num: int = 1,
     tool: str = "starrc",
 ) -> str:
-    """造一個 index run folder, 結構與真實範例一致。
+    """Build an index run folder matching the real structure.
 
-    log 的流水號與 case 的順序**刻意錯開**(見 build_demo), 用來驗證
-    「絕不能用編號猜 case」這件事 —— 唯一可靠的對應是讀 cmd_file。
+    Log sequence numbers are **deliberately out of step** with case ordering
+    (see build_demo) to prove that case identity is never guessed from the
+    number: reading the cmd_file is the only reliable mapping.
     """
     folder = os.path.join(root, index_key)
     os.makedirs(folder, exist_ok=True)
@@ -161,7 +163,7 @@ DEFAULT_BLOCKS = (
 
 
 def make_arcx_cfg(path, blocks=DEFAULT_BLOCKS):
-    """造一份 arcx.cfg, 格式與真實範例一致 (含行首的旗標欄)。"""
+    """Build an arcx.cfg matching the real format, including the flag column."""
     lines = []
     for name, flow, _netlist in blocks:
         lines.append("1 BEGIN_SETTINGS: %s" % name)
@@ -177,7 +179,7 @@ def make_arcx_cfg(path, blocks=DEFAULT_BLOCKS):
 
 
 def _make_artifacts(case_dir, case_id, mode, blocks=DEFAULT_BLOCKS):
-    """造出 <block>_<flow>/work_<flow>/<netlist> 的巢狀結構。"""
+    """Build the nested <block>_<flow>/work_<flow>/<netlist> structure."""
     if mode == "none":
         return
     for name, flow, netlist_tmpl in blocks:
@@ -198,7 +200,7 @@ def _make_artifacts(case_dir, case_id, mode, blocks=DEFAULT_BLOCKS):
 
 def make_report_dirs(folder, names=("QC_Cc", "QC_Ct", "QC_Spice"),
                      summary_suffix="SCCB3", skip_files=()):
-    """造 QC_* report 目錄:
+    """Build the QC_* report directories:
 
         QC_Cc/Report_QC_Cc
         QC_Cc/Report_QC_Cc_Summary_SCCB3
@@ -221,7 +223,7 @@ def make_index_source(
     cpu_per_case: int = 4,
     name_hint: str = "",
 ) -> str:
-    """造一個 index 的來源目錄 (含 special.cfg 與 GDS)。"""
+    """Build an index source directory, with special.cfg and GDS files."""
     dir_name = "%s_%s" % (index_key, name_hint) if name_hint else index_key
     path = os.path.join(root, dir_name)
     os.makedirs(path, exist_ok=True)
@@ -242,8 +244,8 @@ def make_dir_map(
     entries: Dict[str, str],
     add_min_max: bool = True,
 ) -> str:
-    """造一份 Perl 格式的 dir_map, 刻意複製真實範例的怪癖
-    (min 那行沒有結尾逗號)。
+    """Build a Perl style dir_map, reproducing the real sample's quirk that
+    the "min" line has no trailing comma.
     """
     lines = ["%dir_map =("]
     for key in sorted(entries, key=lambda k: (0, int(k)) if k.isdigit() else (1, 0)):
@@ -263,7 +265,7 @@ def make_dir_map(
 
 
 def build_demo(root: str) -> Dict[str, str]:
-    """造一份涵蓋所有情境的完整 demo 資料集。"""
+    """Build a complete demo data set covering every situation."""
     root = os.path.abspath(os.path.expanduser(root))
     sources = os.path.join(root, "sources")
     wave = os.path.join(root, "wave_001")
@@ -279,17 +281,18 @@ def build_demo(root: str) -> Dict[str, str]:
         "1003": make_index_source(sources, "1003", gds_count=40, cpu_per_case=8,
                                   name_hint="bigblock"),
     }
-    # 1004 刻意做成壞的: 有目錄但沒有 special.cfg, 用來驗證錯誤處理
+    # 1004 is deliberately broken: a directory with no special.cfg,
+    # to exercise the error handling
     broken = os.path.join(sources, "1004_broken")
     os.makedirs(broken, exist_ok=True)
     entries["1004"] = broken
 
     dir_map_path = make_dir_map(os.path.join(root, "dir_map"), entries)
 
-    # QA 需要 arcx.cfg 才知道該檢查哪些產出物
+    # QA needs arcx.cfg to know which artifacts to check
     cfg_path = make_arcx_cfg(os.path.join(wave, "arcx.cfg"))
 
-    # index 1000: 與使用者提供的真實 ls -a 完全一致
+    # index 1000: exactly the real ls -a we were given
     #   .queue.NDIO_1 / .run.PDIO_1 / .complete.NTN_1
     make_index_run_folder(wave, "1000", [
         CaseSpec("NDIO_1", "queued", artifacts="none"),
@@ -297,17 +300,19 @@ def build_demo(root: str) -> Dict[str, str]:
         CaseSpec("NTN_1", "complete", artifacts="full"),
     ])
 
-    # index 1001: 各種異常。
-    # cell 名稱刻意讓「編號順序 != 字母順序」, 證明系統沒有偷偷用編號猜 case。
-    # 前三個都有 .complete marker —— 人工看全部像成功, 只有第一個是真的。
+    # index 1001: assorted anomalies.
+    # The cell names deliberately make sequence order differ from alphabetical
+    # order, proving nothing guesses the case from the number.
+    # The first three all carry a .complete marker -- by eye they all look
+    # successful, but only the first one really is.
     make_index_run_folder(wave, "1001", [
-        CaseSpec("PMOS_10", "complete", artifacts="full"),           # 真成功
-        CaseSpec("NMOS_1", "complete", artifacts="missing_netlist"), # 假成功
-        CaseSpec("CAP_MIM", "complete", artifacts="empty_netlist"),  # 假成功
+        CaseSpec("PMOS_10", "complete", artifacts="full"),            # real
+        CaseSpec("NMOS_1", "complete", artifacts="missing_netlist"),  # false
+        CaseSpec("CAP_MIM", "complete", artifacts="empty_netlist"),   # false
         CaseSpec("PMOS_2", "stalled", log_bytes=2048,
-                 age_sec=9 * 3600, artifacts="none"),                # 卡住 9 小時
-        CaseSpec("RES_HI", "orphan_dir", artifacts="none"),          # 從未提交
-        CaseSpec("DIODE_X", "no_cmd_file", artifacts="none"),        # 監控不到
+                 age_sec=9 * 3600, artifacts="none"),            # quiet 9 hours
+        CaseSpec("RES_HI", "orphan_dir", artifacts="none"),      # never submitted
+        CaseSpec("DIODE_X", "no_cmd_file", artifacts="none"),    # unmonitorable
     ])
 
     return {
@@ -324,11 +329,11 @@ if __name__ == "__main__":  # pragma: no cover
 
     target = sys.argv[1] if len(sys.argv) > 1 else "/tmp/arcx-auto-demo"
     info = build_demo(target)
-    print("demo 資料已建立:")
+    print("demo data created:")
     for key, value in info.items():
         print("  %-9s %s" % (key + ":", value))
     print()
-    print("試試看:")
+    print("try:")
     print("  python3 -m arcx_auto inspect dir-map %s --verify" % info["dir_map"])
     print("  python3 -m arcx_auto status --wave-dir %s --no-lsf --detail"
           % info["wave_dir"])

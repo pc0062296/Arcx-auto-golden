@@ -1,4 +1,4 @@
-"""WavePlanner: 分波邏輯。純函數測試。"""
+"""WavePlanner: wave splitting. Pure function tests."""
 
 import unittest
 
@@ -43,7 +43,7 @@ class FillTest(unittest.TestCase):
 
 class PriorityTest(unittest.TestCase):
     def test_keyword_indices_go_first(self):
-        """path 命中關鍵字 (sram/ro) 的 index 排進較早的 wave。"""
+        """Indices whose path hits a keyword (sram, ro) land in earlier waves."""
         plan = plan_waves(
             [spec("plain", 5, 4), spec("sram_a", 5, 4, ("sram",))],
             max_slots_per_wave=20,
@@ -52,9 +52,10 @@ class PriorityTest(unittest.TestCase):
         self.assertEqual(plan.waves[1].index_keys, ("plain",))
 
     def test_user_order_preserved_within_same_priority(self):
-        """穩定排序: 同優先權時保持使用者的選取順序。
+        """Stable sort: selection order is preserved within a priority.
 
-        工程師勾選的順序是明確意圖, 重排會讓結果不可預期。
+        The order an engineer ticked things in is explicit intent, and
+        reordering makes the result unpredictable.
         """
         plan = plan_waves(
             [spec("c", 1, 1), spec("a", 1, 1), spec("b", 1, 1)],
@@ -65,7 +66,9 @@ class PriorityTest(unittest.TestCase):
 
 class OversizeTest(unittest.TestCase):
     def test_oversized_index_gets_its_own_wave(self):
-        """單一 index 就超過上限時獨佔一波 —— 既能跑, 也不拖累其他 index。"""
+        """An index over the cap gets its own wave: it can still run, and it
+        does not drag the others down.
+        """
         plan = plan_waves(
             [spec("small", 1, 4), spec("huge", 100, 8)],
             max_slots_per_wave=50,
@@ -76,14 +79,16 @@ class OversizeTest(unittest.TestCase):
     def test_oversized_wave_produces_warning(self):
         plan = plan_waves([spec("huge", 100, 8)], max_slots_per_wave=50)
         self.assertEqual(len(plan.oversized_waves), 1)
-        self.assertTrue(any("超過上限" in w for w in plan.warnings), plan.warnings)
+        self.assertTrue(any("over the cap" in w for w in plan.warnings), plan.warnings)
 
 
 class ExclusionTest(unittest.TestCase):
     def test_unusable_index_excluded_not_dropped(self):
-        """資料不完整的 index 必須進 excluded 並說明原因, 絕不靜默丟掉。"""
+        """Indices with incomplete data go to `excluded` with a reason; never
+        silently dropped.
+        """
         plan = plan_waves(
-            [spec("ok", 2, 4), spec("bad", 0, 0, error="沒有 GDS")],
+            [spec("ok", 2, 4), spec("bad", 0, 0, error="no GDS")],
             max_slots_per_wave=100,
         )
         self.assertEqual([s.index_key for s in plan.excluded], ["bad"])
@@ -102,7 +107,7 @@ class ExclusionTest(unittest.TestCase):
 
 class ModeTest(unittest.TestCase):
     def test_off_mode_produces_single_wave(self):
-        """OFF 只是「只有一個 wave」的特例, 下游不需要分支處理。"""
+        """OFF is just the "single wave" case; nothing downstream branches."""
         plan = plan_waves(
             [spec("a", 100, 8), spec("b", 100, 8)],
             max_slots_per_wave=10, mode=PlanMode.OFF,
@@ -113,7 +118,7 @@ class ModeTest(unittest.TestCase):
     def test_invalid_limit_falls_back_to_off(self):
         plan = plan_waves([spec("a", 1, 1), spec("b", 1, 1)], max_slots_per_wave=0)
         self.assertEqual(len(plan.waves), 1)
-        self.assertTrue(any("無效" in w for w in plan.warnings))
+        self.assertTrue(any("invalid" in w for w in plan.warnings))
 
 
 class ManualTest(unittest.TestCase):
@@ -125,26 +130,30 @@ class ManualTest(unittest.TestCase):
         self.assertEqual(plan.waves[1].index_keys, ("b",))
 
     def test_index_cannot_appear_in_two_waves(self):
-        """同一 index 出現在兩個 wave 會讓 Arcx 在兩個隔離目錄中處理同一批 GDS。"""
+        """One index in two waves would make Arcx process the same GDS files
+        in two isolated directories at once.
+        """
         specs = [spec("a", 1, 1)]
         plan = regroup_manual(specs, [["a"], ["a"]], max_slots_per_wave=100)
         self.assertEqual(len(plan.waves), 1)
-        self.assertTrue(any("重複" in w for w in plan.warnings), plan.warnings)
+        self.assertTrue(any("duplicate" in w for w in plan.warnings), plan.warnings)
 
     def test_unassigned_index_is_warned_not_dropped(self):
         specs = [spec("a", 1, 1), spec("b", 1, 1)]
         plan = regroup_manual(specs, [["a"]], max_slots_per_wave=100)
-        self.assertTrue(any("未被指派" in w for w in plan.warnings), plan.warnings)
+        self.assertTrue(any("not assigned" in w for w in plan.warnings), plan.warnings)
 
     def test_unknown_index_is_warned(self):
         plan = regroup_manual([spec("a", 1, 1)], [["a", "zzz"]],
                               max_slots_per_wave=100)
-        self.assertTrue(any("不存在" in w for w in plan.warnings), plan.warnings)
+        self.assertTrue(any("unknown index" in w for w in plan.warnings), plan.warnings)
 
     def test_manual_still_checks_oversize(self):
-        """手動分的也可能超量, 該提醒還是要提醒。"""
+        """A hand-made grouping can be over the cap too, and still deserves
+        the warning.
+        """
         plan = regroup_manual([spec("a", 100, 8)], [["a"]], max_slots_per_wave=50)
-        self.assertTrue(any("超過上限" in w for w in plan.warnings), plan.warnings)
+        self.assertTrue(any("over the cap" in w for w in plan.warnings), plan.warnings)
 
 
 if __name__ == "__main__":

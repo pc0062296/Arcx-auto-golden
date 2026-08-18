@@ -1,6 +1,6 @@
-"""arcx.cfg 解析。
+"""arcx.cfg parsing.
 
-格式:
+Format:
 
     g:QCA = Yes
     g:O_CAL_SET_ENV = setenv LICENSE 123@lic9
@@ -13,25 +13,28 @@
     1 LVS_DFM_DIR = /path/to/dir
     END_SETTINGS
 
-一個 cfg 可以有多個 block, 每個 block 代表一組 EDA tool 設定,
-由 ``QC_FLOW`` 指定用哪個 flow (目前是 calQCAP / calQRCFS)。
+A cfg can hold several blocks; each is one EDA tool configuration, and its
+``QC_FLOW`` picks the flow (currently calQCAP or calQRCFS).
 
-``g:`` 開頭的是所有 block 的共同變數, 放在檔案開頭、任何 block 之外。
-它們不屬於任何 block, 也不需要做路徑檢查。
+``g:`` entries are variables shared by every block. They sit at the top,
+outside any block, and are not path checked.
 
-關鍵字的拼法在實際檔案中有出入 (BEGIN_SETTING 單數 vs END_SETTINGS 複數),
-因此比對時單複數一律等價 —— 只有把 N 打成 M 這種明顯筆誤才發警告。
+The leading integer is an enable flag: 1 enables, 0 disables. Disabled lines,
+and lines commented out with #, never take effect, so pre-submission checks do
+**not** verify the paths they mention -- those paths are never used and
+checking them would only produce false alarms.
 
-**這個檔案是 QA 的地圖。** case run dir 內該有哪些產出物, 完全由 cfg 的
-block 決定 (見 services/qa/expectations.py):
+Keyword spelling varies in real files (BEGIN_SETTING singular against
+END_SETTINGS plural), so singular and plural are treated as equivalent. Only an
+N typed as M is warned about.
 
-    <block_name>_<QC_FLOW>/work_<QC_FLOW>/<該 flow 的 netlist>
+**This file is QA's map.** What a case run dir should contain is derived
+entirely from the cfg blocks (see services/qa/expectations.py):
 
-因此提交時必須把 cfg 快照下來 —— 三天後回頭做 QA, 用的必須是當時那份 cfg。
+    <block_name>_<QC_FLOW>/work_<QC_FLOW>/<netlist for that flow>
 
-行首的整數是 enable/disable 旗標: 1 = 啟用, 0 = 停用。
-被停用的行 (旗標 0) 與註解行 (#) 一律不生效, 因此 PRE 檢查**不會**去驗證
-它們引用的檔案是否存在 —— 那些路徑根本不會被用到, 檢查它們只會製造假警報。
+which is why the cfg must be snapshotted at submission time: QA three days
+later has to read the cfg the run actually used.
 """
 
 from __future__ import annotations
@@ -41,17 +44,16 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-# 行首可選的整數旗標, 其餘為內容
+# Optional leading integer flag, then the content
 _LINE_RE = re.compile(r"^\s*(?:(?P<flag>-?\d+)\s+)?(?P<body>.*?)\s*$")
-# BEGIN_SETTING(S) : <name>   —— 單複數等價, 冒號前後可有空白
-# 實際檔案中 BEGIN 用單數、END 用複數, 所以不能要求兩者一致。
-# 只有 SETTIMG (N 打成 M) 這種明顯筆誤才發警告 —— 那種拼錯若被 Arcx
-# 當成無效行, 整個 block 會被靜默忽略, 是很難查的失敗。
+# BEGIN_SETTING(S) : <name> -- singular and plural are equivalent, and the
+# colon may be surrounded by spaces. Only SETTIMG (N typed as M) is warned
+# about: that misspelling can make Arcx skip the whole block silently.
 _BEGIN_RE = re.compile(
     r"^(?P<kw>BEGIN_SETT(?:ING|IMG)S?)\s*:\s*(?P<name>\S+)\s*$", re.IGNORECASE
 )
 _END_RE = re.compile(r"^(?P<kw>END_SETT(?:ING|IMG)S?)\s*$", re.IGNORECASE)
-# 所有 block 共用的全域變數, 例如 g:QCA = Yes
+# Variables shared by all blocks, e.g. g:QCA = Yes
 _GLOBAL_RE = re.compile(
     r"^g\s*:\s*(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(?P<value>.*)$",
     re.IGNORECASE,
@@ -61,24 +63,25 @@ _KV_RE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(?P<value>.*)$")
 
 @dataclass(frozen=True)
 class CfgBlock:
-    """arcx.cfg 內的一個 settings block。"""
+    """One settings block in arcx.cfg."""
 
-    name: str                       # blocking_naming_qcap
+    name: str                       # blocking_nameing_1
     enabled: bool = True
     line_no: int = 0
     settings: Dict[str, str] = field(default_factory=dict)
-    # 行首旗標為 0 的設定。這些行不生效, 所以 PRE 檢查不會驗證它們的路徑。
+    # Settings whose line had a leading 0. They do not take effect, so
+    # pre-submission checks skip their paths.
     disabled_keys: Tuple[str, ...] = ()
     warnings: Tuple[str, ...] = ()
 
     @property
     def flow(self) -> Optional[str]:
-        """QC_FLOW —— 決定用哪個 EDA tool flow。"""
+        """QC_FLOW -- picks the EDA tool flow."""
         return self.settings.get("QC_FLOW")
 
     @property
     def output_dir_name(self) -> Optional[str]:
-        """case run dir 底下對應這個 block 的目錄名: <block>_<flow>。"""
+        """The directory this block produces inside a case run dir."""
         if not self.flow:
             return None
         return "%s_%s" % (self.name, self.flow)
@@ -86,11 +89,11 @@ class CfgBlock:
 
 @dataclass(frozen=True)
 class ArcxConfig:
-    """解析後的 arcx.cfg。"""
+    """A parsed arcx.cfg."""
 
     source_path: str
     blocks: Tuple[CfgBlock, ...] = ()
-    # g: 開頭的共同變數 (所有 block 共用)。不需要路徑檢查。
+    # g: entries shared by every block. Not path checked.
     globals: Dict[str, str] = field(default_factory=dict)
     warnings: Tuple[str, ...] = ()
     error: Optional[str] = None
@@ -107,17 +110,18 @@ class ArcxConfig:
 
 
 def parse_arcx_cfg(path: str) -> ArcxConfig:
-    """解析 arcx.cfg。
+    """Parse arcx.cfg.
 
-    採「寬鬆比對 + 明確警告」: 格式稍有出入時盡量讀出能讀的部分, 把疑點
-    放進 warnings 讓人看到, 而不是丟例外讓整個流程停擺。
+    Lenient matching plus explicit warnings: read as much as possible when the
+    format deviates and surface the doubts, rather than raising and stopping
+    everything.
     """
     resolved = os.path.abspath(os.path.expanduser(path))
     try:
         with open(resolved, "r", encoding="utf-8", errors="replace") as handle:
             raw_lines = handle.readlines()
     except OSError as exc:
-        return ArcxConfig(source_path=resolved, error="無法讀取 arcx.cfg: %s" % exc)
+        return ArcxConfig(source_path=resolved, error="cannot read arcx.cfg: %s" % exc)
 
     blocks: List[CfgBlock] = []
     globals_: Dict[str, str] = {}
@@ -153,7 +157,7 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
         if not body:
             continue
 
-        # g: 開頭的共同變數。它們不屬於任何 block, 也不做路徑檢查。
+        # g: shared variables. Outside any block, never path checked.
         global_match = _GLOBAL_RE.match(body)
         if global_match:
             if flag_raw == "0":
@@ -166,13 +170,14 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
         if begin:
             if "IMG" in begin.group("kw").upper():
                 warnings.append(
-                    "第 %d 行的關鍵字拼成 %s (N 打成 M), Arcx 可能整個 block 都不讀"
+                    "line %d spells the keyword %s (N typed as M); "
+                    "Arcx may skip the entire block"
                     % (index, begin.group("kw"))
                 )
             if current_name is not None:
                 current_warnings.append(
-                    "第 %d 行出現新的 BEGIN_SETTINGS, 但前一個 block 沒有 END_SETTINGS"
-                    % index
+                    "line %d starts a new BEGIN_SETTINGS but the previous block "
+                    "had no END_SETTINGS" % index
                 )
                 close_block(index)
             current_name = begin.group("name")
@@ -187,11 +192,12 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
         if end_match:
             if "IMG" in end_match.group("kw").upper():
                 warnings.append(
-                    "第 %d 行的關鍵字拼成 %s (N 打成 M)"
+                    "line %d spells the keyword %s (N typed as M)"
                     % (index, end_match.group("kw"))
                 )
             if current_name is None:
-                warnings.append("第 %d 行有 END_SETTINGS 但沒有對應的 BEGIN" % index)
+                warnings.append(
+                    "line %d has END_SETTINGS without a matching BEGIN" % index)
             else:
                 close_block(index)
                 current_name = None
@@ -200,16 +206,20 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
         kv = _KV_RE.match(body)
         if not kv:
             if current_name is None:
-                warnings.append("第 %d 行不在任何 block 內且無法解析: %r" % (index, body))
+                warnings.append(
+                    "line %d is outside any block and unparseable: %r"
+                    % (index, body))
             else:
-                current_warnings.append("第 %d 行無法解析: %r" % (index, body))
+                current_warnings.append(
+                    "line %d is unparseable: %r" % (index, body))
             continue
 
         key = kv.group("key")
         value = kv.group("value").strip().strip(";").strip().strip("'\"")
 
         if current_name is None:
-            warnings.append("第 %d 行的設定 %s 不在任何 block 內, 已忽略" % (index, key))
+            warnings.append(
+                "line %d sets %s outside any block; ignored" % (index, key))
             continue
 
         if flag_raw == "0":
@@ -217,11 +227,13 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
             continue
 
         if key in current_settings and current_settings[key] != value:
-            current_warnings.append("%s 重複定義且值不同, 採用最後一筆" % key)
+            current_warnings.append(
+                "%s is defined twice with different values; last one wins" % key)
         current_settings[key] = value
 
     if current_name is not None:
-        current_warnings.append("檔案結束時 block %s 沒有 END_SETTINGS" % current_name)
+        current_warnings.append(
+            "block %s has no END_SETTINGS before end of file" % current_name)
         close_block(len(raw_lines))
 
     seen: Dict[str, int] = {}
@@ -230,11 +242,12 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
     for name, count in seen.items():
         if count > 1:
             warnings.append(
-                "block 名稱 %s 出現 %d 次 —— 產出目錄會互相覆蓋" % (name, count)
+                "block name %s appears %d times; their output directories "
+                "would overwrite each other" % (name, count)
             )
 
     if not blocks:
-        warnings.append("arcx.cfg 內沒有解析到任何 settings block")
+        warnings.append("no settings block was parsed from arcx.cfg")
 
     return ArcxConfig(
         source_path=resolved,

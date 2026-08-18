@@ -1,6 +1,7 @@
-"""CLI 端到端測試 (唯讀)。
+"""CLI end-to-end tests.
 
-同時驗證一個硬性要求: Phase 0/2a 的所有指令**不得寫入任何 run folder**。
+They also assert a hard requirement: the read-only commands **must not write
+to any run folder**.
 """
 
 import io
@@ -22,7 +23,7 @@ def run_cli(argv):
 
 
 def snapshot_tree(root):
-    """記錄整棵目錄樹的 (路徑, 大小), 用來證明沒有被修改。"""
+    """Record (path, size) for a whole tree, to prove nothing changed."""
     result = {}
     for dirpath, dirnames, filenames in os.walk(root):
         for name in dirnames:
@@ -77,14 +78,16 @@ class CliTest(unittest.TestCase):
         code, out, _ = run_cli(
             ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf"])
         self.assertEqual(code, 0)
-        self.assertIn("總覽", out)
+        self.assertIn("overview", out)
         self.assertIn("DONE", out)
         self.assertIn("STALLED", out)
 
     def test_status_detects_fake_success(self):
-        """demo 裡有三個 case 帶 .complete marker, 只有一個真的成功。
+        """The demo has three cases with a .complete marker; only one really
+        succeeded.
 
-        人工看這三個都像成功 —— 這正是系統要抓的東西。
+        By eye all three look successful, which is exactly what the system
+        exists to catch.
         """
         code, out, _ = run_cli(
             ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf"])
@@ -94,12 +97,14 @@ class CliTest(unittest.TestCase):
         self.assertIn("NETLIST_EMPTY", out)
 
     def test_status_no_qa_keeps_raw_marker_state(self):
-        """--no-qa 時只做觀測, 不把 COMPLETED_MARKER 收斂成 DONE/FAILED。"""
+        """With --no-qa it observes only and does not narrow COMPLETED_MARKER
+        into DONE or FAILED.
+        """
         code, out, _ = run_cli(
             ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf", "--no-qa"])
         self.assertEqual(code, 0)
         self.assertIn("COMPLETED_MARKER", out)
-        self.assertNotIn("QA 問題", out)
+        self.assertNotIn("QA issues", out)
 
     def test_status_json_carries_qa_issues(self):
         code, out, _ = run_cli(
@@ -127,17 +132,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(keys, {"1000", "1001"})
 
     def test_status_reports_lsf_unavailable(self):
-        """LSF 不可用時必須明說判定已降級, 不能讓人以為看到的是完整資訊。"""
+        """When LSF is unavailable it must say so, or the reader assumes the
+        picture is complete.
+        """
         _code, out, _ = run_cli(
             ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf"])
-        self.assertIn("LSF 資料不可用", out)
-        self.assertIn("判定已停用", out)
+        self.assertIn("LSF data unavailable", out)
+        self.assertIn("detection is disabled", out)
 
     def test_status_missing_run_folder_is_reported(self):
         code, out, _ = run_cli(
             ["status", "--run-folder", "/definitely/not/here", "--no-lsf"])
         self.assertEqual(code, 0)
-        self.assertIn("不存在", out)
+        self.assertIn("does not exist", out)
 
     def test_status_state_file_persists_across_calls(self):
         state = os.path.join(self.tmp.name, "state.json")
@@ -147,10 +154,10 @@ class CliTest(unittest.TestCase):
         code, out, _ = run_cli(["status", "--wave-dir", self.demo["wave_dir"],
                                 "--no-lsf", "--state-file", state])
         self.assertEqual(code, 0)
-        self.assertIn("總覽", out)
+        self.assertIn("overview", out)
 
     def test_status_does_not_modify_run_folder(self):
-        """硬性要求: Phase 0 是唯讀的。"""
+        """Hard requirement: status is read only."""
         before = snapshot_tree(self.demo["wave_dir"])
         run_cli(["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf",
                  "--detail"])
@@ -163,7 +170,7 @@ class CliTest(unittest.TestCase):
             ["plan", "--dir-map", self.demo["dir_map"], "--all",
              "--max-slots", "100"])
         self.assertEqual(code, 0)
-        self.assertIn("分波計畫", out)
+        self.assertIn("wave plan", out)
         self.assertIn("wave_001", out)
 
     def test_plan_json_structure(self):
@@ -174,7 +181,7 @@ class CliTest(unittest.TestCase):
         plan = json.loads(out)
         self.assertEqual(plan["mode"], "AUTO")
         self.assertTrue(plan["waves"])
-        # 1004 沒有 GDS 也沒有 special.cfg -> 必須被排除且說明原因
+        # 1004 has no GDS and no special.cfg -> excluded, with a reason
         self.assertEqual([s["index_key"] for s in plan["excluded"]], ["1004"])
 
     def test_plan_priority_keyword_first(self):
@@ -184,7 +191,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         plan = json.loads(out)
         first_wave_keys = [i["index_key"] for i in plan["waves"][0]["indices"]]
-        # 1000 (sram) 與 1002 (ro) 命中關鍵字, 應排在最前面
+        # 1000 (sram) and 1002 (ro) hit keywords, so they come first
         self.assertEqual(first_wave_keys[:2], ["1000", "1002"])
 
     def test_plan_off_mode_single_wave(self):
@@ -208,7 +215,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         plan = json.loads(out)
         self.assertEqual(plan["waves"], [])
-        self.assertIn("找不到", plan["excluded"][0]["error"])
+        self.assertIn("not found", plan["excluded"][0]["error"])
 
     def test_plan_requires_index_selection(self):
         code, _out, err = run_cli(
@@ -217,7 +224,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("--index", err)
 
     def test_plan_creates_no_directories(self):
-        """硬性要求: plan 只計算, 不建立任何目錄、不提交任何 job。"""
+        """Hard requirement: plan only computes; it creates nothing and
+        submits nothing.
+        """
         before = snapshot_tree(self.demo["root"])
         run_cli(["plan", "--dir-map", self.demo["dir_map"], "--all",
                  "--show-command"])
@@ -229,7 +238,7 @@ class ConfigTest(unittest.TestCase):
         code, _out, err = run_cli(
             ["-c", "/no/such/config.json", "inspect", "dir-map", "/x"])
         self.assertEqual(code, 2)
-        self.assertIn("設定載入失敗", err)
+        self.assertIn("failed to load settings", err)
 
     def test_json_config_overrides_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -244,15 +253,16 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(json.loads(out)["max_slots_per_wave"], 7)
 
     def test_shipped_default_yaml_has_no_unknown_fields(self):
-        """config/default.yaml 與 Settings dataclass 很容易悄悄長歪。
+        """config/default.yaml and the Settings dataclass drift apart easily.
 
-        任何「未知設定欄位」警告都代表範本裡有個欄位其實不會生效 ——
-        使用者改了卻沒作用是最難查的那種問題。
+        Any "unknown settings field" warning means the template contains a
+        field that does not take effect -- changing it and seeing no result is
+        the hardest kind of problem to track down.
         """
         try:
             import yaml  # noqa: F401
         except ImportError:
-            self.skipTest("環境沒有 PyYAML")
+            self.skipTest("PyYAML is not installed")
         from arcx_auto.config.settings import load_settings
 
         path = os.path.join(
@@ -271,7 +281,7 @@ class ConfigTest(unittest.TestCase):
             code, _out, err = run_cli(
                 ["-c", cfg, "inspect", "dir-map", demo["dir_map"]])
             self.assertEqual(code, 0)
-            self.assertIn("未知設定欄位", err)
+            self.assertIn("unknown settings field", err)
 
 
 if __name__ == "__main__":

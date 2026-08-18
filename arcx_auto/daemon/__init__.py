@@ -1,10 +1,12 @@
-"""L3 Orchestration —— daemon。
+"""L3 Orchestration - the daemon.
 
-**系統的唯一寫入者** (architecture 決策 1)。
-UI / CLI 全部唯讀, 動作透過 commands/ 目錄投遞, 由 daemon 序列化執行。
+**The single writer in the system** (architecture decision 1).
+The UI and the CLI are read only; actions are posted into commands/ and the
+daemon serialises them.
 
-這讓「絕不對同一 run folder 同時動兩個手」與「所有寫入型動作都有 audit log」
-兩條原則在架構上成立, 而不是靠每個進入點自己記得加鎖。
+That is what makes "never touch the same run folder twice at once" and "every
+write is in the audit log" architectural properties rather than something each
+entry point has to remember.
 """
 
 from arcx_auto.daemon.loop import Daemon, DaemonOptions

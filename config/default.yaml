@@ -1,25 +1,31 @@
-# Arcx Auto Golden 預設設定
+# Arcx Auto Golden default settings
 #
-# 這個檔案是可選的 —— 所有欄位都有內建預設值, 沒有設定檔也能跑。
-# 只需要寫下你要覆寫的欄位。
+# This file is optional: every field has a built-in default, so the tools run
+# without a settings file at all. Write down only what you want to override.
 #
-# 尋找順序: ./arcx_auto.yaml  ->  ~/.arcx-auto/config/default.yaml
-# 也可以用 -c/--config 明確指定 (支援 .yaml 或 .json)。
-# 內網若沒有 PyYAML, 改用 .json 格式即可, 內容結構完全相同。
+# Search order:  ./arcx_auto.yaml  ->  ~/.arcx-auto/config/default.yaml
+# Or point at one explicitly with -c/--config (.yaml or .json).
+# Without PyYAML on the network, use the .json form; the structure is identical.
 
-state_root: "~/.arcx-auto"     # 個人狀態目錄 (state.json / events.jsonl / audit.jsonl)
-run_root: "./arcx_runs"        # wave 隔離目錄的根
+state_root: "~/.arcx-auto"     # per-user state (state.json, events, audit)
+run_root: "./arcx_runs"        # root for the isolated wave directories
 
 # ---------------------------------------------------------------------------
-# 檔案慣例 (architecture §9.3)
-# 對外部世界的所有假設都集中在這裡, 不寫死在程式邏輯中。
+# File conventions (architecture 9.3)
+#
+# Every assumption about the outside world lives here rather than in code, so
+# a change in Arcx conventions is a settings change.
 # ---------------------------------------------------------------------------
 layout:
   # .queue.NDIO_1 / .run.PDIO_1 / .complete.NTN_1
-  # case id 是 cell 名稱, 不是流水號, 所以這裡必須用寬鬆的 .+
+  # Case ids are cell names, not sequence numbers, so this stays loose.
   marker_regex: '^\.(?P<kind>queue|run|complete)\.(?P<case>.+)$'
+  # Looser: anything shaped like a marker. Used to surface markers outside the
+  # known three, which are abnormal and must be reported rather than ignored.
+  marker_any_regex: '^\.(?P<kind>[A-Za-z_][A-Za-z0-9_]*)\.(?P<case>.+)$'
 
-  # log 檔名只有流水號, 與 case 沒有任何關係。對應方式:
+  # A log filename carries only a sequence number and says nothing about its
+  # case. The mapping is:
   #   submit_bjob_cmd_file_1.log -> cmd_folder/cmd_file_1 -> `cd <path>` -> case
   log_regex: '^submit_bjob_cmd_file_(?P<num>\d+)\.log$'
   cmd_dir_name: "cmd_folder"
@@ -27,12 +33,13 @@ layout:
   cmd_cd_regex: '^\s*cd\s+["'']?(?P<path>[^\s"'';#]+)'
   cmd_file_head_bytes: 16384
 
-  # QC_Cc/ QC_Ct/ QC_Spice/  <- Arcx 整理的 report, 不是 case dir
+  # QC_Cc/ QC_Ct/ QC_Spice/ -- reports Arcx assembles, not case dirs
   report_dir_regex: '^QC_.+$'
 
-  # case run dir 的名字就是 cell 名稱, 沒有共同樣式, 因此用排除法辨識:
-  # run folder 底下不符合這些樣式的目錄, 就是 case run dir (rerun 時刪這些)。
-  # 環境中若出現新的非 case 目錄, 加進這個清單即可, 不需要改程式。
+  # Case run dirs are named after the cell, so there is no shared pattern.
+  # They are identified by exclusion: any directory in the run folder that is
+  # not one of these. A rerun deletes exactly those dirs. If a new kind of
+  # non-case directory appears, add it here; no code change is needed.
   non_case_dir_regexes: ['^QC_.+$', '^cmd_folder$', '^\..*$']
 
   gds_globs: ["*.gds", "*.gds.gz", "*.GDS", "*.gds.bz2"]
@@ -41,29 +48,29 @@ layout:
   dir_map_reserved_keys: ["min", "max"]
 
 # ---------------------------------------------------------------------------
-# 監控門檻
+# Monitoring thresholds
 # ---------------------------------------------------------------------------
 monitor:
-  stall_threshold_sec: 3600      # log 連續多久沒成長算 STALLED
+  stall_threshold_sec: 3600      # log unchanged this long -> STALLED
   long_pend_warn_sec: 7200
-  lost_grace_sec: 300            # LSF job 消失後等多久才敢判 LOST
+  lost_grace_sec: 300            # wait this long after an LSF job vanishes
   log_head_bytes: 8192
   poll_active_sec: 30
   poll_idle_sec: 300
 
 # ---------------------------------------------------------------------------
-# 分波 (architecture §5)
-#   slots = O_QCAP_LSF_NUM x GDS 數
+# Wave planning (architecture 5)
+#   slots = O_QCAP_LSF_NUM * GDS count
 # ---------------------------------------------------------------------------
 plan:
   max_slots_per_wave: 200
-  priority_keywords: ["sram", "ro"]   # path 命中者優先排入前面的 wave
+  priority_keywords: ["sram", "ro"]   # path hits go into earlier waves
   keyword_ignore_case: true
-  default_cpu_per_case: 0             # 0 = 讀不到 special.cfg 就排除, 不猜
+  default_cpu_per_case: 0             # 0 = exclude rather than guess
 
 # ---------------------------------------------------------------------------
-# 提交閘門 (architecture §5.4)
-#   放行 = 已過 min_interval AND ( NJOBS < quota_threshold OR 已過 max_wait )
+# Submission gate (architecture 5.4)
+#   release = min_interval elapsed AND (NJOBS < threshold OR max_wait elapsed)
 # ---------------------------------------------------------------------------
 gate:
   min_interval_sec: 600
@@ -71,7 +78,7 @@ gate:
   max_wait_sec: 7200
 
 # ---------------------------------------------------------------------------
-# LSF (architecture §9.4)
+# LSF (architecture 9.4)
 # ---------------------------------------------------------------------------
 lsf:
   bjobs_cmd: "bjobs"
@@ -87,98 +94,110 @@ lsf:
   arcx_fixed_args: ["-lsf0", "-nt", "50"]
   arcx_rerun_args: ["-keep_dir"]
 
-  # drain 安全門: 連續幾次確認 0 job 才算靜止
+  # Drain safety gate: how many consecutive zero readings mean quiescent
   quiescent_confirm_times: 3
   quiescent_interval_sec: 30
   quiescent_timeout_sec: 900
 
 # ---------------------------------------------------------------------------
-# QA 檢查 (architecture §7)
+# QA checks (architecture 7)
 #
-# 期望產出物是從 arcx.cfg **推導**出來的, 不是寫死的:
+# Expected artifacts are **derived** from arcx.cfg rather than hard coded:
 #
 #   arcx.cfg                              case run dir
 #   BEGIN_SETTINGS: <block>               <block>_<QC_FLOW>/
 #     QC_FLOW = <flow>                      work_<QC_FLOW>/
-#   END_SETTINGS                              <該 flow 的 netlist>
+#   END_SETTINGS                              <netlist for that flow>
 # ---------------------------------------------------------------------------
 qa:
-  # 每個 EDA tool flow 產出什麼。新增一種 tool = 在這裡加一個項目, 不需要改程式。
-  # 樣板變數: {flow} {block} {case}
+  # What each EDA tool flow produces. Adding a tool means adding an entry here,
+  # not changing code. Template variables: {flow} {block} {case}
   flows:
     calQCAP:
       work_dir: "work_{flow}"
-      netlists: ["CCI_DB.spice"]      # 固定檔名
+      netlists: ["CCI_DB.spice"]      # fixed filename
       min_bytes: 1
     calQRCFS:
       work_dir: "work_{flow}"
-      netlists: ["{case}.spf"]        # 檔名跟著 cell 走
+      netlists: ["{case}.spf"]        # named after the cell
       min_bytes: 1
 
-  # netlist 小於這個大小視為無效 (檔案被建立後 job 立刻死掉的情況)
+  # A netlist smaller than this is not a real result (the file was created and
+  # the job died immediately).
   min_netlist_bytes: 1
 
-  # 要停用的檢查 id。放在這裡就不用刪程式。
+  # Check ids to disable, so a rule can be turned off without deleting code.
   disabled_checks: []
 
-  # --- PRE: 提交前的 arcx.cfg 檢查 -----------------------------------------
-  # 只驗證這些 key 引用的檔案/目錄是否存在。
-  # 刻意列出明確的 key, 而不是「看起來像路徑就檢查」—— 後者會對輸出路徑、
-  # 樣板字串產生大量假警報, 假警報多了就沒人看了。
+  # --- PRE: arcx.cfg validation before submission --------------------------
+  # Only these keys are verified as existing files or directories. An explicit
+  # list rather than "anything that looks like a path": the latter produces
+  # false alarms on output paths and on values such as TOOL_VERSION_LVS that
+  # are a command plus arguments, and once there are false alarms nobody reads
+  # the warnings.
   #
-  # 行首旗標 0 或被 # 註解掉的行不生效, 因此不會被檢查。
+  # Lines disabled with a leading 0, or commented out with #, never take
+  # effect and are therefore not checked.
   verify_cfg_paths: true
   cfg_path_keys:
     - RCX_TECH_QTF
     - RCX_LAYER_NAME_MAP
     - LVS_DFM_DIR
     - LVS_DECK
+    - LVS_DECL
     - LVS_QUERY_CMD
     - RCX_STAR_CMD
   cfg_path_check_skip_keys: []
 
   reports:
-    required_dirs: ["QC_Cc", "QC_Ct"]     # 一定會存在, 缺了是 FATAL
-    optional_dirs: ["QC_Spice"]           # 有才檢查內容
+    required_dirs: ["QC_Cc", "QC_Ct"]     # always present; missing is FATAL
+    optional_dirs: ["QC_Spice"]           # checked only when present
     main_file_template: "Report_{dir}"
-    # Report_QC_Cc_Summary_SCCB3 —— 後綴會變, 所以用 glob
+    # Report_QC_Cc_Summary_SCCB3 -- the suffix is naming, so glob; but there is
+    # exactly one per directory, so more than one is also wrong.
     summary_glob_template: "Report_{dir}_Summary_*"
 
-  # 「多久沒寫 log」的分級門檻。
-  # 刻意分級而非二元判定: 單一 case runtime 從 10 分鐘到 3 天都有,
-  # 而且存在「不寫 log 但產出物已經齊了」的正常情況。
+  # Thresholds for "the log has not grown in a while".
+  # Graded rather than binary: a case can take ten minutes or three days, and
+  # a log can legitimately go quiet because the artifacts are already written.
   quiet:
-    warn_after_sec: 14400               # 4h  少見, 值得看一眼
-    stalled_after_sec: 28800            # 8h  基本上可判定卡住
+    warn_after_sec: 14400               # 4h   uncommon, worth a look
+    stalled_after_sec: 28800            # 8h   effectively stuck
     downgrade_when_artifacts_ready: true
 
 # ---------------------------------------------------------------------------
-# 提交前檢查 (architecture §5)
+# Pre-submission checks (architecture 5)
 # ---------------------------------------------------------------------------
 preflight:
-  # 目標檔案系統剩餘空間低於這個比例就擋下提交。
-  # 磁碟爆掉是 RC extraction 的頭號隱形殺手 —— job 會在跑到一半時死掉,
-  # 而且是以看不出原因的方式死。
+  # Block submission below this free-space ratio on the target filesystem.
+  # A full disk is the number one silent killer of RC extraction: jobs die part
+  # way through, in a way that does not say why.
   min_disk_free_ratio: 0.05
   warn_disk_free_ratio: 0.15
-  # 目前 NJOBS 已達閘門門檻的這個比例就警告 (送出去只會卡在 PEND)
+  # Warn once NJOBS reaches this fraction of the gate threshold, since
+  # submitting then only produces a pile of PEND.
   quota_warn_ratio: 0.8
 
 # ---------------------------------------------------------------------------
-# 提交 Arcx 的 bsub 參數
+# bsub parameters for submitting Arcx
 #
-# Arcx 本身也 bsub 出去, 這樣我們的 daemon 隨時可以重啟、崩潰、被 kill,
-# 都不會影響正在跑的工作。這裡的參數是給**外層那個 Arcx 協調 job** 用的,
-# 不是給它底下的 RC extraction 子 job。
+#   bsub -q LVSRCE-0E.q -oo Arcx.log "Arcx -p arcx.cfg -d ... --run"
+#
+# Arcx itself is submitted to LSF so the daemon can restart without disturbing
+# running work. The outer job is only a coordinator and reserves no resources;
+# Arcx submits the real work as further LSF jobs.
 # ---------------------------------------------------------------------------
 launch:
-  bsub_args: []                 # 例如 ["-q", "normal", "-R", "rusage[mem=4096]"]
+  queue: "LVSRCE-0E.q"
+  output_file: "Arcx.log"             # relative to the wave dir (bsub's cwd)
   job_name_template: "arcx_{run_id}_{wave}"
-  output_file: ".arcx_auto/arcx_bsub.log"
+  bsub_args: []                       # e.g. ["-R", "rusage[mem=2048]"]
 
 # ---------------------------------------------------------------------------
-# 公用碟匯出 (architecture §9.5)
-# 只放衍生資料 —— 真相永遠在 state_root 與 run folder, 這裡可隨時整個重建。
+# Export to the shared disk (architecture 9.5)
+#
+# Derived data only. The truth lives in state_root and the run folders, so this
+# can be deleted and rebuilt at any time.
 # ---------------------------------------------------------------------------
 export:
   shared_root: "/tmp1/.auto_golden"

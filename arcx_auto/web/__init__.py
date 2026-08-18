@@ -1,10 +1,12 @@
-"""L4 —— 本機 Web UI。
+"""L4 - local web UI.
 
-**只用標準庫。** 這是單人、綁 127.0.0.1、唯讀的儀表板, 不是對外服務,
-所以 http.server 完全夠用, 而且在內網不需要處理任何套件安裝。
+**Standard library only.** This is a single user, loopback bound, read only
+dashboard rather than a service, so http.server is enough and nothing needs to
+be installed on an air gapped network.
 
-唯讀是硬性的: UI 只讀 daemon 寫出的 state.json, 不碰 run folder,
-也不自己算任何東西。所有寫入型動作 (Phase 3) 會透過 commands/ 投遞給 daemon。
+Read only is a hard property: the UI renders the state.json the daemon writes.
+It never touches a run folder and computes nothing of its own. Write actions
+(Phase 3) will be posted to the daemon through commands/.
 """
 
 from arcx_auto.web.server import WebOptions, serve

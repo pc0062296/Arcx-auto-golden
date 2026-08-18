@@ -1,11 +1,12 @@
-"""原子寫入。
+"""Atomic writes.
 
-state.json 隨時可能被 UI 或其他 user (透過公用碟) 讀到, 因此絕不能出現
-「讀到寫到一半的檔案」。作法固定為 write tmp -> fsync -> os.replace,
-os.replace 在同一個檔案系統上是原子操作。
+state.json can be read by the UI or by other people through the shared disk at
+any moment, so a half-written file must never be observable. The recipe is
+always write-temp, fsync, os.replace -- replace is atomic within a filesystem.
 
-JSONL 則是 append-only: 斷電最多壞掉最後一行, 前面的紀錄全部保得住 ——
-這是選 JSONL 而非「每次覆寫整個 list」的原因。
+JSONL is append only: a power cut damages at most the final line and every
+earlier record survives. That is why events and audit use JSONL instead of
+rewriting one big list.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 
 def atomic_write_json(path: str, data: Any, file_mode: int = 0o644) -> None:
-    """原子地寫出 JSON。"""
+    """Write JSON atomically."""
     path = os.path.abspath(os.path.expanduser(path))
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
@@ -39,8 +40,9 @@ def atomic_write_json(path: str, data: Any, file_mode: int = 0o644) -> None:
 
 
 def read_json(path: str, default: Optional[Any] = None) -> Any:
-    """讀 JSON。檔案不存在或損毀時回傳 default 而不是丟例外 ——
-    快取檔損毀不應該讓監控停擺 (檔案系統才是唯一真相)。
+    """Read JSON, returning default on a missing or corrupt file.
+
+    A damaged cache must not stop monitoring; the filesystem is the truth.
     """
     path = os.path.abspath(os.path.expanduser(path))
     try:
@@ -51,7 +53,7 @@ def read_json(path: str, default: Optional[Any] = None) -> Any:
 
 
 def append_jsonl(path: str, record: Dict[str, Any], file_mode: int = 0o644) -> None:
-    """append 一筆紀錄到 JSONL。"""
+    """Append one record to a JSONL file."""
     path = os.path.abspath(os.path.expanduser(path))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     exists = os.path.exists(path)
@@ -65,7 +67,7 @@ def append_jsonl(path: str, record: Dict[str, Any], file_mode: int = 0o644) -> N
 
 
 def iter_jsonl(path: str) -> Iterator[Dict[str, Any]]:
-    """逐行讀 JSONL, 自動跳過損毀的行。"""
+    """Read a JSONL file line by line, skipping damaged lines."""
     path = os.path.abspath(os.path.expanduser(path))
     try:
         with open(path, "r", encoding="utf-8") as handle:

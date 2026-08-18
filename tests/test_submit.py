@@ -1,7 +1,8 @@
-"""Phase 2b: Preflight / WorkspaceBuilder / Launcher / 閘門 / Submitter。
+"""Preflight, WorkspaceBuilder, Launcher, the gate and the Submitter.
 
-這是系統中第一個會寫入磁碟的流程, 所以測試的重點是**它在什麼情況下不動手**:
-有 FATAL 就完全不建立目錄、dry-run 絕不碰磁碟、目標目錄非空就拒絕。
+This is the first flow in the system that writes to disk, so the tests focus on
+**when it refuses to act**: a FATAL creates nothing, a dry run touches no disk,
+and a non-empty target directory is rejected.
 """
 
 import json
@@ -45,7 +46,7 @@ END_SETTINGS
 
 
 class FakeLsf:
-    """假的 LSF。讓提交流程可以在沒有 LSF 的機器上完整測試。"""
+    """A fake LSF, so the submission flow is fully testable without one."""
 
     def __init__(self, njobs=10, available=True, job_id="12345", ok=True):
         self.njobs = njobs
@@ -53,19 +54,21 @@ class FakeLsf:
         self.job_id = job_id
         self.ok = ok
         self.commands = []
+        self.cwds = []
 
     def is_available(self, command=None):
         return self.available
 
     def current_njobs(self):
-        return (self.njobs, None) if self.available else (None, "沒有 busers")
+        return (self.njobs, None) if self.available else (None, "no busers")
 
-    def _run(self, argv):
+    def _run(self, argv, cwd=None):
         from arcx_auto.adapters.lsf import CommandResult
 
         self.commands.append(list(argv))
+        self.cwds.append(cwd)
         if not self.ok:
-            return CommandResult(False, "", "queue 不存在", 1, None)
+            return CommandResult(False, "", "no such queue", 1, None)
         return CommandResult(
             True, "Job <%s> is submitted to queue <normal>.\n" % self.job_id,
             "", 0, None)
@@ -74,7 +77,7 @@ class FakeLsf:
 def build_fixture(root, counts=((("1000", 3, 4, "sram_core")),
                                 (("1001", 30, 4, "logic")),
                                 (("1002", 2, 16, "ro_ring")))):
-    """造 dir_map + arcx.cfg + index 來源目錄。"""
+    """Build a dir_map, an arcx.cfg and the index source directories."""
     src = os.path.join(root, "sources")
     entries = {}
     for key, gds, cpu, hint in counts:
@@ -99,7 +102,7 @@ def make_plan(entries, settings, max_slots=100, mode=PlanMode.AUTO):
 
 
 # ---------------------------------------------------------------------------
-# 閘門 —— 純函數, 可以窮舉
+# The gate -- pure, so it can be enumerated
 # ---------------------------------------------------------------------------
 
 class GateTest(unittest.TestCase):
@@ -119,30 +122,34 @@ class GateTest(unittest.TestCase):
         self.assertFalse(self._eval(0, 150).allow)
 
     def test_min_interval_blocks_even_when_quota_is_low(self):
-        """純 OR 的漏洞: 時間到了但 quota 滿的照送會塞爆 queue。
+        """The hole in a plain OR: submitting once the timer expires while the
+        quota is still full floods the queue.
 
-        反過來也一樣 —— quota 低但剛送完, 還是要等最小間隔 (防抖)。
+        The reverse holds too: a low quota right after a submission still has
+        to wait out the minimum interval (debounce).
         """
         self.assertFalse(self._eval(0, 10, prev=0.0).allow)
         self.assertTrue(self._eval(700, 10, prev=0.0).allow)
 
     def test_max_wait_forces_release(self):
-        """quota 永遠不降時不能無限期卡死。"""
+        """A quota that never drops must not stall everything forever."""
         decision = self._eval(7300, 999)
         self.assertTrue(decision.allow)
         self.assertTrue(decision.forced)
 
     def test_forced_release_is_labelled(self):
-        """強制放行必須看得出來 —— 之後排隊很久不是系統壞掉。"""
-        self.assertEqual(self._eval(7300, 999).label, "強制放行")
+        """A forced release has to be visible, so a long PEND afterwards is
+        understood rather than mistaken for a fault.
+        """
+        self.assertEqual(self._eval(7300, 999).label, "forced")
 
     def test_unknown_quota_does_not_allow(self):
-        """查不到 quota 時**不能**當成「quota 很低」——
-        那會在 LSF 有問題時反而狂送。
+        """An unreadable quota must **not** be treated as a low quota: that
+        would submit hardest exactly when LSF is in trouble.
         """
         decision = self._eval(0, None)
         self.assertFalse(decision.allow)
-        self.assertIn("查不到", decision.reason)
+        self.assertIn("unavailable", decision.reason)
 
     def test_unknown_quota_still_honours_max_wait(self):
         self.assertTrue(self._eval(7300, None).allow)
@@ -166,7 +173,7 @@ class ControllerTest(unittest.TestCase):
 
     def test_failed_wave_is_aborted(self):
         controller = SubmissionController(["a"], GateSettings())
-        controller.mark_failed("a", "bsub 失敗")
+        controller.mark_failed("a", "bsub failed")
         self.assertEqual(controller.progress[0].state, WaveState.ABORTED)
         self.assertEqual(controller.pending(), [])
 
@@ -203,7 +210,9 @@ class WorkspaceTest(unittest.TestCase):
             self.assertTrue(os.path.isdir(workspace.path))
 
     def test_snapshots_cfg_and_dir_map(self):
-        """用快照而不是原檔執行 —— 三天後做 QA 用的必須是提交當下那份。"""
+        """Runs from the snapshot, not the original: QA three days later has
+        to read the cfg the run actually used.
+        """
         workspace = self._build()[0]
         self.assertTrue(os.path.isfile(workspace.arcx_cfg))
         self.assertTrue(os.path.isfile(workspace.dir_map))
@@ -213,12 +222,14 @@ class WorkspaceTest(unittest.TestCase):
         workspace = self._build()[0]
         before = sha256(workspace.arcx_cfg)
         with open(self.cfg, "a", encoding="utf-8") as handle:
-            handle.write("\n# 有人改了原檔\n")
+            handle.write("\n# somebody edited the original\n")
         self.assertEqual(sha256(workspace.arcx_cfg), before)
         self.assertNotEqual(sha256(self.cfg), before)
 
     def test_snapshots_special_cfg_per_index(self):
-        """「當初 O_QCAP_LSF_NUM 設多少」是事後檢討分波的關鍵資訊。"""
+        """What O_QCAP_LSF_NUM was at the time is the key input when reviewing
+        whether the wave sizing was sensible.
+        """
         workspace = self._build()[0]
         with open(os.path.join(workspace.meta_dir, "manifest.json"),
                   encoding="utf-8") as handle:
@@ -237,7 +248,9 @@ class WorkspaceTest(unittest.TestCase):
         self.assertGreater(manifest["total_slots"], 0)
 
     def test_refuses_non_empty_target(self):
-        """絕不覆蓋既有結果 —— 這是最後一道防線 (Preflight 是第一道)。"""
+        """Never overwrite existing results; this is the last line of defence
+        (Preflight is the first).
+        """
         self._build()
         with self.assertRaises(WorkspaceError):
             self._build()
@@ -248,7 +261,7 @@ class WorkspaceTest(unittest.TestCase):
                 self.plan, self.run_dir, "/no/such/arcx.cfg", self.dir_map)
 
     def test_attempts_dir_created(self):
-        """rerun 前備份失敗現場的地方, 提交時就先建好。"""
+        """Where a rerun backs up the failed state, created up front."""
         workspace = self._build()[0]
         self.assertTrue(os.path.isdir(workspace.attempts_dir))
 
@@ -271,25 +284,45 @@ class LauncherTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_command_uses_snapshot_cfg(self):
-        lsf = FakeLsf()
-        argv = Launcher(self.settings, lsf=lsf).build_command(
+        """Arcx runs against the snapshot, not the original cfg."""
+        argv = Launcher(self.settings, lsf=FakeLsf()).build_command(
             self.workspace, "r1")
-        self.assertIn(self.workspace.arcx_cfg, argv)
-        self.assertNotIn(self.cfg, argv)
+        self.assertIn(self.workspace.arcx_cfg, argv[-1])
+        self.assertNotIn(self.cfg, argv[-1])
 
-    def test_command_shape(self):
+    def test_command_matches_the_hand_written_form(self):
+        """bsub -q QUEUE -oo Arcx.log "Arcx -p cfg -d ... --run"
+
+        The Arcx invocation is a single argument, matching how the command is
+        written by hand and how bsub interprets its trailing argument.
+        """
         argv = Launcher(self.settings, lsf=FakeLsf()).build_command(
             self.workspace, "r1")
         self.assertEqual(argv[0], "bsub")
-        self.assertIn("-J", argv)
-        self.assertIn("Arcx", argv)
-        self.assertIn("--run", argv)
-        self.assertEqual(argv[-1], "--run")
+        self.assertEqual(argv[1:3], ["-q", "LVSRCE-0E.q"])
+        self.assertIn("-oo", argv)
+        self.assertIn("Arcx.log", argv)
+        self.assertTrue(argv[-1].startswith("Arcx -p "))
+        self.assertTrue(argv[-1].endswith("--run"))
+
+    def test_queue_is_configurable(self):
+        self.settings.launch.queue = "OTHER.q"
+        argv = Launcher(self.settings, lsf=FakeLsf()).build_command(
+            self.workspace, "r1")
+        self.assertIn("OTHER.q", argv)
+
+    def test_submitted_from_inside_the_wave_directory(self):
+        """Wave isolation depends entirely on bsub's cwd: LSF records the
+        submission directory and Arcx creates its run folders relative to it.
+        """
+        lsf = FakeLsf()
+        Launcher(self.settings, lsf=lsf).launch(self.workspace, "r1")
+        self.assertEqual(lsf.cwds, [self.workspace.path])
 
     def test_rerun_adds_keep_dir(self):
         argv = Launcher(self.settings, lsf=FakeLsf()).build_command(
             self.workspace, "r1", rerun=True)
-        self.assertIn("-keep_dir", argv)
+        self.assertIn("-keep_dir", argv[-1])
 
     def test_job_id_parsed_and_recorded(self):
         lsf = FakeLsf(job_id="98765")
@@ -307,7 +340,9 @@ class LauncherTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.workspace.launch_json))
 
     def test_failure_is_recorded_too(self):
-        """失敗也要留紀錄 —— 否則事後看不出「有沒有送過」。"""
+        """Failures are recorded too, or afterwards nobody can tell whether
+        it was ever submitted.
+        """
         lsf = FakeLsf(ok=False)
         result = Launcher(self.settings, lsf=lsf).launch(self.workspace, "r1")
         self.assertFalse(result.ok)
@@ -325,7 +360,7 @@ class LauncherTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Submitter 端到端
+# Submitter end to end
 # ---------------------------------------------------------------------------
 
 class SubmitterTest(unittest.TestCase):
@@ -355,14 +390,14 @@ class SubmitterTest(unittest.TestCase):
             plan=self.plan, arcx_cfg=self.cfg, dir_map=self.dir_map, **kwargs)
 
     def test_dry_run_writes_nothing(self):
-        """dry-run 的意義就在於完全不碰磁碟。"""
+        """The whole point of a dry run is touching no disk at all."""
         outcome = self._submit(dry_run=True)
         self.assertFalse(os.path.exists(self.settings.run_root))
         self.assertEqual(self.lsf.commands, [])
         self.assertTrue(all(l.dry_run for l in outcome.launches))
 
     def test_dry_run_shows_every_wave(self):
-        """預覽不該在閘門前停下來 —— 目的就是一次看完全部。"""
+        """A preview must not stop at the gate: the point is seeing it all."""
         outcome = self._submit(dry_run=True)
         self.assertEqual(len(outcome.launches), len(self.plan.waves))
 
@@ -378,7 +413,7 @@ class SubmitterTest(unittest.TestCase):
         self.assertEqual(len(outcome.pending_waves), len(self.plan.waves) - 1)
 
     def test_blocked_by_preflight_writes_nothing(self):
-        """有 FATAL 就完全不動手 —— 不留半成品。"""
+        """A FATAL means nothing is touched: no half-built state."""
         self.lsf.available = False
         outcome = self._submit(dry_run=False)
         self.assertTrue(outcome.blocked)
@@ -470,7 +505,7 @@ class PreflightCheckTest(unittest.TestCase):
 
     def test_excluded_index_warns(self):
         broken = IndexSpec(index_key="9999", path="/nope", gds_count=0,
-                           cpu_per_case=0, error="沒有 GDS")
+                           cpu_per_case=0, error="no GDS")
         from arcx_auto.adapters.arcx import ArcxAdapter
 
         arcx = ArcxAdapter(self.settings.layout, self.settings.plan)
@@ -484,7 +519,9 @@ class PreflightCheckTest(unittest.TestCase):
         self.assertIn("PREFLIGHT_NO_WAVES", self._ids(plan=plan))
 
     def test_relative_path_in_cfg_is_fatal(self):
-        """cfg 會被複製到 wave 目錄, 相對路徑在那裡會解析成不同的東西。"""
+        """The cfg is copied into the wave directory, where a relative path
+        resolves to something else.
+        """
         with open(self.cfg, "w", encoding="utf-8") as handle:
             handle.write("1 BEGIN_SETTING : x\n1 QC_FLOW = calQCAP\n"
                          "1 RCX_TECH_QTF = ./relative.qtf\nEND_SETTINGS\n")
@@ -502,7 +539,9 @@ class PreflightCheckTest(unittest.TestCase):
         self.assertIn("PREFLIGHT_TARGET_EXISTS", self._ids())
 
     def test_index_reuse_warns(self):
-        """同一 index 出現在既有的 wave 中 —— 警告但不阻擋, 證據交給人判斷。"""
+        """The same index in an existing wave warns but does not block; the
+        evidence goes to a human.
+        """
         other = os.path.join(os.path.dirname(self.run_dir), "older", "wave_001",
                              ".arcx_auto")
         os.makedirs(other)

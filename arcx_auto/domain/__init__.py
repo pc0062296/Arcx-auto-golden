@@ -1,7 +1,7 @@
-"""L0 Domain Model - 純資料 + 純函數, 零 I/O、零外部依賴。
+"""L0 Domain Model - pure data and pure functions, zero I/O.
 
-這一層不 import 任何 arcx_auto 的其他模組, 也不做任何檔案/程序存取。
-所有型別皆為 frozen dataclass, 可安全地共享與序列化。
+This layer imports nothing else from arcx_auto and performs no file or process
+access. Every type is a frozen dataclass, safe to share and to serialise.
 """
 
 from arcx_auto.domain.enums import (

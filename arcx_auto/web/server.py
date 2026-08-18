@@ -1,14 +1,17 @@
-"""本機 Web server。標準庫 http.server, 綁 127.0.0.1。
+"""The local web server. Standard library http.server, bound to 127.0.0.1.
 
-為什麼不用 FastAPI/Flask: 這是單人、唯讀、只聽 loopback 的儀表板。
-標準庫足夠, 而內網環境安裝套件是實實在在的摩擦。零相依也讓
-「複製一份程式碼過去就能跑」成立。
+Why not FastAPI or Flask: this is a single user, read only dashboard listening
+on loopback. The standard library is enough, and installing packages on an air
+gapped network is real friction. Zero dependencies also means "copy the source
+across and it runs".
 
-安全性質:
-  * 預設只綁 127.0.0.1 —— 不對外提供服務, 不需要認證
-  * 全部 GET, 沒有任何寫入端點 (Phase 3 的動作會走 commands/ 檔案投遞)
-  * 只讀 state root 底下的 state.json, 路徑由 run_id 查表得出而非拼接,
-    因此沒有 path traversal 的空間
+Security properties:
+  * bound to 127.0.0.1 by default, so it serves nobody else and needs no auth
+  * every route is a GET; there are no write endpoints (write actions will be
+    posted through commands/ files)
+  * it only reads state.json under the state root, and the path comes from
+    looking the run_id up in the existing runs rather than from concatenation,
+    so there is no room for path traversal
 """
 
 from __future__ import annotations
@@ -36,9 +39,9 @@ class _Handler(BaseHTTPRequestHandler):
     options: WebOptions = WebOptions(state_root="~/.arcx-auto")
     server_version = "arcx-auto"
 
-    # -- 路由 ----------------------------------------------------------
+    # -- Routing -------------------------------------------------------
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的介面
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler interface
         path = urllib.parse.urlparse(self.path).path
         parts = [urllib.parse.unquote(p) for p in path.split("/") if p]
 
@@ -51,18 +54,19 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": True})
             if parts[0] == "run":
                 return self._run_routes(parts[1:])
-        except Exception as exc:  # noqa: BLE001 - 一個壞請求不該弄掉 server
-            return self._error(500, "內部錯誤: %s" % exc)
+        except Exception as exc:  # noqa: BLE001 - a bad request must not take
+            # the whole server down
+            return self._error(500, "internal error: %s" % exc)
 
-        self._error(404, "找不到這個頁面")
+        self._error(404, "no such page")
 
     def _run_routes(self, parts: List[str]) -> None:
         if not parts:
-            return self._error(404, "缺少 run id")
+            return self._error(404, "missing run id")
         run_id = parts[0]
         state = self._load_state(run_id)
         if state is None:
-            return self._error(404, "找不到 run: %s" % run_id)
+            return self._error(404, "no such run: %s" % run_id)
 
         if len(parts) == 1:
             return self._html(pages.render_run(state, self.options.refresh_sec))
@@ -70,7 +74,7 @@ class _Handler(BaseHTTPRequestHandler):
         if len(parts) >= 3 and parts[1] == "index":
             index = _find(state.get("indexes") or [], "index_key", parts[2])
             if index is None:
-                return self._error(404, "找不到 index: %s" % parts[2])
+                return self._error(404, "no such index: %s" % parts[2])
 
             if len(parts) == 3:
                 return self._html(
@@ -79,11 +83,11 @@ class _Handler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[3] == "case":
                 case = _find(index.get("cases") or [], "case_id", parts[4])
                 if case is None:
-                    return self._error(404, "找不到 case: %s" % parts[4])
+                    return self._error(404, "no such case: %s" % parts[4])
                 return self._html(pages.render_case(
                     state, index, case, self.options.refresh_sec))
 
-        self._error(404, "找不到這個頁面")
+        self._error(404, "no such page")
 
     def _home(self) -> None:
         states = []
@@ -97,23 +101,23 @@ class _Handler(BaseHTTPRequestHandler):
     def _api_state(self, run_id: str) -> None:
         state = self._load_state(run_id)
         if state is None:
-            return self._error(404, "找不到 run: %s" % run_id)
+            return self._error(404, "no such run: %s" % run_id)
         self._send_json(state)
 
-    # -- 資料 ----------------------------------------------------------
+    # -- Data ----------------------------------------------------------
 
     def _load_state(self, run_id: str) -> Optional[Dict[str, Any]]:
-        """只接受確實存在於 state root 底下的 run id。
+        """Accept only run ids that actually exist under the state root.
 
-        用「列出既有 run 再比對」而不是把使用者輸入拼進路徑, 從根本上
-        避免 path traversal。
+        Listing the existing runs and matching, rather than concatenating user
+        input into a path, removes path traversal at the root.
         """
         if run_id not in RunStore.list_runs(self.options.state_root):
             return None
         state = RunStore(self.options.state_root, run_id).read_state()
         return state or None
 
-    # -- 回應 ----------------------------------------------------------
+    # -- Responses -----------------------------------------------------
 
     def _html(self, body: str, code: int = 200) -> None:
         payload = body.encode("utf-8")
@@ -137,12 +141,15 @@ class _Handler(BaseHTTPRequestHandler):
         body = pages.page(
             "%d" % code,
             "<h2>%d</h2><div class='empty'>%s</div>"
-            "<p><a href='/'>回到首頁</a></p>" % (code, pages.esc(message)),
+            "<p><a href='/'>back to the overview</a></p>"
+            % (code, pages.esc(message)),
         )
         self._html(body, code=code)
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        """預設會把每個請求印到 stderr。自動刷新每 30 秒一次, 那會變成噪音。"""
+        """The default logs every request to stderr; with a 30 second refresh
+        that is just noise.
+        """
         return
 
 
@@ -155,7 +162,7 @@ def _find(items: List[Dict[str, Any]], key: str,
 
 
 def serve(options: WebOptions, ready: Optional[Any] = None) -> None:
-    """啟動 server (阻塞)。``ready`` 是給測試用的 threading.Event。"""
+    """Start the server (blocking). ``ready`` is a threading.Event for tests."""
     _Handler.options = options
     httpd = ThreadingHTTPServer((options.host, options.port), _Handler)
     httpd.daemon_threads = True

@@ -1,21 +1,24 @@
-"""daemon 主迴圈。
+"""The daemon main loop.
 
-    每個 tick:  collect → transition → QA → resolve → 持久化 → 匯出
+    each tick:  collect -> transition -> QA -> resolve -> persist -> export
 
-三個性質:
+Three properties:
 
-  * **可隨時被 kill 並重啟。** 啟動時從 state.json 載回上一次的判定
-    (讓 stall 計時延續), 但即使那份檔案不見了也能從 run folder 重建 ——
-    檔案系統才是唯一真相 (architecture 決策 2)。
+  * **Killable and restartable at any time.** On startup it reloads the last
+    verdicts from state.json so stall timers continue, but even without that
+    file it rebuilds everything from the run folders -- the filesystem is the
+    only truth (architecture decision 2).
 
-  * **唯一寫入者。** 用 flock 保證同一個 state root 只有一個 daemon。
-    UI 與 CLI 全部唯讀。
+  * **The single writer.** flock guarantees one daemon per state root. The UI
+    and CLI are read only.
 
-  * **一次 tick 失敗不能讓 daemon 死掉。** NFS 抽風、LSF 逾時都是常態,
-    錯誤記進 state.json 的 daemon.last_error 讓人看得到, 然後繼續下一個 tick。
+  * **One failed tick must not kill the daemon.** NFS hiccups and LSF timeouts
+    are routine; the error is recorded in daemon.last_error where people can
+    see it, and the next tick runs.
 
-不用 asyncio: scandir / bjobs / stat 全是 blocking I/O, 同步程式碼更好懂
-也更好除錯, 而單人規模 (數百 case) 完全不需要並行。
+No asyncio: scandir, bjobs and stat are all blocking I/O, synchronous code is
+easier to follow and to debug, and a single-user scale of a few hundred cases
+needs no concurrency at all.
 """
 
 from __future__ import annotations
@@ -42,14 +45,14 @@ class DaemonOptions:
     wave_dirs: List[str] = field(default_factory=list)
     run_folders: List[str] = field(default_factory=list)
     arcx_cfg: Optional[str] = None
-    interval_sec: Optional[float] = None      # None -> 用 settings 的分層間隔
+    interval_sec: Optional[float] = None      # None -> tiered interval
     use_lsf: bool = True
     once: bool = False
-    max_ticks: Optional[int] = None           # 測試用
+    max_ticks: Optional[int] = None           # for tests
 
 
 class Daemon:
-    """監控 daemon。"""
+    """The monitoring daemon."""
 
     def __init__(
         self,
@@ -70,11 +73,11 @@ class Daemon:
         self._last_error: Optional[str] = None
 
     # ------------------------------------------------------------------
-    # 生命週期
+    # Lifecycle
     # ------------------------------------------------------------------
 
     def run(self) -> int:
-        """啟動。回傳 exit code。"""
+        """Start. Returns an exit code."""
         lock = FileLock(
             self.store.dir + "/daemon.lock",
             purpose="arcx-auto daemon run_id=%s" % self.options.run_id,
@@ -83,7 +86,7 @@ class Daemon:
         try:
             lock.acquire()
         except LockBusy as exc:
-            print("已經有另一個 daemon 在監控這個 run: %s" % exc)
+            print("another daemon is already monitoring this run: %s" % exc)
             return 1
 
         try:
@@ -101,7 +104,7 @@ class Daemon:
             "run_id": self.options.run_id,
             "wave_dirs": list(self.options.wave_dirs),
             "run_folders": list(self.options.run_folders),
-            "reason": "使用者啟動監控",
+            "reason": "user started monitoring",
         })
 
         arcx_config = self._load_cfg()
@@ -120,7 +123,8 @@ class Daemon:
             "action": "daemon_stop",
             "run_id": self.options.run_id,
             "ticks": self._tick,
-            "reason": "收到停止訊號" if self._stop.is_set() else "達到結束條件",
+            "reason": ("stop signal received" if self._stop.is_set()
+                       else "finish condition reached"),
         })
         return 0
 
@@ -129,22 +133,23 @@ class Daemon:
 
     def _install_signal_handlers(self) -> None:
         def handler(signum, _frame):
-            # 只設旗標, 讓當前 tick 走完再退出 —— 半途中斷會留下寫到一半的狀態
+            # Only set a flag so the current tick finishes: interrupting it
+            # mid-way would leave half-written state.
             self._stop.set()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 signal.signal(sig, handler)
-            except (ValueError, OSError):  # pragma: no cover - 非主執行緒
+            except (ValueError, OSError):  # pragma: no cover - not the main thread
                 pass
 
     # ------------------------------------------------------------------
-    # 每個 tick
+    # One tick
     # ------------------------------------------------------------------
 
     def _safe_tick(self, arcx_config: Optional[ArcxConfig]) -> Optional[ScanResult]:
-        """跑一次掃描。任何例外都記下來並繼續 —— NFS 抽風、LSF 逾時是常態,
-        不該讓監控整個死掉。
+        """Run one scan. Any exception is recorded and the loop continues:
+        NFS hiccups and LSF timeouts are routine and must not kill monitoring.
         """
         try:
             result = self.monitor.scan(
@@ -153,7 +158,7 @@ class Daemon:
                 arcx_config=arcx_config,
                 use_lsf=self.options.use_lsf,
             )
-        except Exception:  # noqa: BLE001 - 見 docstring
+        except Exception:  # noqa: BLE001 - see the docstring
             self._last_error = traceback.format_exc(limit=6)
             self._write_error_state()
             return None
@@ -174,8 +179,8 @@ class Daemon:
             self.store.append_events(as_json_dict(e) for e in result.events)
 
     def _write_error_state(self) -> None:
-        """掃描失敗時也要更新 state.json —— 否則 UI 會顯示過期資料
-        卻看起來一切正常。
+        """Update state.json even when the scan failed, or the UI shows stale
+        data while looking perfectly healthy.
         """
         state = self.store.read_state()
         state.setdefault("run_id", self.options.run_id)
@@ -184,7 +189,7 @@ class Daemon:
         self.store.write_state(state)
 
     def _next_interval(self, result: Optional[ScanResult]) -> float:
-        """分層 polling: 有 case 在跑就掃勤一點, 全部結束就放慢。"""
+        """Tiered polling: scan often while cases run, slow down when idle."""
         if self.options.interval_sec:
             return self.options.interval_sec
         monitor = self.settings.monitor
@@ -197,7 +202,7 @@ class Daemon:
         return monitor.poll_idle_sec
 
     # ------------------------------------------------------------------
-    # 啟動時的還原
+    # Restoring state on startup
     # ------------------------------------------------------------------
 
     def _write_manifest(self) -> None:
@@ -210,10 +215,10 @@ class Daemon:
         })
 
     def _restore_previous(self) -> None:
-        """從 state.json 載回上一次的判定, 讓 stall 計時跨重啟延續。
+        """Reload the previous verdicts so stall timers survive a restart.
 
-        載不回來也沒關係 —— 下一次掃描會從 log mtime 重新推算
-        (見 StateEngine 的首次觀測種子邏輯)。
+        Failing to reload is fine: the next scan reseeds from log mtimes (see
+        the first-observation seeding in StateEngine).
         """
         state = self.store.read_state()
         restored = {}
@@ -240,9 +245,10 @@ class Daemon:
 
 
 def _index_from_state(payload: Dict[str, Any]):
-    """把 state.json 裡的一個 index 還原成 IndexRunSnapshot。
+    """Rebuild one IndexRunSnapshot from state.json.
 
-    只還原狀態機需要的欄位 —— 其餘都會在下一次掃描重新算出來。
+    Only the fields the state machine needs are restored; everything else is
+    recomputed by the next scan.
     """
     cases = {}
     for case in payload.get("cases") or []:

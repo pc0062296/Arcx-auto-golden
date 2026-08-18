@@ -1,12 +1,15 @@
-"""PRE 檢查 —— arcx.cfg 的驗證。提交前跑, 不需要任何 run folder。
+"""PRE checks -- validating arcx.cfg. Runs before submission, needs no run
+folder.
 
-這一層的投資報酬率最高: 設定錯誤造成的失敗, 大部分在提交前就看得出來,
-而且提交出去之後要等好幾小時才會發現同一件事。
+This layer has the best return on effort: most configuration mistakes are
+visible before anything is submitted, and finding the same mistake afterwards
+costs hours of waiting.
 
-行首旗標的語意 (使用者確認):
-    1  啟用
-    0  停用  ─┬─ 這一行不生效, 所以**不檢查**它引用的路徑
-    #  註解  ─┘   (那些路徑根本不會被用到, 檢查只會製造假警報)
+Leading flag semantics (confirmed with the user):
+    1  enabled
+    0  disabled  -+- the line does not take effect, so its paths are **not**
+    #  comment   -+  checked; those paths are never used and checking them
+                    would only manufacture false alarms
 """
 
 from __future__ import annotations
@@ -23,53 +26,55 @@ GLOBAL = IssueScope.GLOBAL
 PRE = IssueStage.PRE
 
 
-@qa_check(id="CFG_UNREADABLE", title="arcx.cfg 讀不到",
+@qa_check(id="CFG_UNREADABLE", title="arcx.cfg cannot be read",
           severity=Severity.FATAL, scope=GLOBAL, stage=PRE)
 def cfg_unreadable(cfg: ConfigContext) -> Optional[Issue]:
-    """檔案不存在或無法讀取。"""
+    """The file does not exist or cannot be read."""
     if cfg.config is None:
-        return cfg.fail("沒有提供 arcx.cfg")
+        return cfg.fail("no arcx.cfg was provided")
     if cfg.config.error:
         return cfg.fail(cfg.config.error, evidence={"path": cfg.config.source_path})
     return None
 
 
-@qa_check(id="CFG_NO_BLOCKS", title="arcx.cfg 沒有任何 settings block",
+@qa_check(id="CFG_NO_BLOCKS", title="arcx.cfg has no settings block",
           severity=Severity.FATAL, scope=GLOBAL, stage=PRE)
 def cfg_no_blocks(cfg: ConfigContext) -> Optional[Issue]:
-    """整個檔案解析不出任何 block —— 送出去也不會做任何事。"""
+    """No block parsed at all -- submitting it would do nothing."""
     if cfg.config is None or cfg.config.error:
-        return None                      # 交給 CFG_UNREADABLE
+        return None                      # CFG_UNREADABLE covers this
     if cfg.config.blocks:
         return None
-    return cfg.fail("解析不到任何 BEGIN_SETTINGS block",
+    return cfg.fail("no BEGIN_SETTINGS block could be parsed",
                     evidence={"path": cfg.config.source_path})
 
 
-@qa_check(id="CFG_ALL_BLOCKS_DISABLED", title="所有 block 都被停用",
+@qa_check(id="CFG_ALL_BLOCKS_DISABLED", title="every block is disabled",
           severity=Severity.FATAL, scope=GLOBAL, stage=PRE)
 def cfg_all_blocks_disabled(cfg: ConfigContext) -> Optional[Issue]:
-    """有 block, 但全部行首旗標是 0。
+    """Blocks exist but every one has a leading 0.
 
-    這種 cfg 會安靜地跑完卻什麼都不產出 —— 是最浪費 TAT 的一種錯誤。
+    Such a cfg runs to completion quietly and produces nothing, which is the
+    most wasteful failure mode there is.
     """
     if cfg.config is None or not cfg.config.blocks:
         return None
     if cfg.config.enabled_blocks:
         return None
     return cfg.fail(
-        "全部 %d 個 block 都被停用 (行首旗標 0)" % len(cfg.config.blocks),
+        "all %d block(s) are disabled by a leading 0" % len(cfg.config.blocks),
         evidence={"blocks": [b.name for b in cfg.config.blocks]},
     )
 
 
-@qa_check(id="CFG_DUPLICATE_BLOCK", title="block 名稱重複",
+@qa_check(id="CFG_DUPLICATE_BLOCK", title="duplicate block name",
           severity=Severity.FATAL, scope=GLOBAL, stage=PRE)
 def cfg_duplicate_block(cfg: ConfigContext) -> Optional[Issue]:
-    """兩個 block 同名。
+    """Two blocks share a name.
 
-    產出目錄是 <block>_<QC_FLOW>, 同名 block 會寫進同一個目錄互相覆蓋,
-    結果是「跑完了但只剩最後一份」——而且不會有任何錯誤訊息。
+    Output directories are <block>_<QC_FLOW>, so same-named blocks write into
+    the same directory and overwrite each other. The run "succeeds" with only
+    the last one left, and nothing reports an error.
     """
     if cfg.config is None:
         return None
@@ -80,31 +85,32 @@ def cfg_duplicate_block(cfg: ConfigContext) -> Optional[Issue]:
     if not duplicates:
         return None
     return cfg.fail(
-        "有 %d 個重複的 block 名稱" % len(duplicates),
+        "%d duplicated block name(s)" % len(duplicates),
         evidence={"duplicates": duplicates},
     )
 
 
-@qa_check(id="CFG_BLOCK_NO_FLOW", title="block 沒有設定 QC_FLOW",
+@qa_check(id="CFG_BLOCK_NO_FLOW", title="block has no QC_FLOW",
           severity=Severity.FATAL, scope=GLOBAL, stage=PRE)
 def cfg_block_no_flow(cfg: ConfigContext) -> Optional[Issue]:
-    """啟用中的 block 缺少 QC_FLOW —— 不知道要跑哪個 EDA tool。"""
+    """An enabled block without QC_FLOW: no EDA tool flow is named."""
     if cfg.config is None:
         return None
     offenders = [b.name for b in cfg.config.enabled_blocks if not b.flow]
     if not offenders:
         return None
-    return cfg.fail("%d 個 block 沒有 QC_FLOW" % len(offenders),
+    return cfg.fail("%d block(s) have no QC_FLOW" % len(offenders),
                     evidence={"blocks": offenders})
 
 
-@qa_check(id="CFG_UNKNOWN_FLOW", title="QC_FLOW 不在已知清單中",
+@qa_check(id="CFG_UNKNOWN_FLOW", title="QC_FLOW is not a known flow",
           severity=Severity.FATAL, scope=GLOBAL, stage=PRE)
 def cfg_unknown_flow(cfg: ConfigContext) -> Optional[Issue]:
-    """QC_FLOW 的值系統不認得。
+    """The QC_FLOW value is not one the system knows.
 
-    可能是 cfg 打錯字, 也可能是新增了 EDA tool 但還沒在 qa.flows 裡定義。
-    無論哪種, 系統都無法驗證它的產出物 —— 所以要在提交前就講清楚。
+    Either the cfg has a typo, or a new EDA tool was added without a definition
+    in qa.flows. Either way its artifacts cannot be verified, so it has to be
+    said before submission rather than after.
     """
     if cfg.config is None:
         return None
@@ -117,21 +123,23 @@ def cfg_unknown_flow(cfg: ConfigContext) -> Optional[Issue]:
     if not offenders:
         return None
     return cfg.fail(
-        "%d 個 block 的 QC_FLOW 不認得" % len(offenders),
+        "%d block(s) name an unknown QC_FLOW" % len(offenders),
         evidence={"blocks": offenders, "known_flows": sorted(known)},
     )
 
 
-@qa_check(id="CFG_PATH_NOT_FOUND", title="設定引用的檔案不存在",
+@qa_check(id="CFG_PATH_NOT_FOUND", title="a referenced file does not exist",
           severity=Severity.FATAL, scope=GLOBAL, stage=PRE)
 def cfg_path_not_found(cfg: ConfigContext) -> Optional[Issue]:
-    """啟用中的設定所引用的檔案 / 目錄找不到。
+    """A file or directory referenced by an active setting is missing.
 
-    只檢查 qa.cfg_path_keys 列出的 key (RCX_TECH_QTF、LVS_DECK 等), 而且
-    只檢查**啟用中**的行 —— 旗標 0 或註解掉的行不會生效, 檢查它們只會製造
-    假警報, 而假警報多了就沒人看了。
+    Only the keys listed in qa.cfg_path_keys (RCX_TECH_QTF, LVS_DECK and so on)
+    are checked, and only on **enabled** lines. A line with a leading 0, or
+    commented out, never takes effect, so checking it would only manufacture
+    false alarms -- and once there are false alarms nobody reads the warnings.
 
-    含 $ 的值 (環境變數) 無法在這裡解析, 會列為 skipped 而不是誤報。
+    Values containing $ cannot be resolved here, so they are listed as skipped
+    rather than reported as missing.
     """
     if cfg.config is None or not cfg.qa.verify_cfg_paths:
         return None
@@ -144,7 +152,7 @@ def cfg_path_not_found(cfg: ConfigContext) -> Optional[Issue]:
     for block in cfg.config.enabled_blocks:
         for key in keys:
             if key in block.disabled_keys:
-                continue                  # 行首旗標 0 -> 不生效, 不檢查
+                continue                  # leading 0 -> inactive, not checked
             value = block.settings.get(key)
             if not value:
                 continue
@@ -157,15 +165,17 @@ def cfg_path_not_found(cfg: ConfigContext) -> Optional[Issue]:
     if not missing:
         return None
     return cfg.fail(
-        "%d 個設定引用的路徑不存在" % len(missing),
+        "%d referenced path(s) do not exist" % len(missing),
         evidence={"missing": missing, "skipped_env_vars": skipped},
     )
 
 
-@qa_check(id="CFG_PARSE_WARNING", title="arcx.cfg 解析時有疑點",
+@qa_check(id="CFG_PARSE_WARNING", title="arcx.cfg parsed with doubts",
           severity=Severity.WARN, scope=GLOBAL, stage=PRE)
 def cfg_parse_warning(cfg: ConfigContext) -> Optional[Issue]:
-    """解析器發現的疑點: 關鍵字拼錯、缺 END_SETTINGS、無法解析的行等。"""
+    """Doubts the parser raised: misspelt keywords, a missing END_SETTINGS,
+    unparseable lines.
+    """
     if cfg.config is None:
         return None
     all_warnings = list(cfg.config.warnings)
@@ -173,5 +183,5 @@ def cfg_parse_warning(cfg: ConfigContext) -> Optional[Issue]:
         all_warnings.extend("[%s] %s" % (block.name, w) for w in block.warnings)
     if not all_warnings:
         return None
-    return cfg.warn("解析時有 %d 個疑點" % len(all_warnings),
+    return cfg.warn("%d parsing doubt(s)" % len(all_warnings),
                     evidence={"warnings": all_warnings})

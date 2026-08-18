@@ -1,10 +1,12 @@
-"""提交前的整體檢查 (scope=WAVE, stage=PRE)。
+"""Whole-batch pre-submission checks (scope=WAVE, stage=PRE).
 
-arcx.cfg 本身的檢查在 checks_config.py; 這裡檢查的是「這批工作現在送得出去嗎」——
-目標目錄、磁碟、LSF、quota、與既有工作的衝突。
+arcx.cfg itself is checked in checks_config.py; this file asks whether this
+batch can go out right now: target directories, disk, LSF, quota, and clashes
+with existing work.
 
-原則: **有 FATAL 就不讓提交。** 送出去要等好幾小時才會發現同一件事,
-而且中途失敗還會留下半成品要清理。
+The rule: **any FATAL blocks the submission.** Discovering the same thing after
+submitting costs hours of waiting, and a failure part way through also leaves
+half-built state to clean up.
 """
 
 from __future__ import annotations
@@ -21,14 +23,14 @@ WAVE = IssueScope.WAVE
 PRE = IssueStage.PRE
 
 
-@qa_check(id="PREFLIGHT_NO_WAVES", title="沒有可以提交的 wave",
+@qa_check(id="PREFLIGHT_NO_WAVES", title="no wave can be submitted",
           severity=Severity.FATAL, scope=WAVE, stage=PRE)
 def no_waves(ctx: PreflightContext) -> Optional[Issue]:
-    """分波之後一個 wave 都不剩 —— 選到的 index 全部不可用。"""
+    """Planning produced no waves: every selected index is unusable."""
     if ctx.plan.waves:
         return None
     return ctx.fail(
-        "沒有任何可提交的 wave",
+        "there is no wave to submit",
         evidence={
             "excluded": [
                 {"index": s.index_key, "reason": s.error}
@@ -38,18 +40,19 @@ def no_waves(ctx: PreflightContext) -> Optional[Issue]:
     )
 
 
-@qa_check(id="PREFLIGHT_INDEX_EXCLUDED", title="部分 index 被排除",
+@qa_check(id="PREFLIGHT_INDEX_EXCLUDED", title="some indices were excluded",
           severity=Severity.WARN, scope=WAVE, stage=PRE)
 def index_excluded(ctx: PreflightContext) -> Optional[Issue]:
-    """有 index 因為資料不完整而排不進 wave。
+    """Some indices could not be planned because their data is incomplete.
 
-    不擋提交 —— 其他 index 照跑比較有價值 —— 但一定要讓人知道少了什麼,
-    否則收工時會以為全部都跑過了。
+    This does not block submission -- running the rest is still worth more --
+    but what is missing has to be visible, or the batch will look complete when
+    it finishes.
     """
     if not ctx.plan.excluded:
         return None
     return ctx.warn(
-        "%d 個 index 不會被執行" % len(ctx.plan.excluded),
+        "%d index/indices will not run" % len(ctx.plan.excluded),
         evidence={
             "excluded": [
                 {"index": s.index_key, "path": s.path, "reason": s.error}
@@ -59,13 +62,14 @@ def index_excluded(ctx: PreflightContext) -> Optional[Issue]:
     )
 
 
-@qa_check(id="PREFLIGHT_TARGET_EXISTS", title="目標目錄已存在且非空",
+@qa_check(id="PREFLIGHT_TARGET_EXISTS", title="target directory exists and is not empty",
           severity=Severity.FATAL, scope=WAVE, stage=PRE)
 def target_exists(ctx: PreflightContext) -> Optional[Issue]:
-    """要建立的 wave 目錄已經有東西了。
+    """The wave directory we would create already has content.
 
-    不可妥協的原則之一是絕不覆蓋既有結果。要重跑請走 rerun 流程 ——
-    那條路會先備份現場再清理, 而直接覆寫會讓失敗證據永遠消失。
+    Never overwriting existing results is one of the non-negotiable rules. To
+    redo work, use the rerun flow: it backs up the failed state before cleaning
+    up, whereas overwriting destroys the evidence permanently.
     """
     occupied = []
     for wave in ctx.plan.waves:
@@ -75,19 +79,20 @@ def target_exists(ctx: PreflightContext) -> Optional[Issue]:
     if not occupied:
         return None
     return ctx.fail(
-        "%d 個目標目錄已存在且非空" % len(occupied),
+        "%d target director(ies) already exist and are not empty" % len(occupied),
         evidence={"paths": occupied,
-                  "hint": "換一個 --run-id, 或走 rerun 流程"},
+                  "hint": "use a different --run-id, or the rerun flow"},
     )
 
 
-@qa_check(id="PREFLIGHT_DISK_LOW", title="磁碟空間不足",
+@qa_check(id="PREFLIGHT_DISK_LOW", title="not enough disk space",
           severity=Severity.FATAL, scope=WAVE, stage=PRE)
 def disk_low(ctx: PreflightContext) -> Optional[Issue]:
-    """目標檔案系統快滿了。
+    """The target filesystem is nearly full.
 
-    磁碟爆掉是 RC extraction 的頭號隱形殺手 —— job 會在跑到一半時死掉,
-    而且是以看不出原因的方式死。提交前擋下來比事後除錯便宜太多。
+    A full disk is the number one silent killer of RC extraction: jobs die part
+    way through, in a way that does not say why. Blocking before submission is
+    far cheaper than debugging afterwards.
     """
     ratio = ctx.disk_free_ratio()
     if ratio is None:
@@ -95,22 +100,22 @@ def disk_low(ctx: PreflightContext) -> Optional[Issue]:
     settings = ctx.settings.preflight
     if ratio < settings.min_disk_free_ratio:
         return ctx.fail(
-            "剩餘空間只有 %.1f%%, 低於門檻 %.1f%%"
+            "only %.1f%% free, below the %.1f%% threshold"
             % (ratio * 100, settings.min_disk_free_ratio * 100),
             evidence={"path": ctx.run_dir, "free_ratio": round(ratio, 4)},
         )
     if ratio < settings.warn_disk_free_ratio:
         return ctx.warn(
-            "剩餘空間 %.1f%%, 接近門檻" % (ratio * 100),
+            "%.1f%% free, close to the threshold" % (ratio * 100),
             evidence={"path": ctx.run_dir, "free_ratio": round(ratio, 4)},
         )
     return None
 
 
-@qa_check(id="PREFLIGHT_LSF_UNAVAILABLE", title="LSF 指令不可用",
+@qa_check(id="PREFLIGHT_LSF_UNAVAILABLE", title="LSF commands unavailable",
           severity=Severity.FATAL, scope=WAVE, stage=PRE)
 def lsf_unavailable(ctx: PreflightContext) -> Optional[Issue]:
-    """bsub 找不到。送出去也不會有任何事發生。"""
+    """bsub is not on PATH. Submitting would achieve nothing."""
     if ctx.lsf is None:
         return None
     missing = [
@@ -119,17 +124,17 @@ def lsf_unavailable(ctx: PreflightContext) -> Optional[Issue]:
     ]
     if not missing:
         return None
-    return ctx.fail("找不到 LSF 指令: %s" % ", ".join(missing),
+    return ctx.fail("LSF command(s) not found: %s" % ", ".join(missing),
                     evidence={"missing": missing})
 
 
-@qa_check(id="PREFLIGHT_QUOTA_HIGH", title="帳號 job 數已接近上限",
+@qa_check(id="PREFLIGHT_QUOTA_HIGH", title="account job count near the limit",
           severity=Severity.WARN, scope=WAVE, stage=PRE)
 def quota_high(ctx: PreflightContext) -> Optional[Issue]:
-    """現在送出去只會全部卡在 PEND。
+    """Submitting now would just pile up PEND jobs.
 
-    不擋提交 (分波閘門本來就會等 quota 降下來), 但先講清楚, 免得使用者
-    以為系統卡住了。
+    Not blocking -- the wave gate already waits for the quota to fall -- but
+    saying so avoids the impression that the system is stuck.
     """
     njobs = ctx.current_njobs()
     if njobs is None:
@@ -138,18 +143,20 @@ def quota_high(ctx: PreflightContext) -> Optional[Issue]:
     if njobs < threshold * ctx.settings.preflight.quota_warn_ratio:
         return None
     return ctx.warn(
-        "目前 NJOBS = %d, 閘門門檻是 %d" % (njobs, threshold),
+        "NJOBS is %d and the gate threshold is %d" % (njobs, threshold),
         evidence={"njobs": njobs, "quota_threshold": threshold},
     )
 
 
-@qa_check(id="PREFLIGHT_CFG_RELATIVE_PATH", title="arcx.cfg 內有相對路徑",
+@qa_check(id="PREFLIGHT_CFG_RELATIVE_PATH", title="arcx.cfg uses a relative path",
           severity=Severity.FATAL, scope=WAVE, stage=PRE)
 def cfg_relative_path(ctx: PreflightContext) -> Optional[Issue]:
-    """cfg 會被複製一份到 wave 目錄, 相對路徑在那裡會解析成不同的東西。
+    """The cfg is copied into the wave directory, where a relative path would
+    resolve to something else.
 
-    我們刻意用快照而不是原檔執行 —— 這樣事後做 QA 時, 用的是當時那份 cfg。
-    代價就是路徑必須是絕對的。
+    Running from a snapshot rather than the original is deliberate: QA later
+    reads the cfg the run actually used. The price is that paths must be
+    absolute.
     """
     config = ctx.arcx_config
     if config is None:
@@ -166,24 +173,26 @@ def cfg_relative_path(ctx: PreflightContext) -> Optional[Issue]:
     if not offenders:
         return None
     return ctx.fail(
-        "%d 個設定使用相對路徑" % len(offenders),
+        "%d setting(s) use a relative path" % len(offenders),
         evidence={"paths": offenders,
-                  "hint": "cfg 會被複製到 wave 目錄, 請改用絕對路徑"},
+                  "hint": "the cfg is copied into the wave directory; "
+                          "use absolute paths"},
     )
 
 
-@qa_check(id="PREFLIGHT_INDEX_IN_USE", title="index 已在其他 wave 中使用",
+@qa_check(id="PREFLIGHT_INDEX_IN_USE", title="index already used by another wave",
           severity=Severity.WARN, scope=WAVE, stage=PRE)
 def index_in_use(ctx: PreflightContext) -> Optional[Issue]:
-    """同一個 index 出現在既有的 wave 裡。
+    """The same index appears in an existing wave.
 
-    同時對同一個 index 跑兩份 Arcx 會互相干擾。這裡只警告不阻擋 ——
-    既有的那份可能早就跑完了, 系統無法確定, 所以把證據交給人判斷。
+    Two Arcx runs over one index interfere with each other. This only warns:
+    the earlier run may well have finished long ago, and the system cannot
+    tell, so the evidence goes to a human.
     """
     conflicts = ctx.existing_index_usage()
     if not conflicts:
         return None
     return ctx.warn(
-        "%d 個 index 曾在其他 wave 中提交過" % len(conflicts),
+        "%d index/indices were submitted in another wave" % len(conflicts),
         evidence={"conflicts": conflicts},
     )

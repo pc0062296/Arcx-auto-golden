@@ -1,487 +1,547 @@
-# Arcx Auto Golden — 系統架構
+# Arcx Auto Golden -- Architecture
 
-> RC extraction 自動化提交、監控、判定與重跑系統
-> 目標：把「人工盯梢 + 事後撈問題」變成「系統盯梢 + 人只做決策」，縮短 TAT。
+> Automated submission, monitoring, QA and rerun for RC extraction driven by Arcx.
+> The goal is to replace "watch it by hand, dig out problems afterwards" with
+> "the system watches, people only make decisions", and so cut turnaround time.
 
 ---
 
-## 0. 一頁摘要
+## 0. One page
 
-| 面向 | 決定 |
+| Aspect | Decision |
 |---|---|
-| 部署形態 | **純 local 單人工具**，無服務端、無多人、無認證 |
-| 介面 | 綁 `127.0.0.1` 的本機 web app，用 Chrome 開 |
-| Arcx 啟動 | **`bsub` 出去**，job id 寫進 wave 目錄的 `launch.json` |
-| 分批 | **Wave（分波）**：依 `special.cfg` 的 CPU 需求切波，逐波提交 |
-| 重跑粒度 | **wave 級**（drain → 清理未完成 case run dir → `-keep_dir --run`） |
-| 成功判定 | **產出物存在性為主**，log 只看「多久沒更新」，不做 error regex |
-| 失敗分類 | QA function → issue ID → YAML policy → action |
-| 儲存 | JSON 快照 + JSONL append-only（不用 SQLite） |
-| 執行環境 | Python 3.9.10、內網、無外部網路 |
+| Deployment | **A local, single-user tool.** No server, no multi-user, no auth |
+| Interface | A web app bound to `127.0.0.1`, opened in a browser |
+| Starting Arcx | **Submitted through bsub**; the job id goes into the wave directory's `launch.json` |
+| Batching | **Waves**: sized from `special.cfg` CPU demand, released one at a time |
+| Rerun scope | **Per wave**: drain, delete unfinished case run dirs, `-keep_dir --run` |
+| Success test | **Artifact existence**, not log regexes; logs only answer "how long has it been quiet" |
+| Failure classification | QA function -> issue id -> YAML policy -> action |
+| Storage | JSON snapshots plus append-only JSONL. No SQLite |
+| Runtime | Python 3.9.10, air-gapped network, **zero third-party dependencies, pure ASCII** |
 
 ---
 
-## 1. 分層架構
+## 1. Layering
 
 ```
-╔══════════════════════════════════════════════════════════════════════╗
-║  L4  Interface Layer          （薄層，可替換，不含任何業務邏輯）        ║
-║  ┌──────────────┐ ┌──────────────┐ ┌──────────────────────────────┐  ║
-║  │  Local Web   │ │     CLI      │ │  Status Exporter             │  ║
-║  │  (127.0.0.1) │ │  arcx-auto   │ │  → 公用碟 status.json/html   │  ║
-║  └──────┬───────┘ └──────┬───────┘ └──────────────▲───────────────┘  ║
-╚═════════│════════════════│═══════════════════════ │══════════════════╝
-     讀 state.json     讀 state.json                │
-     寫 commands/*.json 寫 commands/*.json          │
-          └────────────────┴───────────┐            │
-╔═════════════════════════════════════ │ ══════════ │ ══════════════════╗
-║  L3  Orchestration                   ▼            │                   ║
-║  ┌────────────────────────────────────────────────┴────────────────┐  ║
-║  │  Daemon  (唯一的寫入者 / single writer)                          │  ║
-║  │  tick: collect → transition → qa → policy → act → persist       │  ║
-║  └───┬──────────┬──────────┬──────────┬──────────┬────────────┬────┘  ║
-╚══════│══════════│══════════│══════════│══════════│════════════│═══════╝
-       ▼          ▼          ▼          ▼          ▼            ▼
-╔══════════════════════════════════════════════════════════════════════╗
-║  L2  Service Layer         （業務邏輯，可單元測試）                    ║
-║  ┌───────────┐┌──────────┐┌─────────┐┌─────────┐┌────────┐┌────────┐ ║
-║  │WavePlanner││Submission││Preflight││Collector││ State  ││   QA   │ ║
-║  │ (純函數)  ││Controller││ (檢查)  ││ (觀測)  ││ Engine ││Registry│ ║
-║  └─────┬─────┘└────┬─────┘└────┬────┘└────┬────┘└───┬────┘└───┬────┘ ║
-║        │  ┌────────▼────────┐  │          │         │         │      ║
-║        └─►│ WorkspaceBuilder│◄─┘          │    ┌────▼─────────▼────┐ ║
-║           │   + Launcher    │             │    │ Policy + Remedy   │ ║
-║           └────────┬────────┘             │    └─────────┬─────────┘ ║
-╚════════════════════│══════════════════════│══════════════│══════════╝
-                     ▼                      ▼              ▼
-╔══════════════════════════════════════════════════════════════════════╗
-║  L1  Adapter Layer         （唯一有 side effect 的地方）               ║
-║  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐  ║
-║  │ FsAdapter│ │LsfAdapter│ │ArcxAdapt.│ │  Store   │ │ LockManager│  ║
-║  │scandir/  │ │bsub bjobs│ │dir_map   │ │json/jsonl│ │  flock     │  ║
-║  │stat/tail │ │busers    │ │special   │ │ atomic   │ │            │  ║
-║  │          │ │bjobs_mgr │ │cfg/cmd   │ │          │ │            │  ║
-║  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └────────────┘  ║
-╚══════════════════════════════════════════════════════════════════════╝
-                                   ▼
-╔══════════════════════════════════════════════════════════════════════╗
-║  L0  Domain Model          （純資料 + 純函數，零 I/O、零依賴）          ║
-║  Run / Wave / IndexRun / Case / Observation / Issue / Action / Event  ║
-╚══════════════════════════════════════════════════════════════════════╝
++======================================================================+
+|  L4  Interface Layer        (thin, replaceable, no business logic)   |
+|  +--------------+ +--------------+ +------------------------------+ |
+|  |  Local Web   | |     CLI      | |  Status Exporter             | |
+|  |  (127.0.0.1) | |  arcx-auto   | |  -> shared disk status.json  | |
+|  +------+-------+ +------+-------+ +--------------^---------------+ |
++=========|================|========================|==================+
+     reads state.json   reads state.json            |
+     writes commands/   writes commands/            |
+          +----------------+-----------+            |
++========================================|==========|==================+
+|  L3  Orchestration                     v          |                  |
+|  +-------------------------------------------------+---------------+ |
+|  |  Daemon  (the single writer)                                    | |
+|  |  tick: collect -> transition -> qa -> policy -> act -> persist  | |
+|  +---+----------+----------+----------+----------+------------+----+ |
++======|==========|==========|==========|==========|============|======+
+       v          v          v          v          v            v
++======================================================================+
+|  L2  Service Layer                    (business logic, testable)     |
+|  +-----------++----------++---------++---------++--------++--------+ |
+|  |WavePlanner||Submission||Preflight||Collector||  State ||   QA   | |
+|  | (pure)    ||Controller||         || (observe)|| Engine ||Registry| |
+|  +-----+-----++----+-----++----+----++----+----++---+----++---+----+ |
+|        |  +--------v--------+  |         |         |         |       |
+|        +->| WorkspaceBuilder|<-+         |    +----v---------v----+  |
+|           |   + Launcher    |            |    | Policy + Remedy   |  |
+|           +--------+--------+            |    +---------+---------+  |
++====================|=====================|==============|============+
+                     v                     v              v
++======================================================================+
+|  L1  Adapter Layer               (the only place with side effects)  |
+|  +----------+ +----------+ +----------+ +----------+ +------------+  |
+|  | FsAdapter| |LsfAdapter| |ArcxAdapt.| |  Store   | | LockManager|  |
+|  |scandir/  | |bsub bjobs| |dir_map   | |json/jsonl| |  flock     |  |
+|  |stat/tail | |busers    | |special   | | atomic   | |            |  |
+|  |          | |bjobs_mgr | |cfg/cmd   | |          | |            |  |
+|  +----------+ +----------+ +----------+ +----------+ +------------+  |
++======================================================================+
+                                   v
++======================================================================+
+|  L0  Domain Model         (pure data, pure functions, zero I/O)      |
+|  Run / Wave / IndexRun / Case / Observation / Issue / Action / Event  |
++======================================================================+
 
-依賴方向：L4 → L3 → L2 → L1 → L0   （單向，絕不反向）
+Dependencies point one way:  L4 -> L3 -> L2 -> L1 -> L0
 ```
 
-**唯一的架構鐵律：依賴只能往下。** L0 不 import 任何東西，L2 只透過 L1 的介面碰外界。
-具體好處：可以在沒有 LSF、沒有 NFS、沒有 Arcx 的機器上，用假的 run folder 跑完整狀態機與 QA 邏輯測試。
+**The one architectural rule: dependencies only point downwards.** L0 imports
+nothing, and L2 reaches the outside world only through L1 interfaces.
+
+The concrete payoff: the whole state machine and QA logic can be exercised on a
+machine with **no LSF, no NFS and no Arcx**, against fake run folders.
 
 ---
 
-## 2. 五個關鍵設計決策
+## 2. Five key decisions
 
-### 決策 1：Daemon 是唯一寫入者（Single Writer）
+### Decision 1: the daemon is the single writer
 
-UI / CLI 全部唯讀，動作透過 `commands/*.json` 投遞，daemon 消化後執行並刪除。
+The UI and the CLI are read only. Actions are posted as `commands/*.json`, which
+the daemon consumes, executes and deletes.
 
-**為什麼**：不可妥協原則要求「絕不對同一 run folder 同時動兩個手」與「所有寫入型動作都有 audit log」。
-與其在多個進入點各自加鎖、各自記 audit（總有一天漏掉一個），不如在架構上讓寫入只有一條路徑。
-副作用皆為正面：UI 可隨時關掉、崩潰、替換，daemon 照跑；audit 天然完整，因為沒有旁路。
+**Why.** Two non-negotiable rules say "never touch the same run folder twice at
+once" and "every write action is in the audit log". Rather than adding locking
+and audit calls at every entry point -- and eventually missing one -- the
+architecture gives writes exactly one path.
 
-### 決策 2：檔案系統是唯一真相，`state.json` 只是快取
+The side effects are all good: the UI can be closed, crashed or replaced without
+disturbing the daemon, and the audit log is complete because there is no bypass.
 
-daemon 被 kill、機器重開、`state.json` 損毀 —— 重新掃一次 run folder 就能重建全部狀態。
+### Decision 2: the filesystem is the truth; state.json is a cache
 
-**為什麼**：job 要跑好幾天。任何「狀態只活在記憶體或 DB」的設計，第一次意外重啟就會產生
-「系統以為在跑、實際早就死了」的鬼故事，而這比原本的問題更難查。
+Kill the daemon, reboot the machine, corrupt `state.json` -- one rescan of the
+run folders rebuilds everything.
 
-要求：`state.json` 每個欄位都必須能從 run folder + LSF 重新推導。
-唯一例外是歷史性資訊（retry 次數、audit、誰按了什麼），放在 append-only 的 JSONL，永不改寫。
+**Why.** Jobs run for days. Any design where state lives only in memory or in a
+database produces, on its first unexpected restart, the ghost story where the
+system believes work is running that died hours ago. That is harder to diagnose
+than the original problem.
 
-### 決策 3：Adapter 層隔離所有外部世界
+The requirement this imposes: every field in `state.json` must be derivable from
+the run folders plus LSF. The only exception is history -- retry counts, audit,
+who clicked what -- which lives in append-only JSONL and is never rewritten.
 
-`FsAdapter` / `LsfAdapter` / `ArcxAdapter` 是唯三會碰到 NFS、LSF、Arcx 的模組。
+### Decision 3: adapters isolate the outside world
 
-**為什麼**：這是唯一能離線開發、離線測試的方法。搭配 `FakeRunFolder` 產生器
-（能生出 queued / running / stalled / partial / 產出物截斷等情境），
-可以在幾秒內驗證邏輯，而不是等三天 job 跑完才發現判斷寫錯。
+`FsAdapter`, `LsfAdapter` and `ArcxAdapter` are the only modules that touch NFS,
+LSF or Arcx.
 
-### 決策 4：觀測 → 狀態轉移 → QA → 決策，四段嚴格分離
+**Why.** It is the only way to develop and test offline. Together with a
+`FakeRunFolder` generator -- which produces queued, running, stalled, partial and
+truncated-artifact situations -- logic can be validated in seconds instead of
+after a three-day job reveals the judgement was wrong.
+
+### Decision 4: observe, interpret, judge, decide -- kept apart
 
 ```
-Observation (事實)  →  State (解釋)  →  Issue (判斷)  →  Action (決策)
-   純 I/O              純函數           可插拔函數        YAML 規則
+Observation (fact)  ->  State (interpretation)  ->  Issue (judgement)  ->  Action
+    pure I/O             pure function              pluggable function    YAML rules
 ```
 
-**為什麼**：這四件事的變更頻率完全不同。觀測方式幾乎不變；狀態機偶爾調；
-QA function 會一直加；policy 會天天調。混在一起的話，改一條 policy 要動 I/O 程式碼，改久了沒人敢動。
+**Why.** These four change at completely different rates. Observation barely
+changes; the state machine is tuned occasionally; QA functions keep being added;
+policy changes weekly. Mixed together, changing one policy line means editing
+I/O code, and eventually nobody dares touch it.
 
-### 決策 5：WavePlanner 產出的是「純資料的計畫」，不是直接動作
+### Decision 5: the planner produces a plan, not an action
 
-`WavePlan` 可序列化、可在 UI 檢視、可手動編輯、可存檔重放。算完不會立刻建目錄。
+`WavePlan` is serialisable, previewable in the UI, editable by hand, and
+replayable from storage. Computing it creates nothing.
 
-**為什麼**：分波決策牽涉 `special.cfg` 解析與 path 關鍵字推斷，本質上是推估。
-做成可視、可改、可存的資料，工程師才能推翻它，也才能事後比對「估算 vs 實際」。
+**Why.** Wave planning depends on parsing `special.cfg` and inferring priority
+from path keywords, both of which are estimates. Making the plan visible,
+editable data is what lets an engineer overrule it, and lets estimates be
+compared with reality afterwards.
 
 ---
 
-## 3. 資料流向
+## 3. Data flow
 
-### 3.1 主流程：從選 index 到 job 完成
-
-```
-┌─ 使用者輸入 ────────────────────────────────────────────┐
-│  dir_map 路徑 │ arcx.cfg │ 勾選的 index 清單 │ 分波參數  │
-└──────────────────────┬─────────────────────────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-   ①    │  WavePlanner  (純函數)        │◄──── <index>/special.cfg (O_QCAP_LSF_NUM)
-        │  算 slot → 排序 → 切波        │◄──── config: max_slots_per_wave / 關鍵字
-        └──────────────┬───────────────┘
-                       ▼
-              ┌────────────────┐
-              │   WavePlan     │  ← 純資料，UI 可預覽/拖曳編輯
-              │ wave1: idxA,B  │
-              │ wave2: idxC ⚠  │
-              └────────┬───────┘
-                       ▼
-        ┌──────────────────────────────┐
-   ②    │  Preflight  (提交前檢查)      │  任一 BLOCKER → 停，不建立任何東西
-        └──────────────┬───────────────┘
-                       ▼ (全綠)
-        ┌──────────────────────────────┐      ┌──────────────────────────┐
-   ③    │  SubmissionController         │─────►│ <run_root>/<run_id>/     │
-        │  每 tick 檢查閘門，逐波放行    │      │   wave_001/  ← 隔離目錄   │
-        └──────────────┬───────────────┘      │   wave_002/              │
-                       ▼                      └──────────────────────────┘
-        ┌──────────────────────────────┐
-   ④    │  WorkspaceBuilder + Launcher │
-        │  建目錄/快照 cfg/bsub Arcx    │──► arcx_job_id → wave/.arcx_auto/launch.json
-        └──────────────────────────────┘
-```
-
-### 3.2 監控迴圈：Daemon 每個 tick
+### 3.1 From selecting indices to running jobs
 
 ```
-┌──────────────────────── TICK (每 15~60s，分層頻率) ────────────────────────┐
-│                                                                            │
-│   ┌─────────────┐   ┌─────────────┐   ┌──────────────────┐                │
-│   │  FsProbe    │   │  LsfProbe   │   │  LogHeadParser   │                │
-│   │ scandir 取  │   │ bjobs 批次  │   │ 讀 log 前 N 行   │                │
-│   │ .queue/.run/│   │ busers      │   │ 抓執行路徑       │                │
-│   │ .complete   │   │ (一次拿全部)│   │ → 對映到 case    │                │
-│   │ + log 大小  │   │             │   │ (快取，不重讀)   │                │
-│   └──────┬──────┘   └──────┬──────┘   └────────┬─────────┘                │
-│          └─────────────────┼───────────────────┘                          │
-│                            ▼                                              │
-│                   ┌─────────────────┐                                     │
-│                   │  Observation    │  不可變快照（純資料）                 │
-│                   └────────┬────────┘                                     │
-│                            ▼                                              │
-│        prev_state ──► ┌─────────────┐ ──► new_state + Event[]              │
-│                       │ StateEngine │     (純函數)                         │
-│                       └──────┬──────┘                                      │
-│              ┌───────────────┴───────────────┐                             │
-│              ▼ (進入終態的 case)              ▼                             │
-│      ┌───────────────┐                  ┌──────────┐                       │
-│      │  QA Registry  │                  │  Store   │                       │
-│      └───────┬───────┘                  └──────────┘                       │
-│              ▼  Issue[] (id, severity, evidence)                           │
-│      ┌───────────────┐◄──── config/policy.yaml  (issue_id → action)        │
-│      │  PolicyEngine │◄──── budgets / cooldown / kill-switch               │
-│      └───┬───────┬───┘                                                     │
-│   auto ▼         ▼ escalate                                                │
-│   ┌──────────┐  ┌──────────────┐                                           │
-│   │Remediator│  │ TriageQueue  │──► UI「需要你決定：N 件」                  │
-│   └────┬─────┘  └──────────────┘                                           │
-│        ▼  Rerun 狀態機（見 §6）                                             │
-│                                                                            │
-│   ─────► 統一寫入: state.json(atomic) / events.jsonl / audit.jsonl          │
-└────────────────────────────────────────────────────────────────────────────┘
-                                     │
-                                     ▼ (每 60s)
-                    Status Exporter → 公用碟 status.json + status.html
++- user input ------------------------------------------+
+|  dir_map | arcx.cfg | chosen indices | wave settings   |
++----------------------------+--------------------------+
+                             v
+        +---------------------------------+
+   (1)  |  WavePlanner (pure)             |<-- <index>/special.cfg (O_QCAP_LSF_NUM)
+        |  slots -> order -> split         |<-- config: max_slots_per_wave, keywords
+        +----------------+----------------+
+                         v
+                +----------------+
+                |   WavePlan     |  pure data; previewable and editable
+                | wave1: idxA,B  |
+                | wave2: idxC !  |
+                +--------+-------+
+                         v
+        +---------------------------------+
+   (2)  |  Preflight                      |  any FATAL -> stop, create nothing
+        +----------------+----------------+
+                         v  (all clear)
+        +---------------------------------+   +--------------------------+
+   (3)  |  SubmissionController            |-->| <run_root>/<run_id>/     |
+        |  checks the gate each tick       |   |   wave_001/  (isolated)  |
+        +----------------+----------------+   |   wave_002/              |
+                         v                    +--------------------------+
+        +---------------------------------+
+   (4)  |  WorkspaceBuilder + Launcher    |
+        |  create dirs, snapshot cfg, bsub|--> arcx_job_id -> launch.json
+        +---------------------------------+
 ```
 
-### 3.3 使用者動作的流向
+### 3.2 The monitoring loop, once per tick
 
 ```
-  UI 按下「重跑 wave_002」
-        │
-        ▼  寫入 commands/<uuid>.json  {type: rerun, target: wave_002, by, ts}
-        ▼
-  Daemon 下個 tick 讀取 → 驗證 → 記 audit → 執行 → 刪除 command file
-        │
-        ▼  結果回寫 state.json → UI 下次刷新看到
++---------------------- TICK (15-60s, tiered) --------------------------+
+|                                                                       |
+|   +-------------+   +-------------+   +------------------+            |
+|   |  FsProbe    |   |  LsfProbe   |   |  CmdFileResolver |            |
+|   | scandir for |   | one bjobs   |   | read cmd_file    |            |
+|   | .queue/.run/|   | call for    |   | to map a log to  |            |
+|   | .complete   |   | every job   |   | its case (cached)|            |
+|   | + log size  |   |             |   |                  |            |
+|   +------+------+   +------+------+   +--------+---------+            |
+|          +-----------------+-------------------+                      |
+|                            v                                          |
+|                   +-----------------+                                 |
+|                   |  Observation    |  an immutable snapshot          |
+|                   +--------+--------+                                 |
+|                            v                                          |
+|        prev_state ---> +-------------+ ---> new_state + Event[]       |
+|                        | StateEngine |      (pure)                    |
+|                        +------+------+                                |
+|              +----------------+----------------+                      |
+|              v (cases in a terminal state)     v                      |
+|      +---------------+                  +----------+                  |
+|      |  QA Registry  |                  |  Store   |                  |
+|      +-------+-------+                  +----------+                  |
+|              v  Issue[] (id, severity, evidence)                      |
+|      +---------------+<---- config/policy.yaml (issue_id -> action)   |
+|      |  PolicyEngine |<---- budgets / cooldown / kill switch          |
+|      +---+-------+---+                                                |
+|   auto v         v escalate                                           |
+|   +----------+  +--------------+                                      |
+|   |Remediator|  | TriageQueue  |--> UI: "needs your decision: N"      |
+|   +----+-----+  +--------------+                                      |
+|        v  the rerun state machine (section 6)                         |
+|                                                                       |
+|   -----> written together: state.json (atomic), events.jsonl,         |
+|          audit.jsonl                                                  |
++-----------------------------------------------------------------------+
+                                     |
+                                     v  (every 60s)
+                    Status Exporter -> shared disk status.json + .html
 ```
 
-UI 永遠不直接動 run folder（決策 1）。
+### 3.3 How a user action flows
+
+```
+  UI: "rerun wave_002"
+        |
+        v  write commands/<uuid>.json  {type: rerun, target: wave_002, by, ts}
+        v
+  The daemon reads it next tick -> validates -> audits -> executes -> deletes
+        |
+        v  the result lands in state.json, and the UI shows it on refresh
+```
+
+The UI never touches a run folder (decision 1).
 
 ---
 
-## 4. 模組依賴關係
+## 4. Module dependencies
 
-| 模組 | 層 | 依賴 | 可否純函數測試 |
+| Module | Layer | Depends on | Pure-function testable |
 |---|---|---|---|
-| `domain/` | L0 | 無 | — |
-| `FsAdapter` | L1 | domain | 需 tmpdir |
-| `LsfAdapter` | L1 | domain | 需 mock |
-| `ArcxAdapter` | L1 | domain | 需 tmpdir |
-| `Store` | L1 | domain | 需 tmpdir |
-| `LockManager` | L1 | — | 需 tmpdir |
-| `WavePlanner` | L2 | domain, ArcxAdapter, FsAdapter | ✅ **完全純**（給定 IndexSpec） |
-| `SubmissionController` | L2 | domain, LsfAdapter, WorkspaceBuilder, Launcher | ✅ 閘門判定為純函數 |
-| `Preflight` | L2 | 全部 L1 | 需 mock |
-| `WorkspaceBuilder` | L2 | FsAdapter, ArcxAdapter | 需 tmpdir |
-| `Launcher` | L2 | LsfAdapter, ArcxAdapter | 需 mock |
-| `Collector` | L2 | FsAdapter, LsfAdapter | 需 mock |
-| `StateEngine` | L2 | domain | ✅ **完全純** |
-| `QaRegistry` | L2 | domain, FsAdapter | ✅ 幾乎純 |
-| `PolicyEngine` | L2 | domain, Store | ✅ **完全純** |
-| `Remediator` | L2 | LsfAdapter, FsAdapter, Launcher | 需 mock |
-| `Daemon` | L3 | 全部 L2 | 整合測試 |
-| `WebUI / CLI` | L4 | Store(讀), domain | — |
+| `domain/` | L0 | nothing | -- |
+| `FsAdapter` | L1 | domain | needs a tmpdir |
+| `LsfAdapter` | L1 | domain | needs a mock |
+| `ArcxAdapter` | L1 | domain | needs a tmpdir |
+| `Store` | L1 | domain | needs a tmpdir |
+| `LockManager` | L1 | -- | needs a tmpdir |
+| `WavePlanner` | L2 | domain | **fully pure** |
+| `SubmissionController` | L2 | domain, LsfAdapter | gate logic is pure |
+| `Preflight` | L2 | all of L1 | needs a mock |
+| `WorkspaceBuilder` | L2 | FsAdapter, ArcxAdapter | needs a tmpdir |
+| `Launcher` | L2 | LsfAdapter, ArcxAdapter | needs a mock |
+| `Collector` | L2 | FsAdapter, LsfAdapter | needs a mock |
+| `StateEngine` | L2 | domain | **fully pure** |
+| `QaRegistry` | L2 | domain, FsAdapter | almost pure |
+| `StateResolver` | L2 | domain | **fully pure** |
+| `PolicyEngine` | L2 | domain, Store | **fully pure** |
+| `Remediator` | L2 | LsfAdapter, FsAdapter, Launcher | needs a mock |
+| `Daemon` | L3 | all of L2 | integration |
+| `WebUI / CLI` | L4 | Store (read), domain | -- |
 
-打 ✅ 的模組是系統的大腦，也最容易出錯 —— 設計成無 I/O 的純函數是這個架構最重要的一筆投資。
+The modules marked fully pure are the system's brain and the easiest place to
+be wrong, which is exactly why they hold no I/O.
 
-**無循環依賴**：WavePlanner 不知道 Launcher 存在；QA 不知道 Policy 存在；Policy 不知道 Remediator 存在。
-串接全部由 Daemon 在 L3 完成。要換掉任何模組，只需改 Daemon 的接線。
+**There are no cycles.** WavePlanner does not know Launcher exists; QA does not
+know Policy exists; Policy does not know Remediator exists. The daemon does all
+the wiring at L3, so replacing any module means changing only that wiring.
 
 ---
 
-## 5. 分波（Wave Scheduling）
+## 5. Wave scheduling
 
-### 5.1 為什麼分波
+### 5.1 Why waves
 
-一次撒出所有 index 會塞爆 LSF queue。分波把提交攤平在時間軸上，並且
-**每個 wave 必須有自己的隔離目錄**，否則 Arcx 會出錯（多個 Arcx 實例共用同一 cwd 會互相干擾）。
+Releasing every index at once floods the LSF queue. Waves spread submission over
+time, and **each wave needs its own isolated directory**: several Arcx instances
+sharing one cwd interfere with each other.
 
-### 5.2 計算流程
+### 5.2 How a plan is computed
 
 ```
-Step 1  對每個 index:
-          讀 <index_path>/special.cfg      → O_QCAP_LSF_NUM = cpu_per_case
-          數 <index_path>/*.gds*            → gds_count
-          index_slots = cpu_per_case × gds_count
-          比對 path 關鍵字 (sram / ro / ...) → priority
+Step 1  for each index:
+          read <index_path>/special.cfg  -> O_QCAP_LSF_NUM = cpu_per_case
+          count <index_path>/*.gds*      -> gds_count
+          index_slots = cpu_per_case * gds_count
+          match path keywords (sram, ro, ...) -> priority
 
-Step 2  排序：priority 高的先（stable sort，同 priority 保持使用者選取順序）
+Step 2  stable sort by priority; selection order is preserved within a priority
 
-Step 3  依 max_slots_per_wave 依序切波
-          for idx in ordered:
-              if wave.slots + idx.slots > max_slots_per_wave and wave 非空:
-                  開新 wave
-              wave.add(idx)
-          # 單一 index 就超過上限 → 自己一波，標記 OVERSIZED 警告
+Step 3  fill waves in order up to max_slots_per_wave
+          an index over the cap on its own gets a wave to itself, marked
+          OVERSIZED
 
-Step 4  產出 WavePlan（純資料，可預覽 / 可編輯 / 可存檔）
+Step 4  emit a WavePlan: pure data, previewable, editable, replayable
 ```
 
-Step 3 刻意不做 bin-packing 最佳化：使用者的選取順序與關鍵字優先權是明確意圖，重排會讓結果不可預期。
+Step 3 deliberately does no bin-packing optimisation: the selection order and
+keyword priority are explicit intent, and reordering makes the outcome
+unpredictable.
 
-### 5.3 三種模式
+### 5.3 Three modes
 
-| 模式 | 行為 | 使用時機 |
+| Mode | Behaviour | When |
 |---|---|---|
-| `AUTO` | 依 slot 上限自動切波，依閘門逐波提交 | 大量 index 的日常情境 |
-| `MANUAL` | UI 上自己把 index 拖進不同 wave | 想控制順序 / 優先權 |
-| `OFF` | 全部 index 一條 Arcx 指令、一個目錄，一次送出 | 少量 index，或還原現行行為 |
+| `AUTO` | Split by the slot cap, released by the gate | the normal case |
+| `MANUAL` | The user assigns indices to waves | to control order or priority |
+| `OFF` | One command, one directory, everything at once | few indices, or to match the old behaviour |
 
-三者共用同一個 `WavePlan` 結構 —— `OFF` 只是「只有一個 wave」的特例，
-`MANUAL` 只是「分組由人指定」。下游（Submission / Workspace / Launcher / 監控）完全不需要分支處理。
+All three produce the same `WavePlan` shape -- OFF is just "one wave" and MANUAL
+is just "the grouping came from a human" -- so nothing downstream branches on the
+mode.
 
-### 5.4 Wave 狀態機與提交閘門
+### 5.4 Wave states and the gate
 
 ```
-PLANNED ──► WAITING_GATE ──► SUBMITTING ──► SUBMITTED ──► MONITORING ──► DONE
-                  ▲                                            │
-                  └────────────────────────────────────────────┘
+PLANNED --> WAITING_GATE --> SUBMITTING --> SUBMITTED --> MONITORING --> DONE
+                 ^                                            |
+                 +--------------------------------------------+
 ```
 
 ```yaml
 gate:
-  min_interval_sec: 600      # 硬性最小間隔（防抖）
-  quota_threshold: 100       # busers 的 NJOBS 低於此值才放行
-  max_wait_sec: 7200         # 逾時強制放行（防止 quota 永不下降而卡死）
-
-# 放行 =  已過 min_interval  AND  ( NJOBS < quota_threshold  OR  已過 max_wait )
+  min_interval_sec: 600      # hard minimum between submissions (debounce)
+  quota_threshold: 100       # release only when busers NJOBS is below this
+  max_wait_sec: 7200         # force a release, so a stuck quota cannot block
 ```
 
-純 OR 有漏洞：時間到了但 quota 仍滿，照送會塞爆。上述組合同時涵蓋
-「不會太密集」「不會塞爆」「不會無限期卡住」三件事。
-`max_wait` 觸發強制放行時，UI 與 audit 必須留明確記錄。
+    release = min_interval elapsed AND ( NJOBS < quota_threshold OR max_wait elapsed )
 
-閘門狀態（`gate_entered_at` / `last_quota_sample` / `next_check_at`）存進 `state.json`，
-daemon 重啟後接續，不重新計時。
+A plain OR has a hole: once the timer expires, submitting while the quota is
+still full floods the queue anyway. This combination covers "not too dense",
+"not flooding" and "never stuck forever" at the same time.
 
-### 5.4.1 提交流程（Phase 2b）
+An unreadable `NJOBS` must **not** be treated as a low quota; that would submit
+hardest exactly when LSF is in trouble. Only `min_interval` and `max_wait` decide
+in that case, and the reason says the data was unavailable.
+
+A forced release must be recorded plainly in the UI and the audit log, so that a
+long PEND afterwards is understood rather than mistaken for a fault.
+
+The gate state (`gate_entered_at`, `last_njobs`, `checked_at`) lives in
+`state.json`, so a daemon restart resumes rather than restarting the clock.
+
+### 5.4.1 The submission flow
 
 ```
-       plan_waves            純函數，產出 WavePlan
-            │
-            ▼
-   ┌──────────────────┐
-   │ QA PRE checks    │  arcx.cfg 檢查 + Preflight（磁碟／LSF／quota／目標目錄／衝突）
-   └────────┬─────────┘
-            │  任一 FATAL → **完全不動手**，不留半成品
-            ▼
-   ┌──────────────────┐
-   │ WorkspaceBuilder │  建 wave 目錄；快照 arcx.cfg / dir_map / special.cfg
-   └────────┬─────────┘
-            ▼
-   ┌──────────────────┐
-   │ SubmissionCtrl   │  逐波過閘門（純函數判定）
-   └────────┬─────────┘
-            ▼
-   ┌──────────────────┐
-   │ Launcher         │  bsub Arcx，job id 寫進 launch.json
-   └──────────────────┘
+       plan_waves                pure; produces a WavePlan
+            |
+            v
+   +------------------+
+   | QA PRE checks    |  arcx.cfg validation + preflight (disk, LSF, quota,
+   +--------+---------+  target directories, clashes)
+            |  any FATAL -> **nothing is touched**, no half-built state
+            v
+   +------------------+
+   | WorkspaceBuilder |  create wave dirs; snapshot arcx.cfg, dir_map, special.cfg
+   +--------+---------+
+            v
+   +------------------+
+   | SubmissionCtrl   |  release wave by wave through the gate (pure decision)
+   +--------+---------+
+            v
+   +------------------+
+   | Launcher         |  bsub Arcx from inside the wave dir; job id -> launch.json
+   +------------------+
 ```
 
-**用快照而不是原檔執行。** cfg 在 wave 目錄裡複製一份，Arcx 用那一份跑。
-三天後回頭做 QA 時，用的必須是提交當下那份設定 —— 原檔在這期間被改過是常態，
-而「當時到底用了什麼設定」是除錯的救命稻草。代價是 cfg 內的路徑必須是絕對的，
-Preflight 會擋下相對路徑。
+**Runs from a snapshot, not the originals.** The cfg is copied into the wave
+directory and Arcx runs against that copy. QA three days later has to read the
+settings the run actually used -- the original being edited in the meantime is
+normal, and "what was configured at the time" is the most useful thing there is
+when debugging. The price is that paths inside the cfg must be absolute, which
+preflight enforces.
 
-**dry-run 是預設。** `submit` 不加 `--yes` 就只做檢查與顯示指令，
-完全不碰磁碟。而且 dry-run **不會在閘門前真的等待** —— 預覽的目的就是
-一次看完所有 wave 會執行什麼。
+**bsub must run from inside the wave directory.** LSF records the submission
+directory and Arcx creates its per-index run folders relative to it, so wave
+isolation depends entirely on the cwd.
 
-### 5.5 Wave 失敗不阻塞後續 wave
+**Dry run is the default.** Without `--yes`, `submit` only checks and prints the
+commands and touches no disk. A dry run also **never waits at the gate**: the
+point of a preview is seeing every wave in one go.
 
-wave_001 有 case 失敗，wave_002 照常提交。只有觸發 `same_issue_burst_limit`
-（代表系統性問題，例如 cfg 寫錯）時才暫停所有後續提交並升級。
-否則單一小失敗會擋住整批，違背縮短 TAT 的初衷。
+### 5.5 A failed wave does not block later waves
+
+A case failing in wave_001 does not stop wave_002. Only tripping
+`same_issue_burst_limit` -- meaning something systemic, such as a broken cfg --
+pauses further submission and escalates. Otherwise one small failure holds up the
+whole batch, defeating the purpose.
 
 ---
 
-## 6. Rerun / Drain 狀態機
+## 6. The rerun / drain state machine
 
-Arcx 的完成判定邏輯複雜，但有一個確定的契約：
-**刪掉 case 的 run dir → `-keep_dir --run` 必定重跑它。**
-因此我們不需要理解 Arcx 內部邏輯，只需要控制「刪哪些目錄」。
+Arcx's own completion logic is complex, but there is one guaranteed contract:
+**delete a case's run dir and `-keep_dir --run` will redo it.** So the internals
+do not need to be understood; only "which directories to delete" does.
 
 ```
 RERUN_REQUESTED
-    │
-    ▼
-STOPPING_PARENT       bkill <arcx_job_id>          ← 先殺 parent，避免它補送新 job
-    │
-    ▼
+    |
+    v
+STOPPING_PARENT       bkill <arcx_job_id>     kill the parent first, or it
+    |                                          simply submits replacements
+    v
 DRAINING_CHILDREN     bjobs_manage.py -djp <wave_dir>/
-    │
-    ▼
-VERIFY_QUIESCENT ◄──【安全門】連續 K 次（預設 3 × 30s）確認：
-    │                 ① bjobs_manage.py -jp <wave_dir>/ 回報 0 個 job
-    │                 ② marker 檔案集合在這段期間無變動
-    │  逾時 (預設 15min) 或任一次不通過
-    │       └────────► ABORT + escalate（絕不硬闖）
-    ▼
-DECIDE_CLEAN_SET      QA Registry 判定哪些 case 未完成 → 刪除清單寫入 audit
-    │                 人工模式下在 UI 顯示清單供勾選確認
-    ▼
-BACKUP                未完成 case run dir → <wave>/.arcx_auto/attempts/N/   （強制）
-    │
-    ▼
-CLEAN                 刪除這些 case run dir
-    │                 中間檔 / database / QC_* 不動 —— `-keep_dir --run` 會重建
-    ▼
-RESUBMIT              bsub "Arcx -p cfg -d <同一批 index> -keep_dir --run"
-    │                 cwd 仍是同一個 <wave_dir>，attempt +1
-    ▼
+    |
+    v
+VERIFY_QUIESCENT <-- [SAFETY GATE] K consecutive confirmations (default 3 x 30s):
+    |                 (a) bjobs_manage.py -jp <wave_dir>/ reports 0 jobs
+    |                 (b) the marker set has not changed meanwhile
+    |  on timeout (default 15 min) or any failed confirmation
+    |       +--------> ABORT and escalate. Never force past it.
+    v
+DECIDE_CLEAN_SET      QA decides which cases are unfinished; the delete list
+    |                 goes into the audit log, and in manual mode the UI shows
+    |                 it for confirmation
+    v
+BACKUP                unfinished run dirs -> <wave>/.arcx_auto/attempts/N/
+    |                 (mandatory)
+    v
+CLEAN                 delete those run dirs. Intermediate files, databases and
+    |                 QC_* are left alone: -keep_dir --run rebuilds them
+    v
+RESUBMIT              bsub "Arcx -p cfg -d <same indices> -keep_dir --run"
+    |                 same wave dir as cwd; attempt + 1
+    v
 MONITORING
 ```
 
-### 6.1 一個刻意的例外：不確定時傾向刪除
+`bjobs_manage.py -jp` reports a **count**, not a job list:
 
-`DECIDE_CLEAN_SET` 判錯的兩個方向後果**不對稱**：
+```
+grep all jobs...
+finished, total 304 jobs      <- every job
+total 299 jobs in path        <- scoped to the path; this is the one
+```
 
-| 判錯方向 | 後果 | 嚴重度 |
+**A count that cannot be parsed is unknown, never zero.** Treating "could not
+tell" as "no jobs left" would delete files while jobs are still running, which is
+the single most destructive mistake this system could make.
+
+### 6.1 One deliberate exception: when unsure, delete
+
+The two ways `DECIDE_CLEAN_SET` can be wrong have **asymmetric** costs:
+
+| Mistake | Consequence | Severity |
 |---|---|---|
-| 已完成 → 誤判未完成 → 刪掉重跑 | 浪費一次運算，**結果仍正確** | 低 |
-| 未完成 → 誤判完成 → 沒刪 | Arcx 跳過它，**殘缺結果被當成功交付** | **高** |
+| Complete case judged unfinished, deleted and rerun | one wasted run; **the result is still correct** | low |
+| Unfinished case judged complete, kept | Arcx skips it; **a truncated result ships as a success** | **high** |
 
-因此在這個特定決策上，預設是「**不確定 → 傾向刪掉重跑**」，
-與系統其他地方的「不確定就停手」相反。這是刻意的例外，理由是誤刪的代價可回收、漏刪的不可回收。
+So on this one decision the default is "**when unsure, delete and rerun**", the
+opposite of the rest of the system. The recoverable mistake is preferred to the
+unrecoverable one.
 
-實作：QA 判定分 `COMPLETE` / `INCOMPLETE` / `UNKNOWN` 三態。
-`UNKNOWN` 預設進刪除清單，但在 UI 以不同顏色標示、可取消勾選。BACKUP 兜底，刪錯也留得住現場。
+In practice QA returns `COMPLETE`, `INCOMPLETE` or `UNKNOWN`. `UNKNOWN` enters
+the delete list by default, but is coloured differently in the UI and can be
+unticked, and `BACKUP` preserves the evidence either way.
 
-### 6.2 每一步都可重入
+### 6.2 Every step is resumable
 
-daemon 在任何一步被 kill，重啟後從 `state.json` 的 `rerun_phase` 接續。
-`VERIFY_QUIESCENT` 只能通過不能跳過；UI 不提供 force，真要 force 走 CLI
-`--i-know-what-i-am-doing` 並在 audit 留大字記錄。
+Killing the daemon at any point leaves `state.json` with a `rerun_phase` to
+resume from. `VERIFY_QUIESCENT` can be passed but never skipped; the UI offers
+no force, and forcing from the CLI requires
+`--i-know-what-i-am-doing` and writes a loud audit entry.
 
 ---
 
-## 7. QA Registry 與 Policy
+## 7. QA registry and policy
 
-### 7.1 三個 stage，同一種輸出
+### 7.1 Three stages, one output type
 
-只判「是否成功」是不夠的 —— TAT 的損失有一半來自「卡住但沒人發現」。
-等到 `.complete` 才做 QA，等於放棄了執行中的所有觀測機會。
+Judging only "did it succeed" is not enough: half the lost turnaround comes from
+"stuck and nobody noticed". Waiting for `.complete` before running QA throws away
+every observation made while the job was running.
 
-| Stage | 問什麼 | 何時跑 | 成本 |
+| Stage | Question | When | Cost |
 |---|---|---|---|
-| `PRE` | 這個 case 能不能跑？ | 提交前，一次 | 低 |
-| `LIVE` | 它現在健康嗎？ | 執行中，每個 tick | 低（只用已有的觀測） |
-| `POST` | 它真的成功了嗎？ | `.complete` 出現後，一次 | 高（要進 case run dir 讀檔） |
+| `PRE` | can this run at all? | before submission, once | low |
+| `LIVE` | is it healthy right now? | every tick | low (uses existing observations) |
+| `POST` | did it really succeed? | once, after `.complete` | high (reads the run dir) |
 
-三者的輸出都是同一種 `Issue`（id + severity + evidence），交給同一套 Policy
-決定動作。這是為什麼要統一成一個 Registry，而不是做兩套系統。
+All three emit the same `Issue` (id, severity, evidence) into the same policy
+engine. That is why they are one registry rather than two systems.
 
-### 7.2 State 與 Issue 是兩回事
+### 7.2 State and Issue are different things
 
 | | State | Issue |
 |---|---|---|
-| 數量 | **唯一、互斥** | **可多個並存** |
-| 性質 | 「它現在在哪」 | 「它有什麼問題」 |
-| 變更頻率 | 幾乎不變 | 一直在加 |
-| 誰產生 | StateEngine（純函數） | QA function（可插拔） |
+| Count | **one, exclusive** | **many can coexist** |
+| Meaning | "where it is now" | "what is wrong with it" |
+| Change rate | barely ever | constantly growing |
+| Producer | StateEngine (pure) | QA functions (pluggable) |
 
-三層分工，方向永遠單向（issue → state）：
-
-```
-StateEngine    只看 marker + LSF  →  base_state
-               ∈ {PENDING, QUEUED, RUNNING, SUSPENDED, COMPLETED_MARKER, LOST}
-                        │
-QA Registry    產出 Issue[]
-               LIVE →  CASE_QUIET / LSF_SUSPENDED / CASE_NEVER_STARTED / ...
-               POST →  NETLIST_MISSING / NETLIST_EMPTY / FLOW_DIR_MISSING / ...
-                        │
-StateResolver  base_state + issues  →  final_state
-               COMPLETED_MARKER + 任何 blocking issue  →  FAILED
-               COMPLETED_MARKER + 全部通過             →  DONE
-               RUNNING          + FATAL 的 CASE_QUIET  →  STALLED
-               其餘原樣保留（LOST/SUSPENDED 是 LSF 證實的事實，QA 不改寫）
-```
-
-**為什麼「卡住」的判斷放在 QA 而不是 StateEngine**：它的條件會一直調整
-（cell 大小、安靜階段、產出物是否已齊）。留在 StateEngine 會讓那個純函數長成大雜燴，
-而且改一條判斷就要動核心程式。放進 QA 之後，StateEngine 保持精簡，
-state 仍然唯一。
-
-`CaseSnapshot` 同時保存 `base_state` 與 `state` —— 狀態轉移必須拿 base 跟 base 比，
-否則 `COMPLETED_MARKER → DONE` 會被誤認成「每個 tick 都在變」。
-
-### 7.3 期望產出物由 arcx.cfg 推導，不是寫死的
+Three layers, always flowing one way (issue -> state):
 
 ```
-arcx.cfg                              case run dir
-─────────────────────────────────────────────────────────────────
-1 BEGIN_SETTINGS: blocking_naming_qcap  NTN_1/
-1   QC_FLOW = calQCAP                     blocking_naming_qcap_calQCAP/
-END_SETTINGS                                work_calQCAP/
-                                              CCI_DB.spice
+StateEngine    markers + LSF only  ->  base_state
+               in {PENDING, QUEUED, RUNNING, SUSPENDED, COMPLETED_MARKER, LOST}
+                        |
+QA Registry    emits Issue[]
+               LIVE ->  CASE_QUIET / LSF_SUSPENDED / CASE_NEVER_STARTED / ...
+               POST ->  NETLIST_MISSING / NETLIST_EMPTY / FLOW_DIR_MISSING / ...
+                        |
+StateResolver  base_state + issues  ->  final_state
+               COMPLETED_MARKER + anything blocking  ->  FAILED
+               COMPLETED_MARKER + all clear          ->  DONE
+               RUNNING          + FATAL CASE_QUIET   ->  STALLED
+               everything else is left alone (LOST and SUSPENDED are facts LSF
+               confirmed, and QA has no business rewriting them)
+```
 
-1 BEGIN_SETTINGS: blocking_naming_qrcfs     blocking_naming_qrcfs_calQRCFS/
+**Why "stuck" is decided in QA rather than StateEngine**: its conditions keep
+being tuned (cell size, quiet phases, whether artifacts are already present).
+Inside StateEngine that pure function would grow into a catch-all, and every
+tweak would touch core code. In QA, StateEngine stays small and the state stays
+single.
+
+`CaseSnapshot` stores `base_state` alongside `state`, because transitions must
+compare base against base: comparing against the resolved state would make
+`COMPLETED_MARKER -> DONE` look like a change on every tick.
+
+### 7.3 Expected artifacts are derived from arcx.cfg
+
+```
+arcx.cfg                                case run dir
+------------------------------------------------------------------
+g:QCA = Yes                             (shared variables, not checked)
+
+1 BEGIN_SETTING : blocking_nameing_1    NTN_1/
+1   QC_FLOW = calQCAP                     blocking_nameing_1_calQCAP/
+1   RCX_TECH_QTF = /path/to/file            work_calQCAP/
+END_SETTINGS                                  CCI_DB.spice
+
+1 BEGIN_SETTING : blocking_nameing_2      blocking_nameing_2_calQRCFS/
 1   QC_FLOW = calQRCFS                        work_calQRCFS/
 END_SETTINGS                                    NTN_1.spf
 ```
 
-路徑規則：`<block>_<QC_FLOW>/work_<QC_FLOW>/<該 flow 的 netlist>`
-
-每個 flow 產出什麼由 `settings.qa.flows` 定義：
+The rule is `<block>_<QC_FLOW>/work_<QC_FLOW>/<netlist for that flow>`, and what
+each flow produces is declared in settings:
 
 ```yaml
 qa:
@@ -490,66 +550,94 @@ qa:
     calQRCFS:  {work_dir: "work_{flow}", netlists: ["{case}.spf"]}
 ```
 
-**新增一種 EDA tool = 在設定裡加一個 profile，不需要改程式。**
+**Adding an EDA tool is a settings change, not a code change.**
 
-這也是為什麼提交時必須把 arcx.cfg 快照進 wave 目錄（§8）——
-三天後回頭做 QA，用的必須是當時那份 cfg。
+This is also why the cfg must be snapshotted into the wave directory at
+submission time (section 8): QA three days later has to read the cfg the run
+actually used.
 
-### 7.4 兩層 API
+### 7.4 Two API levels
 
-**宣告層（YAML）** 涵蓋「檔案要在、要夠大」這類 80% 的情況，工程師不用寫 Python。
+**Declarative (YAML)** covers the common "these files must exist and be big
+enough", with no Python involved.
 
-**程式層（decorator）** 用於需要邏輯的檢查。一條檢查通常 3~10 行：
+**Programmatic (a decorator)** covers checks that need logic. A check is usually
+three to ten lines:
 
 ```python
-@qa_check(id="NETLIST_MISSING", title="netlist 缺失",
+@qa_check(id="NETLIST_MISSING", title="netlist missing",
           severity=Severity.FATAL, scope=CASE, stage=POST)
 def netlist_missing(case: CaseContext) -> Optional[Issue]:
-    """期望的 netlist 檔案不存在。
+    """This docstring is what the UI shows.
 
-    這是抓「假成功」的主力 —— Arcx 寫了 .complete，但檔案根本沒產出來。
+    It is how false success is caught: Arcx wrote a .complete marker, but the
+    file was never produced.
     """
     missing = [a for a in case.expected_artifacts if not case.exists(a.relpath)]
     if not missing:
         return None
-    return case.fail("缺少 %d 個 netlist" % len(missing),
+    return case.fail("%d netlist(s) missing" % len(missing),
                      evidence={"missing": [a.relpath for a in missing]})
 ```
 
-簡潔度來自 `CaseContext`：所有路徑相對 case run dir、**有快取**（十條檢查掃同一個
-case，每個目錄只 scandir 一次）、**不丟例外**（讀不到回 None）。
-docstring 直接顯示在 UI 上，文件與程式不會走歪。
+The brevity comes from `CaseContext`: paths are relative to the case run dir, it
+**caches** (ten checks over one case still scandir each directory once) and it
+**never raises** (unreadable means None). The docstring is displayed in the UI,
+so documentation and code cannot drift apart.
 
-### 7.5 三個不可妥協的性質
+### 7.5 Three properties that are not negotiable
 
-**① 「不知道」是一等公民。**
-`Severity.UNKNOWN` 專門用於「我檢查不了」——沒有 cfg 快照、格式不認得、
-QA function 自己爆炸。這種情況**絕不能當成 pass**，而且在 rerun 判定上偏向
-「刪掉重跑」（§6.1 的不對稱原則）。
+**1. "I do not know" is a first-class value.** `Severity.UNKNOWN` exists for
+exactly that: no cfg snapshot, an unrecognised format, a QA function that threw.
+It **can never count as a pass**, and in rerun decisions it leans towards
+deleting and rerunning (section 6.1).
 
-**② QA function 自己爆炸不能拖垮系統。**
-既然要讓工程師自己加規則，他們寫的 function 一定會有 bug。每條檢查都在 try 裡跑，
-爆炸的轉成 `QA_INTERNAL_ERROR`（UNKNOWN 嚴重度，附 traceback）並繼續跑其他檢查。
+**2. A QA function that crashes cannot take the system down.** Engineers are
+meant to add their own rules, so some will have bugs. Each check runs inside a
+try; one that throws becomes `QA_INTERNAL_ERROR` (UNKNOWN, with a traceback) and
+the rest still run.
 
-**③ id 是介面。**
-policy.yaml 只認 id 不認實作，所以改檢查的實作不需要動 policy。
-重複註冊同一個 id 會直接報錯 —— 靜默覆蓋是最難查的那種問題。
-停用一條檢查用 `qa.disabled_checks`，不需要刪程式。
+**3. The id is the interface.** policy.yaml refers to ids, not implementations,
+so rewriting a check does not touch policy. Registering a duplicate id raises
+immediately -- silent shadowing is the hardest kind of bug to find. Disabling a
+check is `qa.disabled_checks`, not deleting code.
 
-### 7.6 「卡住」是分級顯示，不是二元判定
+### 7.6 "Stuck" is graded, not binary
 
-單一 case 的 runtime 從 10 分鐘到 3 天都有，而且存在「不寫 log 但產出物已經齊了」
-的正常情況。硬判會大量誤報，所以系統負責把「安靜多久」講清楚並隨時間升級醒目程度，
-**判斷交給人**：
+A single case can take ten minutes or three days, and a log can legitimately go
+quiet because the artifacts are already written. A hard rule produces false
+alarms, so the system states how long it has been quiet and escalates the visual
+weight; **the judgement stays human**:
 
 ```yaml
 quiet:
-  warn_after_sec: 14400          # 4h   少見，值得看一眼        → WARN
-  stalled_after_sec: 28800       # 8h   基本上可判定卡住        → FATAL
-  downgrade_when_artifacts_ready: true   # 產出物已齊 → 降一級
+  warn_after_sec: 14400          # 4h   uncommon, worth a look        -> WARN
+  stalled_after_sec: 28800       # 8h   effectively stuck             -> FATAL
+  downgrade_when_artifacts_ready: true   # artifacts present -> one level down
 ```
 
-### 7.7 Policy（Phase 4）
+### 7.7 PRE checks on arcx.cfg
+
+The highest return of any layer: most configuration mistakes are visible before
+anything is submitted, and finding the same mistake afterwards costs hours.
+
+| Check | Severity | What it catches |
+|---|---|---|
+| `CFG_UNREADABLE` | FATAL | missing or unreadable file |
+| `CFG_NO_BLOCKS` | FATAL | nothing would run |
+| `CFG_ALL_BLOCKS_DISABLED` | FATAL | runs quietly and produces nothing |
+| `CFG_DUPLICATE_BLOCK` | FATAL | output directories overwrite each other silently |
+| `CFG_BLOCK_NO_FLOW` | FATAL | no EDA tool flow named |
+| `CFG_UNKNOWN_FLOW` | FATAL | artifacts cannot be verified |
+| `CFG_PATH_NOT_FOUND` | FATAL | a referenced file is missing |
+| `CFG_PARSE_WARNING` | WARN | misspelt keywords, missing END_SETTINGS |
+
+Path checking covers only the keys listed in `qa.cfg_path_keys`, and only on
+**enabled** lines. Checking anything path-shaped would produce false alarms on
+output paths and on values like `TOOL_VERSION_LVS` that are a command plus
+arguments -- and once there are false alarms nobody reads the warnings.
+
+### 7.8 Policy (Phase 4)
 
 ```yaml
 policies:
@@ -560,113 +648,142 @@ policies:
   CASE_NEVER_STARTED:  {action: escalate}
   QA_INTERNAL_ERROR:   {action: escalate}
 
-default: {action: escalate}          # 原則：不確定就停手
+default: {action: escalate}          # when unsure, stop
 
 budgets:
   max_auto_actions_per_run: 20
   cooldown_sec: 900
-  same_issue_burst_limit: 5          # 同一 id 短時間爆量 → 停自動、全面升級
+  same_issue_burst_limit: 5          # a burst of one id -> stop automation
   global_kill_switch: false
 ```
 
-## 8. 儲存與行程模型
+The automatic-versus-human matrix:
+
+| Class | Example | Handling | Why |
+|---|---|---|---|
+| `TRANSIENT` | licence briefly unavailable, host down, stale NFS handle | **retry automatically** with backoff | a rerun will very likely pass |
+| `INFRA` | memlimit, runlimit, disk full | **retry with adjusted resources** (first time) | programmatically fixable |
+| `SETUP` | wrong path, cfg syntax, missing layer map | **never retry; escalate at once** | it would fail identically a hundred times, burning turnaround and machines |
+| `TOOL` | segfault, internal error | **retry once**, then escalate | sometimes random, but do not flail |
+| `VERIFY_FAIL` | false success | **always escalate, high priority** | the most dangerous; needs judgement |
+| `UNKNOWN` | no rule matched | **escalate and invite a new rule** | the system has to admit what it does not know |
+
+---
+
+## 8. Storage and process model
 
 ```
-~/.arcx-auto/                        ← 個人 local
-  daemon.lock                        ← flock，保證單一 daemon
+~/.arcx-auto/                        per user, never on shared storage
+  daemon.lock                        flock; guarantees a single daemon
   config/
     default.yaml  policy.yaml
   runs/<run_id>/
-    manifest.json    ← 不可變：時間、cfg hash、WavePlan、原始選擇
-    state.json       ← 可變快照，atomic write (tmp → fsync → os.replace)
-    events.jsonl     ← append-only 狀態轉移
-    audit.jsonl      ← append-only 所有寫入型動作（誰/何時/對什麼/為什麼）
-    qa/<case>.json   ← QA 結果與證據
-  commands/          ← UI/CLI 投遞的動作意圖，daemon 消化後刪除
+    manifest.json    immutable: creation time, cfg hash, WavePlan, selection
+    state.json       mutable snapshot, atomic (tmp -> fsync -> os.replace)
+    events.jsonl     append-only state transitions
+    audit.jsonl      append-only writes (who / when / on what / why)
+    qa/<case>.json   QA results and evidence
+  commands/          action intents from the UI or CLI; deleted once consumed
 ```
 
 ```
-<run_root>/<run_id>/                 ← run_id = <timestamp>_<label>
-  wave_001/                          ← 每個 wave 一個隔離目錄（Arcx 的 cwd）
-    arcx.cfg                         cfg 快照（含 hash）
-    dir_map                          dir_map 快照
+<run_root>/<run_id>/                 run_id = <timestamp>_<label>
+  wave_001/                          one isolated directory per wave (Arcx's cwd)
+    arcx.cfg                         snapshot, with a hash
+    dir_map                          snapshot
+    Arcx.log                         bsub -oo output
     .arcx_auto/
-      launch.json                    bsub job id、完整指令、cwd、時間
-      special_cfg/<index>.cfg        special.cfg 快照
-      lock                           防止同一 wave 被跑兩次
-      attempts/1/                    rerun 前備份的失敗現場
-    <index_run_folder>/              ← Arcx 自己建立
-      .complete.case1
-      .queue.case2
-      case1/  case2/  case3/         ← 每個 case 的 run dir
-      QC_Cc/  QC_Ct/  QC_Spice/      ← Arcx 整理的 report
-      submit_bjob_cmd_file_1.log     ← 每個 case 的 log
+      launch.json                    bsub job id, full command, cwd, time
+      special_cfg/<index>.cfg        snapshot of each index's special.cfg
+      manifest.json                  this wave's full intent
+      lock                           stops the same wave running twice
+      attempts/1/                    where a rerun backs up the failed state
+    <index run folder>/              created by Arcx
+      .complete.NTN_1
+      .queue.NDIO_1
+      NDIO_1/  PDIO_1/  NTN_1/       per-case run dirs
+      QC_Cc/  QC_Ct/  QC_Spice/      reports Arcx assembles
+      submit_bjob_cmd_file_1.log     per-case log
+      cmd_folder/cmd_file_1          the script, containing `cd <case run dir>`
   wave_002/
 ```
 
-**wave 目錄同時是三個邊界**：Arcx 的隔離邊界、`bjobs_manage.py -jp/-djp` 的操作邊界、rerun 的作用域。
-三者用同一個路徑前綴定義，不需要額外對映表。
+**The wave directory is where three boundaries coincide**: Arcx's isolation
+boundary, `bjobs_manage.py -jp/-djp`'s operating scope, and the scope of a rerun.
+One path prefix defines all three, so no mapping table is needed.
 
-**為什麼 JSON + JSONL 夠用**：單人、單 daemon、單寫入者，量級數千筆。
-JSONL 的 append-only 天然抗損毀（斷電最多壞最後一行），JSON 快照用 `os.replace` 保證原子性。
-> 觸發改用 SQLite 的門檻：`state.json` > ~10MB，或單次 tick 序列化 > 1 秒。
-> Store 是 L1 adapter，換掉不影響上層。
+**Why JSON and JSONL are enough**: one user, one daemon, one writer, a few
+thousand records. Append-only JSONL survives a power cut with at most one damaged
+line, and snapshots are atomic through `os.replace`.
+> The threshold for moving to SQLite: `state.json` over about 10 MB, or over a
+> second to serialise per tick. Store is an L1 adapter, so swapping it does not
+> affect anything above.
 
-**行程模型**：兩個獨立 process。
+**Process model**: two independent processes.
+
 ```
-process A: arcx-auto daemon    ← setsid/nohup 常駐，唯一寫入者，threading + sleep loop
-process B: arcx-auto web       ← 隨開隨關，唯讀 state.json，動作寫 commands/
+process A: arcx-auto daemon    long lived under setsid/nohup; the single writer
+process B: arcx-auto web       started and stopped freely; reads state.json only
 ```
-不用 asyncio：`scandir` / `bjobs` / `stat` 全是 blocking I/O，同步程式碼 + thread pool 更好懂也更好除錯。
 
-daemon 的三個性質：
+No asyncio: `scandir`, `bjobs` and `stat` are all blocking I/O, synchronous code
+is easier to follow and to debug, and a single-user scale needs no concurrency.
 
-- **可隨時被 kill 並重啟。** 啟動時從 `state.json` 載回上一次的判定（讓 stall 計時延續），
-  但那份檔案不見了也能從 run folder 重建 —— 檔案系統才是唯一真相。
-- **一次 tick 失敗不能讓 daemon 死掉。** NFS 抽風、LSF 逾時都是常態，錯誤記進
-  `daemon.last_error` 讓 UI 看得到，然後繼續下一個 tick。掃描失敗時**仍然更新
-  `state.json` 的時間戳** —— 否則 UI 會顯示過期資料卻看起來一切正常。
-- **daemon 自己也要被監控。** UI 上會標示「逾 15 分鐘未更新」。daemon 靜默死掉時
-  畫面停在最後一刻看起來正常，那是最危險的情況。
+Three daemon properties:
+
+- **Killable and restartable at any time.** It reloads the previous verdicts from
+  `state.json` so stall timers continue, but rebuilds from the run folders even
+  without that file.
+- **One failed tick cannot kill it.** NFS hiccups and LSF timeouts are routine;
+  the error goes into `daemon.last_error` where the UI shows it, and the next
+  tick runs. A failed scan **still updates the timestamp in `state.json`**, or
+  the UI would show stale data while looking perfectly healthy.
+- **The daemon is monitored too.** The UI flags "no update for over 15 min". A
+  daemon that dies quietly freezes the display at the last moment and looks
+  perfectly healthy, which is the most dangerous state of all.
+
+## 8.1 The web UI
+
+**Standard library `http.server` only; no FastAPI or Flask.**
+
+This is a single-user, loopback-bound, **read-only** dashboard rather than a
+service. The standard library is enough, and installing packages on an air-gapped
+network is real friction. Zero dependencies also makes "copy the source across
+and it runs" true. (A test enforces zero third-party imports in the core; every
+new import has to be added to an explicit allowlist.)
+
+Security properties:
+
+- bound to `127.0.0.1` by default, so it serves nobody else and needs no auth
+- every route is a GET; there are **no write endpoints**. Phase 3 actions are
+  posted through `commands/` files
+- run ids are looked up among the existing runs rather than concatenated into a
+  path, so there is no room for path traversal
+
+Four levels of drill-down, each rendering only what the daemon already computed:
+
+```
+/                                    all runs; "needs your decision: N" is loudest
+/run/<id>                            index list plus an issue summary (grouped)
+/run/<id>/index/<key>                case table plus scan anomalies
+/run/<id>/index/<key>/case/<case>    state, paths, and the evidence per issue
+/api/state/<id>                      raw JSON
+```
+
+**Issues are grouped by id**: when 200 cases hit the same problem, an engineer
+needs "NETLIST_MISSING x 200", not 200 identical lines.
+
+**Quiet time escalates visually** (section 7.6): under 4h plain, 4-8h amber, over
+8h red.
 
 ---
 
-## 8.1 Web UI（Phase 1b）
+## 9. External interface contracts
 
-**只用標準庫 `http.server`，不引入 FastAPI/Flask。**
+Every assumption about the outside world is collected here. When Arcx or the
+environment changes, only the corresponding implementation needs to change.
 
-理由：這是單人、綁 `127.0.0.1`、**唯讀**的儀表板，不是對外服務。標準庫足夠，
-而內網環境安裝套件是實實在在的摩擦。零相依也讓「複製一份程式碼過去就能跑」成立。
-（有測試強制核心零第三方相依，新增任何 import 都必須明確加進白名單。）
-
-安全性質：
-
-- 預設只綁 `127.0.0.1` —— 不對外提供服務，因此不需要認證
-- 全部是 GET，**沒有任何寫入端點**。Phase 3 的動作會走 `commands/` 檔案投遞
-- run id 用「列出既有 run 再比對」查表，不把使用者輸入拼進路徑 → 沒有 path traversal 的空間
-
-四層 drill-down，每層都只渲染 daemon 已經算好的 `state.json`，不自己算任何東西：
-
-```
-/                                    所有 run；最醒目的是「需要你決定：N 件」
-/run/<id>                            index 列表 + issue 摘要（同 id 聚合）
-/run/<id>/index/<key>                case 表格 + 掃描異常
-/run/<id>/index/<key>/case/<case>    狀態、路徑、每個 issue 的說明與證據
-/api/state/<id>                      原始 JSON
-```
-
-**issue 摘要按 id 聚合**：200 個 case 犯同一個錯時，工程師需要看到的是
-「NETLIST_MISSING × 200」而不是 200 行一樣的訊息。
-
-**安靜時間依長短升級醒目程度**（§7.6）：< 4h 正常、4~8h 黃、> 8h 紅。
-
----
-
-## 9. 外部介面契約
-
-系統對外部世界的所有假設集中在這裡。Arcx 或環境有變動時，只需要改這一節對應的實作。
-
-### 9.1 dir_map（Perl hash）
+### 9.1 dir_map (a Perl hash)
 
 ```perl
 %dir_map =(
@@ -677,10 +794,14 @@ daemon 的三個性質：
 );
 return 1 ;
 ```
-- 用寬鬆的 regex 抽取所有 `"KEY" => "VALUE"`（容忍缺漏逗號、單雙引號、行內註解）
-- `min` / `max` 是保留 meta key，不是真實 index
 
-### 9.1.1 `arcx.cfg`（多 block 格式）
+- entries are extracted with a lenient regex over `"KEY" => "VALUE"`, tolerating
+  missing commas, either quote style, and inline comments
+- `min` and `max` are reserved meta keys, **not real indices**
+- a gap between the declared range and the actual entries is warned about: it is
+  invisible to the eye but makes some indices silently never run
+
+### 9.2 arcx.cfg (multiple blocks)
 
 ```
 g:QCA = Yes
@@ -696,125 +817,129 @@ g:O_CAL_SET_ENV = setenv LICENSE 123@lic9
 END_SETTINGS
 ```
 
-| 元素 | 語意 |
+| Element | Meaning |
 |---|---|
-| 行首 `1` / `0` | enable / disable。**`0` 或 `#` 開頭的行不生效，因此不做路徑檢查** |
-| `g:` 前綴 | 所有 block 共用的全域變數，位於任何 block 之外，不需檢查 |
-| `BEGIN_SETTING` / `END_SETTINGS` | 單複數在實際檔案中**不一致**，比對時視為等價 |
-| `QC_FLOW` | 決定用哪個 EDA tool flow，也決定產出目錄名 |
+| leading `1` / `0` | enable / disable. **A `0` line, or one commented with `#`, is not path checked** |
+| `g:` prefix | variables shared by every block, outside any block, not checked |
+| `BEGIN_SETTING` / `END_SETTINGS` | singular and plural are **inconsistent in real files** and treated as equivalent |
+| `QC_FLOW` | picks the EDA tool flow, and names the output directory |
 
-只有把 `N` 打成 `M`（`BEGIN_SETTIMG`）才發警告 —— 那種拼錯若被 Arcx 當成無效行，
-整個 block 會被靜默忽略，是很難查的失敗。
+Only an N written as M (`BEGIN_SETTIMG`) is warned about: that misspelling can
+make Arcx skip the whole block silently.
 
-提交前檢查的路徑 key（可設定）：`RCX_TECH_QTF`、`RCX_LAYER_NAME_MAP`、
-`LVS_DFM_DIR`、`LVS_DECK`、`LVS_DECL`、`LVS_QUERY_CMD`、`RCX_STAR_CMD`。
-刻意列出明確的 key 而不是「看起來像路徑就檢查」—— 後者會對輸出路徑、
-`TOOL_VERSION_*` 這種「指令 + 參數」的值產生大量假警報，而假警報多了就沒人看了。
+Path-checked keys (configurable): `RCX_TECH_QTF`, `RCX_LAYER_NAME_MAP`,
+`LVS_DFM_DIR`, `LVS_DECK`, `LVS_DECL`, `LVS_QUERY_CMD`, `RCX_STAR_CMD`.
 
-### 9.2 `special.cfg`（位於每個 index path 內）
+### 9.3 special.cfg (inside every index path)
 
 ```
 O_QCAP_LSF_NUM = 4
 ```
+
 - `cpu_per_case = O_QCAP_LSF_NUM`
-- `index_slots = cpu_per_case × gds_count`
+- `index_slots = cpu_per_case * gds_count`
 
-### 9.3 Index run folder 內的檔案慣例
-
-真實範例：
+### 9.4 Conventions inside an index run folder
 
 ```
-.queue.NDIO_1                  marker，case id 是 cell 名稱
+.queue.NDIO_1                  markers; case ids are cell names
 .run.PDIO_1
 .complete.NTN_1
-NDIO_1/  PDIO_1/  NTN_1/       每個 case 的 run dir（rerun 時刪這些）
-QC_Cc/  QC_Ct/  QC_Spice/      Arcx 整理的 report，不是 case
-submit_bjob_cmd_file_1.log     log，檔名只有流水號
-cmd_folder/cmd_file_1          送進 LSF 的 script，內含 `cd <case run dir>`
+NDIO_1/  PDIO_1/  NTN_1/       per-case run dirs (a rerun deletes these)
+QC_Cc/  QC_Ct/  QC_Spice/      reports Arcx assembles, not cases
+submit_bjob_cmd_file_1.log     logs, named only by sequence number
+cmd_folder/cmd_file_1          the submitted script, containing `cd <path>`
 ```
 
-| 型態 | 樣式 | 意義 |
-|---|---|---|
-| marker | `.queue.<cell>` / `.run.<cell>` / `.complete.<cell>` | case 狀態 |
-| case run dir | `<cell>/` | 單一 case 的工作目錄（**rerun 時刪這個**） |
-| log | `submit_bjob_cmd_file_<N>.log` | Arcx + EDA tool 輸出 |
-| cmd script | `cmd_folder/cmd_file_<N>` | 送進 LSF 的 script |
-| report | `QC_Cc/` `QC_Ct/` `QC_Spice/` | Arcx 整理的 report，**不是 case dir** |
+**Two conventions drive the implementation.**
 
-**兩個關鍵慣例，直接決定了實作方式：**
+**1. Case ids are cell names with no shared pattern.** `NDIO_1`, `PDIO_1` and
+`NTN_1` have nothing in common, so case run dirs are identified by **exclusion**
+(not `QC_*`, not `cmd_folder`, not hidden) rather than by an include pattern. The
+cost is that a new kind of non-case directory would be misread, so the exclusion
+list is configurable (`layout.non_case_dir_regexes`).
 
-**① case id 是 cell 名稱，沒有共同樣式。**
-`NDIO_1` / `PDIO_1` / `NTN_1` 之間沒有可比對的 pattern，所以 case run dir
-必須用**排除法**辨識（不是 `QC_*`、不是 `cmd_folder`、不是隱藏目錄），
-而不是用 include pattern。代價是新增的非 case 目錄會被誤認為 case ——
-因此排除清單放在設定裡可擴充（`layout.non_case_dir_regexes`）。
-
-**② log 檔名與 case 之間沒有任何關係。**
-`submit_bjob_cmd_file_1.log` 依編號配對 `cmd_folder/cmd_file_1`，
-再讀該 script 的 `cd <path>`，取 basename 才得到 case id：
+**2. Log filenames say nothing about their case.**
 
 ```
 submit_bjob_cmd_file_1.log
-    └─(編號)─► cmd_folder/cmd_file_1
-                   └─ `cd /path/to/index/NDIO_1`
-                          └─ basename ─► case = NDIO_1
+    +--(number)--> cmd_folder/cmd_file_1
+                       +-- `cd /path/to/index/NDIO_1`
+                              +-- basename --> case = NDIO_1
 ```
 
-編號順序**不保證**等於任何排序，所以絕不能用「第 N 個 log 對第 N 個 case」
-這種捷徑。測試中有專門的案例（`cmd_file_1` → `ZZZ_LAST`，`cmd_file_2` →
-`AAA_FIRST`）來擋住這種偷懶實作。
+The numbering matches **no** ordering, so "the Nth log belongs to the Nth case"
+is never valid. A test with `cmd_file_1 -> ZZZ_LAST` and
+`cmd_file_2 -> AAA_FIRST` blocks any such shortcut.
 
-這條鏈同時解決了 LSF job 對應的問題：cmd_file 給出的執行路徑是**確定性**的，
-不需要去猜格式多變的 log 內容。
+This chain also solves LSF job mapping: the execution path a cmd_file names is
+deterministic, so log formats never have to be guessed at.
 
-**無法解析時必須讓人看到。** 有 log 但 cmd_file 缺失或無法解析，代表
-「有一個 case 我們監控不到」——記錄進 `unresolved_logs` 並顯示在 UI 上。
-靜默忽略的話，系統會在自己已經瞎掉的情況下回報一切正常。
+**When it cannot be resolved, it must be visible.** A log with a missing or
+unparseable cmd_file means a case we **cannot monitor**; it is recorded in
+`unresolved_logs` and shown in the UI. Ignoring it would let the system report
+all-clear while partly blind.
 
-全部樣式都可在 config 覆寫，不寫死在程式邏輯裡。
+**Markers outside the known three** (`.queue`, `.run`, `.complete`) are abnormal.
+They are reported separately as `unknown_markers`, and their case id still joins
+the case list -- the case exists regardless of a marker kind we do not recognise.
 
-### 9.4 LSF 指令
+Report directories: `QC_Cc` and `QC_Ct` are always present; others may not be.
+Each holds `Report_QC_<X>` and exactly one `Report_QC_<X>_Summary_*`, so more
+than one summary is also wrong -- usually a leftover that would feed the wrong
+report downstream.
 
-| 用途 | 指令 |
+### 9.5 LSF commands
+
+| Purpose | Command |
 |---|---|
-| 提交 Arcx | `bsub ... Arcx -p <cfg> -d <idx...> -lsf0 -nt 50 --run` |
-| 帳號 quota | `busers` 的 `NJOBS` 欄位 |
-| 列出路徑下的 job | `bjobs_manage.py -jp /abs/path/` |
-| 刪除路徑下的 job | `bjobs_manage.py -djp /abs/path/` |
-| 殺 parent | `bkill <arcx_job_id>` |
+| Submit Arcx | `bsub -q LVSRCE-0E.q -oo Arcx.log "Arcx -p <cfg> -d <idx...> -lsf0 -nt 50 --run"` |
+| Account quota | the `NJOBS` column of `busers` |
+| Count jobs under a path | `bjobs_manage.py -jp /abs/path/` |
+| Delete jobs under a path | `bjobs_manage.py -djp /abs/path/` |
+| Kill the parent | `bkill <arcx_job_id>` |
 
-Drain 順序固定為：**先 `bkill` parent，再 `-djp` 子 job**（反過來的話 parent 會補送新 job）。
+The Arcx invocation is **one shell string**, matching how the command is written
+by hand and how bsub reads its trailing argument. `-oo` overwrites rather than
+appends, so a rerun does not stack onto the previous attempt's output.
 
-### 9.5 Status Exporter（公用碟）
+Drain order is fixed: **bkill the parent first, then `-djp` the children.** The
+other way round, the parent simply submits replacements.
+
+### 9.6 The shared-disk export
 
 ```
-<shared_root>/                  預設 /tmp1/.auto_golden （路徑可設定，之後會換碟）
-  index.html                    所有 user 的總覽頁
+<shared_root>/                  default /tmp1/.auto_golden (configurable)
+  index.html                    an overview of every user
   <user>/
-    status.json                 完整欄位
-    status.html                 自包含單檔，Chrome 直接開
-    updated_at                  純文字時間戳
+    status.json                 full fields
+    status.html                 self-contained; opens directly in a browser
+    updated_at                  a plain-text timestamp for quick shell checks
 ```
-- 寫入一律 `tmp → os.replace`（別人可能正在讀）
-- 權限：目錄 `0755`、檔案 `0644`
-- 更新頻率獨立於 daemon tick（預設 60s）
-- **公用碟只放衍生資料**。真相永遠在 `~/.arcx-auto/` 與 run folder；公用碟隨時可以整個刪掉重建。
+
+- writes are always `tmp -> os.replace`, since somebody may be reading
+- permissions: directories `0755`, files `0644`
+- the update interval is independent of the daemon tick (default 60s)
+- **derived data only.** The truth lives in `~/.arcx-auto/` and the run folders,
+  so the shared disk can be deleted and rebuilt at any time
 
 ---
 
-## 10. 落地順序
+## 10. Delivery order
 
-| Phase | 內容 | 狀態 |
+| Phase | Contents | State |
 |---|---|---|
-| **0** | Domain + FsAdapter + Collector + StateEngine + `status` CLI | ✅ 已完成 |
-| **2a** | ArcxAdapter(dir_map/special.cfg) + WavePlanner + `plan` CLI | ✅ 已完成 |
-| **1a** | arcx.cfg parser + QA Registry + StateResolver + PRE 檢查 | ✅ 已完成 |
-| **1b** | Store + LockManager + Daemon + 唯讀 Web UI | ✅ 已完成 |
-| **2b** | Preflight + WorkspaceBuilder + Launcher + SubmissionController + `submit` | ✅ 已完成 |
-| 3 | Rerun Drain 狀態機 + 人工觸發一鍵重跑 + Triage Queue | 待做 |
-| 4 | PolicyEngine 自動 remediation（先 shadow mode 兩週） | 待做 |
-| 5 | Status Exporter + 公用碟總覽頁 + 歷史趨勢 | 待做 |
+| **0** | Domain + FsAdapter + Collector + StateEngine + `status` | done |
+| **2a** | ArcxAdapter (dir_map / special.cfg) + WavePlanner + `plan` | done |
+| **1a** | arcx.cfg parser + QA registry + StateResolver + PRE checks | done |
+| **1b** | Store + LockManager + Daemon + read-only web UI | done |
+| **2b** | Preflight + WorkspaceBuilder + Launcher + gate + `submit` | done |
+| 3 | Rerun drain state machine + triage queue | to do |
+| 4 | Policy engine, automatic remediation (shadow mode first) | to do |
+| 5 | Shared-disk export, overview page, history | to do |
 
-**Phase 0 與 2a 刻意先做且純唯讀**：兩者都不寫任何東西到 run folder，
-用來驗證「系統對 marker / log / dir_map / special.cfg 的理解是否正確」。
-理解錯了，現在改最便宜。
+Phases 0 and 2a were deliberately built first and kept **read only**: neither
+writes anything to a run folder, and their purpose was to verify that the system
+understands markers, logs, dir_map and special.cfg correctly. Being wrong about
+those is cheapest to fix early -- and two of the assumptions did turn out to be
+wrong.

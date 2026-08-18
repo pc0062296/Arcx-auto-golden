@@ -1,18 +1,22 @@
-"""SubmissionController —— 逐波提交的閘門。
+"""SubmissionController -- the gate that releases one wave at a time.
 
-閘門條件 (architecture §5.4):
+The gate condition (architecture 5.4):
 
-    放行 = 已過 min_interval  AND  ( NJOBS < quota_threshold  OR  已過 max_wait )
+    release = min_interval elapsed
+              AND ( NJOBS < quota_threshold OR max_wait elapsed )
 
-為什麼不是單純的「等固定時間 **或** quota 降下來」: 純 OR 有個漏洞 ——
-時間到了但 quota 還是滿的, 照送一樣會塞爆 queue。上面的組合同時涵蓋
-三件事: 不會太密集、不會塞爆、也不會因為 quota 永遠不降而無限期卡住。
+Why not simply "wait a fixed time **or** until the quota drops": a plain OR has
+a hole -- once the timer expires, submitting while the quota is still full
+floods the queue anyway. The combination above covers all three of not too
+dense, not flooding, and never stuck forever because the quota never drops.
 
-`max_wait` 觸發強制放行時必須在 UI 與 audit 留下明確記錄 —— 那代表
-「等不到 quota 硬送的」, 之後排隊很久不是系統壞掉。
+When `max_wait` forces a release it must be recorded plainly in the UI and the
+audit log: that means "submitted without waiting for quota", so a long PEND
+afterwards is expected rather than a fault.
 
-閘門判定是**純函數**, 狀態是純資料 —— 這樣「等了多久、為什麼放行」
-可以在毫秒內窮舉測試, 而不用真的等兩小時。
+The gate decision is a **pure function** over plain data, so "how long it
+waited and why it released" can be enumerated in milliseconds instead of by
+actually waiting two hours.
 """
 
 from __future__ import annotations
@@ -27,7 +31,9 @@ from arcx_auto.domain.enums import WaveState
 
 @dataclass(frozen=True)
 class GateState:
-    """閘門的持久化狀態。存進 state.json, daemon 重啟後接續, 不重新計時。"""
+    """Persisted gate state. Stored in state.json so a daemon restart resumes
+    rather than restarting the clock.
+    """
 
     wave_name: str
     entered_at: float
@@ -41,16 +47,16 @@ class GateState:
 
 @dataclass(frozen=True)
 class GateDecision:
-    """放行與否, 以及理由。理由會直接顯示給人看。"""
+    """Whether to release, and why. The reason is shown to humans verbatim."""
 
     allow: bool
     reason: str
-    forced: bool = False              # 因逾時而強制放行
-    wait_hint_sec: float = 0.0        # 建議多久後再問一次
+    forced: bool = False              # released because max_wait expired
+    wait_hint_sec: float = 0.0        # suggested delay before asking again
 
     @property
     def label(self) -> str:
-        return ("強制放行" if self.forced else "放行") if self.allow else "等待中"
+        return ("forced" if self.forced else "release") if self.allow else "waiting"
 
 
 def evaluate_gate(
@@ -60,15 +66,16 @@ def evaluate_gate(
     settings: GateSettings,
     previous_submit_at: Optional[float] = None,
 ) -> GateDecision:
-    """純函數: 現在可以送下一波嗎。
+    """Pure: may the next wave go out now?
 
-    ``njobs`` 為 None 代表查不到 quota (busers 不可用)。這時**不能**當作
-    「quota 很低」放行 —— 那會在 LSF 有問題時反而狂送。改為只靠
-    min_interval 與 max_wait 決定, 並在理由中說明資料不可用。
+    ``njobs`` of None means the quota could not be read (busers unavailable).
+    That must **not** be treated as "the quota is low" -- it would submit
+    hardest exactly when LSF is in trouble. Only min_interval and max_wait
+    decide in that case, and the reason says the data was unavailable.
     """
     waited = state.waited_for(now)
 
-    # 1. 硬性最小間隔 (防抖) —— 從上一次實際提交起算
+    # 1. Hard minimum interval (debounce), measured from the last real submit
     since_submit = None
     if previous_submit_at is not None:
         since_submit = now - previous_submit_at
@@ -76,38 +83,42 @@ def evaluate_gate(
             remaining = settings.min_interval_sec - since_submit
             return GateDecision(
                 allow=False,
-                reason="距離上次提交只有 %.0f 分鐘, 最小間隔為 %.0f 分鐘"
+                reason="only %.0f minutes since the last submission; "
+                       "the minimum interval is %.0f minutes"
                        % (since_submit / 60.0, settings.min_interval_sec / 60.0),
                 wait_hint_sec=remaining,
             )
 
-    # 2. quota 夠低就放行
+    # 2. Low enough quota releases
     if njobs is not None and njobs < settings.quota_threshold:
         return GateDecision(
             allow=True,
-            reason="NJOBS = %d, 低於門檻 %d" % (njobs, settings.quota_threshold),
+            reason="NJOBS = %d, below the threshold of %d"
+                   % (njobs, settings.quota_threshold),
         )
 
-    # 3. 等太久了就強制放行, 避免 quota 永遠不降而卡死
+    # 3. Waited too long -- force a release so a quota that never drops
+    #    cannot stall everything indefinitely
     if waited >= settings.max_wait_sec:
         return GateDecision(
             allow=True,
             forced=True,
-            reason="已等待 %.1f 小時, 超過上限 %.1f 小時, 強制放行"
+            reason="waited %.1f hours, over the %.1f hour limit; forcing release"
                    % (waited / 3600.0, settings.max_wait_sec / 3600.0),
         )
 
     if njobs is None:
         return GateDecision(
             allow=False,
-            reason="查不到 NJOBS, 只能等到 %.1f 小時的上限"
+            reason="NJOBS unavailable; can only wait out the %.1f hour limit"
                    % (settings.max_wait_sec / 3600.0),
             wait_hint_sec=min(300.0, settings.max_wait_sec - waited),
         )
 
     return GateDecision(
         allow=False,
-        reason="NJOBS = %d, 尚未低於門檻 %d (已等 %.0f 分鐘)"
+        reason="NJOBS = %d, not yet below the threshold of %d "
+               "(waited %.0f minutes)"
                % (njobs, settings.quota_threshold, waited / 60.0),
         wait_hint_sec=min(300.0, settings.max_wait_sec - waited),
     )
@@ -115,7 +126,7 @@ def evaluate_gate(
 
 @dataclass
 class WaveProgress:
-    """一個 wave 在提交流程中的位置。"""
+    """Where one wave sits in the submission flow."""
 
     wave_name: str
     state: WaveState = WaveState.PLANNED
@@ -145,10 +156,11 @@ class WaveProgress:
 
 
 class SubmissionController:
-    """持有整批 wave 的提交進度, 每個 tick 決定要不要送下一波。
+    """Holds submission progress for the whole batch and decides, each tick,
+    whether the next wave may go out.
 
-    刻意做成「一次只推進一波」: 同時放行多波會讓閘門失去意義,
-    而且 LSF 的負載尖峰正是我們要避免的東西。
+    Deliberately advances one wave at a time: releasing several at once defeats
+    the gate, and the LSF load spike is exactly what it exists to prevent.
     """
 
     def __init__(
@@ -168,13 +180,16 @@ class SubmissionController:
                 if p.state in (WaveState.PLANNED, WaveState.WAITING_GATE)]
 
     def next_wave(self) -> Optional[WaveProgress]:
-        """下一個要送的 wave。順序即計畫順序, 不重排。"""
+        """The next wave to submit. Plan order, never reordered."""
         pending = self.pending()
         return pending[0] if pending else None
 
     def evaluate(self, now: Optional[float] = None,
                  njobs: Optional[int] = None) -> Optional[GateDecision]:
-        """問閘門: 現在可以送下一波嗎。回傳 None 代表沒有待送的 wave。"""
+        """Ask the gate whether the next wave may go out.
+
+        Returns None when there is no wave left to submit.
+        """
         now = now if now is not None else time.time()
         wave = self.next_wave()
         if wave is None:

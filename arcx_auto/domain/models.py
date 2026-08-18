@@ -1,12 +1,12 @@
-"""Domain 資料模型。
+"""Domain data model.
 
-全部是 frozen dataclass —— 觀測結果與計畫都是不可變快照, 傳給純函數處理,
-不會有「誰偷偷改了誰」的問題。
+Everything is a frozen dataclass: observations and plans are immutable
+snapshots handed to pure functions, so nothing can be mutated behind your back.
 
-三組模型:
-  * Observation  觀測到的「事實」    (由 Collector 產生)
-  * Snapshot     推導出的「解釋」    (由 StateEngine 產生)
-  * Plan         分波的「計畫」      (由 WavePlanner 產生)
+Three families:
+  * Observation  the facts we saw          (produced by Collector)
+  * Snapshot     the interpretation        (produced by StateEngine)
+  * Plan         the wave plan             (produced by WavePlanner)
 """
 
 from __future__ import annotations
@@ -26,11 +26,11 @@ from arcx_auto.domain.enums import (
 
 
 # --------------------------------------------------------------------------
-# 序列化 helper
+# Serialisation helpers
 # --------------------------------------------------------------------------
 
 def _to_jsonable(value: Any) -> Any:
-    """把 dataclass / enum / set / tuple 轉成可 json.dumps 的結構。"""
+    """Turn dataclasses, enums, sets and tuples into json.dumps-able data."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {k: _to_jsonable(v) for k, v in dataclasses.asdict(value).items()}
     if isinstance(value, (set, frozenset)):
@@ -39,30 +39,32 @@ def _to_jsonable(value: Any) -> Any:
         return [_to_jsonable(v) for v in value]
     if isinstance(value, dict):
         return {str(k): _to_jsonable(v) for k, v in value.items()}
-    # str-based Enum 在 asdict 之後已經是 str, 這裡處理直接傳入 enum 的情況
+    # After asdict a str-based Enum is already a str; this handles enums
+    # passed in directly.
     if hasattr(value, "value") and isinstance(getattr(value, "value"), str):
         return value.value
     return value
 
 
 def as_json_dict(obj: Any) -> Dict[str, Any]:
-    """公開的序列化入口。"""
+    """Public serialisation entry point."""
     result = _to_jsonable(obj)
     if not isinstance(result, dict):
-        raise TypeError("as_json_dict 只接受 dataclass 物件")
+        raise TypeError("as_json_dict only accepts dataclass instances")
     return result
 
 
 # --------------------------------------------------------------------------
-# Observation —— 觀測到的事實
+# Observation -- the facts
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class LsfJobView:
-    """從 bjobs 觀測到的單一 LSF job。
+    """One LSF job as seen by bjobs.
 
-    ``exec_cwd`` 是把 job 對回 wave 目錄的關鍵 —— wave 目錄同時是
-    Arcx 的隔離邊界與 LSF job 的歸屬邊界 (見 architecture §8)。
+    ``exec_cwd`` is how a job is mapped back to a wave directory: the wave
+    directory is simultaneously Arcx's isolation boundary and the ownership
+    boundary for LSF jobs (architecture 8).
     """
 
     job_id: str
@@ -74,7 +76,7 @@ class LsfJobView:
     job_name: Optional[str] = None
 
     def belongs_to(self, path_prefix: str) -> bool:
-        """這個 job 是否屬於某個路徑前綴底下。"""
+        """Whether this job lives under a path prefix."""
         prefix = path_prefix.rstrip("/") + "/"
         for candidate in (self.exec_cwd, self.sub_cwd, self.output_file):
             if candidate and (candidate.rstrip("/") + "/").startswith(prefix):
@@ -84,24 +86,24 @@ class LsfJobView:
 
 @dataclass(frozen=True)
 class CaseObservation:
-    """單一 case 在某個時間點的觀測快照。
+    """What one case looked like at a point in time.
 
-    這是「事實」而非「解釋」—— 只記錄看到什麼, 不做任何判斷。
-    判斷交給 StateEngine (純函數) 與 QA Registry。
+    Facts, not interpretation: it records what was seen and decides nothing.
+    Deciding is StateEngine's (pure) and the QA registry's job.
     """
 
-    case_id: str                          # cell 名稱, 例如 NDIO_1
+    case_id: str                          # cell name, e.g. NDIO_1
     markers: FrozenSet[MarkerKind] = frozenset()
-    case_dir: Optional[str] = None        # case run dir 的絕對路徑 (rerun 時刪這個)
+    case_dir: Optional[str] = None        # absolute run dir; a rerun deletes it
     case_dir_exists: bool = False
     log_path: Optional[str] = None
     log_size: Optional[int] = None
     log_mtime: Optional[float] = None
-    # cmd_folder/cmd_file_N —— 送進 LSF 的 script。
-    # 它裡面的 `cd <path>` 是唯一能把 log 對回 case 的可靠依據。
+    # cmd_folder/cmd_file_N -- the script submitted to LSF. Its `cd <path>`
+    # line is the only reliable way to map a log back to its case.
     cmd_file: Optional[str] = None
-    exec_path: Optional[str] = None       # cmd_file 裡 cd 進去的路徑
-    artifacts: Tuple[str, ...] = ()       # Phase 1 由 QA 使用
+    exec_path: Optional[str] = None       # the path the cmd_file cd's into
+    artifacts: Tuple[str, ...] = ()       # used by QA
     lsf: Optional[LsfJobView] = None
 
     @property
@@ -118,9 +120,10 @@ class CaseObservation:
 
     @property
     def marker_inconsistent(self) -> bool:
-        """.complete 已出現, 但 .run / .queue 沒被清掉。
+        """.complete is present but .run / .queue were not cleared.
 
-        代表 Arcx 收尾不完整, 或是有殘留的舊 marker —— 值得人看一眼。
+        Either Arcx did not finish tidying up, or an old marker is left over.
+        Worth a human glance either way.
         """
         return self.has_complete_marker and (
             self.has_run_marker or self.has_queue_marker
@@ -129,22 +132,23 @@ class CaseObservation:
 
 @dataclass(frozen=True)
 class IndexRunObservation:
-    """一個 index run folder 的完整觀測快照。"""
+    """A complete observation of one index run folder."""
 
     index_key: str
     run_folder: str
     observed_at: float
     cases: Dict[str, CaseObservation] = field(default_factory=dict)
     report_dirs: Tuple[str, ...] = ()     # QC_Cc / QC_Ct / QC_Spice ...
-    unmatched_entries: Tuple[str, ...] = ()  # 無法歸類的檔案, 用來發現慣例變動
-    # 有 log 但無法從 cmd_file 判定屬於哪個 case。
-    # 這代表有一個 case 我們**監控不到**, 必須讓人看到而不是靜默忽略。
+    unmatched_entries: Tuple[str, ...] = ()  # unclassifiable entries
+    # A log whose owning case could not be resolved from its cmd_file.
+    # That means a case we cannot monitor at all, so it must surface rather
+    # than be silently dropped.
     unresolved_logs: Tuple[str, ...] = ()
-    # 已知三種 (.queue/.run/.complete) 以外的 marker。
-    # 使用者確認這不正常, 所以不歸進 unmatched_entries 當雜訊, 而是獨立呈現。
-    # 每筆是 (marker 檔名, 推斷出的 case id)。
+    # Markers other than the known .queue/.run/.complete. Confirmed abnormal,
+    # so they are reported separately instead of being mixed into the noise of
+    # unmatched_entries. Each entry is (marker filename, inferred case id).
     unknown_markers: Tuple[Tuple[str, str], ...] = ()
-    error: Optional[str] = None           # 掃描失敗時的原因 (例如路徑不存在)
+    error: Optional[str] = None           # why the scan failed, if it did
 
     @property
     def case_count(self) -> int:
@@ -152,48 +156,50 @@ class IndexRunObservation:
 
 
 # --------------------------------------------------------------------------
-# Snapshot —— 推導出的解釋
+# Snapshot -- the interpretation
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class CaseSnapshot:
-    """StateEngine 對單一 case 的判定結果 + 為了下次判定而保留的記憶。
+    """StateEngine's verdict for one case, plus the memory it needs next time.
 
-    ``last_progress_at`` / ``last_progress_size`` 是 stall 偵測的核心:
-    只有在 log 實際長大時才更新, 因此 ``now - last_progress_at`` 就是
-    「這個 case 安靜了多久」。用 size 而非 mtime, 是因為 NFS 上的 mtime
-    不可靠, 而且有些 tool 會 touch 檔案卻沒有實質輸出。
+    ``last_progress_at`` / ``last_progress_size`` drive stall detection: they
+    only advance when the log actually grows, so ``now - last_progress_at`` is
+    how long the case has been quiet. Size rather than mtime, because NFS
+    mtimes are unreliable and some tools touch a file without writing anything.
     """
 
     case_id: str
-    state: CaseState              # 最終狀態 (經 StateResolver 收斂)
+    state: CaseState              # final state, after StateResolver
     entered_state_at: float
     last_progress_at: float
     last_progress_size: int = 0
     last_seen_at: float = 0.0
     lsf_job_id: Optional[str] = None
     lsf_state: Optional[LsfState] = None
-    # 第一次觀測到「應該有 LSF job 卻找不到」的時間。
-    # LOST 判定需要 grace period, 否則 marker 與 LSF 的可見性落差會造成誤判。
+    # When we first saw "there should be an LSF job but there is none".
+    # LOST needs a grace period, or the visibility lag between markers and LSF
+    # produces false positives.
     lsf_missing_since: Optional[float] = None
     case_dir: Optional[str] = None
     log_path: Optional[str] = None
     exec_path: Optional[str] = None
     marker_inconsistent: bool = False
     note: Optional[str] = None
-    # StateEngine 判出的結構性狀態 (只看 marker + LSF)。
-    # 與 state 分開保存, 因為狀態轉移必須拿 base 跟 base 比 —— 拿收斂後的
-    # state 去比的話, COMPLETED_MARKER -> DONE 會被誤認成「每個 tick 都在變」。
+    # The structural state StateEngine derived from markers and LSF alone.
+    # Kept apart from `state` because transitions must compare base to base:
+    # comparing against the resolved state would make COMPLETED_MARKER -> DONE
+    # look like a change on every single tick.
     base_state: Optional[CaseState] = None
 
     def silent_for(self, now: float) -> float:
-        """log 已經多久沒有成長 (秒)。"""
+        """How long the log has not grown, in seconds."""
         return max(0.0, now - self.last_progress_at)
 
 
 @dataclass(frozen=True)
 class IndexRunSnapshot:
-    """一個 index run folder 的判定結果。"""
+    """The verdict for one index run folder."""
 
     index_key: str
     run_folder: str
@@ -213,7 +219,7 @@ class IndexRunSnapshot:
 
 @dataclass(frozen=True)
 class StateEvent:
-    """一次狀態轉移。append-only 寫進 events.jsonl, 永不改寫。"""
+    """One state transition. Appended to events.jsonl, never rewritten."""
 
     ts: float
     index_key: str
@@ -225,14 +231,15 @@ class StateEvent:
 
 
 # --------------------------------------------------------------------------
-# Plan —— 分波計畫
+# Plan -- wave planning
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class DirMap:
-    """解析後的 dir_map。
+    """A parsed dir_map.
 
-    ``meta`` 存 min/max 這類保留 key —— 它們不是真實 index, 不可拿去跑。
+    ``meta`` holds reserved keys such as min/max. They are not real indices and
+    must never be passed to Arcx.
     """
 
     source_path: str
@@ -244,7 +251,7 @@ class DirMap:
         return self.entries.get(index_key)
 
     def keys_sorted(self) -> List[str]:
-        """數字 index 依數值排序, 非數字的排在後面依字母序。"""
+        """Numeric indices sort numerically; anything else sorts after them."""
 
         def sort_key(k: str) -> Tuple[int, float, str]:
             try:
@@ -257,10 +264,11 @@ class DirMap:
 
 @dataclass(frozen=True)
 class IndexSpec:
-    """一個 index 的資源需求描述, WavePlanner 的輸入單位。
+    """The resource footprint of one index; WavePlanner's input unit.
 
-    ``slots = cpu_per_case × gds_count``
-    其中 cpu_per_case 來自 <index_path>/special.cfg 的 O_QCAP_LSF_NUM。
+        slots = cpu_per_case * gds_count
+
+    cpu_per_case comes from O_QCAP_LSF_NUM in <index_path>/special.cfg.
     """
 
     index_key: str
@@ -278,13 +286,13 @@ class IndexSpec:
 
     @property
     def usable(self) -> bool:
-        """資料完整到可以排進 wave。"""
+        """Complete enough to be placed into a wave."""
         return self.error is None and self.gds_count > 0 and self.cpu_per_case > 0
 
 
 @dataclass(frozen=True)
 class Wave:
-    """一批一起送出的 index —— 對應一條 Arcx 指令 + 一個隔離目錄。"""
+    """A batch of indices submitted together: one Arcx command, one directory."""
 
     seq: int
     indices: Tuple[IndexSpec, ...]
@@ -309,15 +317,15 @@ class Wave:
 
 @dataclass(frozen=True)
 class WavePlan:
-    """完整的分波計畫 —— 純資料, 可預覽 / 可編輯 / 可存檔重放。
+    """The complete wave plan: pure data, previewable, editable, replayable.
 
-    刻意不在這裡執行任何動作 (見 architecture 決策 5)。
+    It deliberately performs no action (architecture decision 5).
     """
 
     mode: PlanMode
     max_slots_per_wave: int
     waves: Tuple[Wave, ...] = ()
-    excluded: Tuple[IndexSpec, ...] = ()   # 資料不完整, 無法排入
+    excluded: Tuple[IndexSpec, ...] = ()   # incomplete data, cannot be planned
     warnings: Tuple[str, ...] = ()
     created_at: float = 0.0
 
@@ -331,8 +339,10 @@ class WavePlan:
 
     @property
     def oversized_waves(self) -> Tuple[Wave, ...]:
-        """單一 wave 的 slot 需求就超過上限 —— 通常代表某個 index 特別大,
-        或 max_slots_per_wave 設得太低。計畫階段就該讓人知道。
+        """Waves whose slot demand alone exceeds the cap.
+
+        Usually one unusually large index, or a cap set too low. Either way it
+        should be visible while it is still just a plan.
         """
         return tuple(
             w for w in self.waves if w.total_slots > self.max_slots_per_wave

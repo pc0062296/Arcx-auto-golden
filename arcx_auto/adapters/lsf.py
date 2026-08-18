@@ -1,15 +1,14 @@
-"""LSF adapter。
+"""LSF adapter.
 
-設計要點:
-  * **批次查詢**。bjobs 一次拿回帳號所有 job, 在記憶體裡過濾。
-    絕不 per-job 呼叫 —— 幾百次 bjobs 會打爆 LSF master。
-  * **優雅降級**。開發機或 LSF 暫時不可用時, 所有查詢回傳 None/空集合
-    並記錄原因, 而不是丟例外。監控系統不能因為 bjobs 抽風就整個停擺。
-  * 所有外部指令都有 timeout。
+Design notes:
 
-TODO(待確認): bjobs_manage.py -jp 的實際輸出格式尚未取得,
-目前用「抓出所有看起來像 job id 的數字」的寬鬆解析, 並保留 raw 輸出。
-拿到真實輸出後改成精確解析。
+  * **Batch queries.** One bjobs call returns every job the account owns and we
+    filter in memory. Never call bjobs per job -- a few hundred invocations will
+    hammer the LSF master.
+  * **Degrade gracefully.** On a dev box, or when LSF is temporarily down, every
+    query returns None/empty plus a reason instead of raising. A monitoring
+    system must not stop working because bjobs hiccuped.
+  * Every external command has a timeout.
 """
 
 from __future__ import annotations
@@ -26,15 +25,21 @@ from arcx_auto.config.settings import LsfSettings
 from arcx_auto.domain.enums import LsfState
 from arcx_auto.domain.models import LsfJobView
 
-_JOB_ID_RE = re.compile(r"\b(\d{3,})\b")
-
-# bjobs -o 的欄位順序, 與 _parse_bjobs 一一對應
+# bjobs -o field order, matched one-to-one by _parse_bjobs
 _BJOBS_FIELDS = ["jobid", "stat", "exec_cwd", "sub_cwd", "output_file",
                  "exec_host", "job_name"]
 
+# bjobs_manage.py -jp prints a summary, not a job list:
+#     grep all jobs...
+#     finished, total 304 jobs
+#     total 299 jobs in path
+# The second number is the one scoped to the requested path.
+_JOBS_IN_PATH_RE = re.compile(r"total\s+(?P<count>\d+)\s+jobs?\s+in\s+path",
+                              re.IGNORECASE)
+
 
 class LsfUnavailable(Exception):
-    """LSF 指令不存在或無法執行。"""
+    """The LSF command is missing or cannot be executed."""
 
 
 @dataclass(frozen=True)
@@ -47,7 +52,7 @@ class CommandResult:
 
 
 class LsfAdapter:
-    """封裝所有 LSF 存取。"""
+    """Wraps every LSF access."""
 
     def __init__(
         self,
@@ -59,25 +64,35 @@ class LsfAdapter:
         self._availability: Dict[str, bool] = {}
 
     # ------------------------------------------------------------------
-    # 可用性
+    # Availability
     # ------------------------------------------------------------------
 
     def is_available(self, command: Optional[str] = None) -> bool:
-        """該指令是否存在於 PATH。結果會快取, 避免每個 tick 重查。"""
+        """Whether the command exists on PATH. Cached to avoid re-checking
+        on every tick.
+        """
         cmd = command or self.settings.bjobs_cmd
         if cmd not in self._availability:
             self._availability[cmd] = shutil.which(cmd) is not None
         return self._availability[cmd]
 
-    def _run(self, argv: List[str]) -> CommandResult:
+    def _run(self, argv: List[str],
+             cwd: Optional[str] = None) -> CommandResult:
+        """Run an external command.
+
+        ``cwd`` matters for bsub: LSF records the submission directory, and
+        Arcx creates its per-index run folders relative to it. Wave isolation
+        depends entirely on submitting from inside the wave directory.
+        """
         if not self.is_available(argv[0]):
             return CommandResult(
                 ok=False, stdout="", stderr="", returncode=127,
-                error="找不到指令: %s" % argv[0],
+                error="command not found: %s" % argv[0],
             )
         try:
             proc = subprocess.run(
                 argv,
+                cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=self.settings.command_timeout_sec,
@@ -86,13 +101,13 @@ class LsfAdapter:
         except subprocess.TimeoutExpired:
             return CommandResult(
                 ok=False, stdout="", stderr="", returncode=-1,
-                error="指令逾時 (%.0fs): %s"
+                error="command timed out after %.0fs: %s"
                       % (self.settings.command_timeout_sec, " ".join(argv)),
             )
         except OSError as exc:
             return CommandResult(
                 ok=False, stdout="", stderr="", returncode=-1,
-                error="指令執行失敗: %s" % exc,
+                error="command failed: %s" % exc,
             )
         return CommandResult(
             ok=proc.returncode == 0,
@@ -106,11 +121,11 @@ class LsfAdapter:
     # ------------------------------------------------------------------
 
     def list_user_jobs(self) -> Tuple[List[LsfJobView], Optional[str]]:
-        """一次取回本帳號所有 job。回傳 (jobs, error)。
+        """Fetch every job owned by this account in one call.
 
-        exec_cwd / sub_cwd / output_file 是把 job 對回 wave 目錄的依據 ——
-        Arcx 送出的子 job 沒有可辨識的 job name (使用者已確認),
-        因此只能靠路徑歸屬。
+        exec_cwd / sub_cwd / output_file are how a job is mapped back to a wave
+        directory: the child jobs Arcx submits carry no identifiable job name,
+        so path ownership is the only handle we have.
         """
         argv = [
             self.settings.bjobs_cmd,
@@ -120,10 +135,10 @@ class LsfAdapter:
         ]
         result = self._run(argv)
         if not result.ok:
-            # 沒有 job 時 bjobs 會以非 0 結束並在 stderr 印 "No unfinished job found"
+            # With no jobs at all bjobs exits non-zero and prints this on stderr
             if "No unfinished job found" in (result.stderr + result.stdout):
                 return ([], None)
-            return ([], result.error or result.stderr.strip() or "bjobs 執行失敗")
+            return ([], result.error or result.stderr.strip() or "bjobs failed")
         return (self._parse_bjobs(result.stdout), None)
 
     @staticmethod
@@ -155,7 +170,7 @@ class LsfAdapter:
         return jobs
 
     def jobs_under_path(self, path: str) -> Tuple[List[LsfJobView], Optional[str]]:
-        """本帳號 job 中屬於某路徑前綴的部分 (由 bjobs 結果過濾)。"""
+        """Jobs owned by this account that live under a path prefix."""
         jobs, error = self.list_user_jobs()
         if error:
             return ([], error)
@@ -163,29 +178,29 @@ class LsfAdapter:
         return ([j for j in jobs if j.belongs_to(prefix)], None)
 
     # ------------------------------------------------------------------
-    # busers  (提交閘門的 quota 來源)
+    # busers -- the quota source for the submission gate
     # ------------------------------------------------------------------
 
     def current_njobs(self) -> Tuple[Optional[int], Optional[str]]:
-        """讀 busers 的 NJOBS 欄位 —— 提交閘門的判斷依據。
+        """Read the NJOBS column from busers.
 
-        busers 輸出範例:
+        Sample output:
             USER/GROUP   JL/P  MAX  NJOBS  PEND  RUN  SSUSP  USUSP  RSV
             myuser          -    -     12     3    9      0      0    0
         """
         result = self._run([self.settings.busers_cmd, self.user])
         if not result.ok:
-            return (None, result.error or result.stderr.strip() or "busers 執行失敗")
+            return (None, result.error or result.stderr.strip() or "busers failed")
 
         lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
         if len(lines) < 2:
-            return (None, "busers 輸出無法解析")
+            return (None, "could not parse busers output")
 
         header = lines[0].split()
         try:
             njobs_idx = header.index("NJOBS")
         except ValueError:
-            return (None, "busers 輸出中找不到 NJOBS 欄位")
+            return (None, "no NJOBS column in busers output")
 
         for line in lines[1:]:
             parts = line.split()
@@ -195,19 +210,24 @@ class LsfAdapter:
                 return (int(parts[njobs_idx]), None)
             except ValueError:
                 continue
-        return (None, "busers 輸出中找不到本帳號的資料列")
+        return (None, "no row for this account in busers output")
 
     # ------------------------------------------------------------------
-    # bjobs_manage.py  (依路徑列出 / 刪除 job)
+    # bjobs_manage.py -- list / delete jobs by path
     # ------------------------------------------------------------------
 
-    def list_jobs_under_path_native(
+    def count_jobs_under_path(
         self, path: str
-    ) -> Tuple[Optional[List[str]], str, Optional[str]]:
-        """用 bjobs_manage.py -jp 列出目標路徑底下的 job id。
+    ) -> Tuple[Optional[int], str, Optional[str]]:
+        """Count the jobs under a path using bjobs_manage.py -jp.
 
-        回傳 (job_ids, raw_output, error)。這是 drain 安全門
-        (VERIFY_QUIESCENT) 的主要判斷依據。
+        Returns (count, raw_output, error). The tool reports a *count*, not a
+        job list, so this is a count -- see _JOBS_IN_PATH_RE.
+
+        **A count of None means "unknown", never "zero".** This feeds the drain
+        safety gate (VERIFY_QUIESCENT); treating "I could not tell" as "no jobs
+        left" would let us delete files while jobs are still running, which is
+        the single most destructive mistake this system could make.
         """
         argv = [
             self.settings.bjobs_manage_cmd,
@@ -217,16 +237,23 @@ class LsfAdapter:
         result = self._run(argv)
         if not result.ok:
             return (None, result.stdout,
-                    result.error or result.stderr.strip() or "bjobs_manage.py 執行失敗")
-        return (_extract_job_ids(result.stdout), result.stdout, None)
+                    result.error or result.stderr.strip()
+                    or "bjobs_manage.py failed")
+
+        count = parse_jobs_in_path(result.stdout)
+        if count is None:
+            return (None, result.stdout,
+                    "could not find a 'total N jobs in path' line in the output")
+        return (count, result.stdout, None)
 
     def kill_jobs_under_path(
         self, path: str
     ) -> Tuple[bool, str, Optional[str]]:
-        """用 bjobs_manage.py -djp 刪除目標路徑底下所有 job。
+        """Delete every job under a path using bjobs_manage.py -djp.
 
-        呼叫前必須**先** bkill parent Arcx job —— 否則 parent 會補送新 job
-        (architecture §9.4)。這個順序由 Remediator 保證, adapter 不隱含它。
+        The caller must bkill the parent Arcx job *first*; otherwise the parent
+        simply submits replacements (architecture 9.4). This adapter does not
+        imply that ordering -- the Remediator enforces it.
         """
         argv = [
             self.settings.bjobs_manage_cmd,
@@ -236,14 +263,15 @@ class LsfAdapter:
         result = self._run(argv)
         if not result.ok:
             return (False, result.stdout,
-                    result.error or result.stderr.strip() or "bjobs_manage.py 執行失敗")
+                    result.error or result.stderr.strip()
+                    or "bjobs_manage.py failed")
         return (True, result.stdout, None)
 
     def kill_job(self, job_id: str) -> Tuple[bool, Optional[str]]:
-        """bkill 單一 job (用來殺 parent Arcx job)。"""
+        """bkill a single job (used for the parent Arcx job)."""
         result = self._run([self.settings.bkill_cmd, str(job_id)])
         if not result.ok:
-            return (False, result.error or result.stderr.strip() or "bkill 執行失敗")
+            return (False, result.error or result.stderr.strip() or "bkill failed")
         return (True, None)
 
 
@@ -251,10 +279,26 @@ class LsfAdapter:
 # helpers
 # --------------------------------------------------------------------------
 
+def parse_jobs_in_path(text: str) -> Optional[int]:
+    """Extract the job count from bjobs_manage.py -jp output.
+
+        grep all jobs...
+        finished, total 304 jobs      <- every job, not what we want
+        total 299 jobs in path        <- scoped to the path, this one
+
+    Returns None when the line is absent. Callers must treat None as unknown.
+    """
+    for line in text.splitlines():
+        match = _JOBS_IN_PATH_RE.search(line)
+        if match:
+            return int(match.group("count"))
+    return None
+
+
 def _current_user() -> str:
     try:
         return getpass.getuser()
-    except Exception:  # pragma: no cover - 極少數無 pwd entry 的環境
+    except Exception:  # pragma: no cover - rare environments without a pwd entry
         return os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
 
 
@@ -266,20 +310,3 @@ def _none_if_dash(value: str) -> Optional[str]:
 def _trailing_slash(path: str) -> str:
     resolved = os.path.abspath(os.path.expanduser(path))
     return resolved.rstrip("/") + "/"
-
-
-def _extract_job_ids(text: str) -> List[str]:
-    """從自製工具的輸出中抓出 job id。
-
-    寬鬆解析: 抓所有 3 位數以上的整數並去重。等拿到 bjobs_manage.py 的
-    真實輸出格式後改成精確解析 (見模組 docstring 的 TODO)。
-    """
-    seen: List[str] = []
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        for match in _JOB_ID_RE.finditer(line):
-            job_id = match.group(1)
-            if job_id not in seen:
-                seen.append(job_id)
-    return seen

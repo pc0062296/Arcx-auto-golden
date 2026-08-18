@@ -1,4 +1,4 @@
-"""QA Registry、expectations、實際檢查與 StateResolver。"""
+"""QA registry, expectations, the checks themselves, and StateResolver."""
 
 import os
 import tempfile
@@ -28,7 +28,7 @@ from tests.fixtures.fake_run import (
 
 
 def build(tmp, cases, index_key="1000"):
-    """造 wave 目錄 + cfg + run folder, 回傳 (snapshot, observation, cfg)。"""
+    """Build a wave dir, cfg and run folder; return (snapshot, obs, cfg)."""
     wave = os.path.join(tmp, "wave_001")
     os.makedirs(wave, exist_ok=True)
     cfg_path = make_arcx_cfg(os.path.join(wave, "arcx.cfg"))
@@ -72,7 +72,7 @@ class ExpectationTest(unittest.TestCase):
         )
 
     def test_case_name_substituted_per_flow(self):
-        """calQRCFS 的 netlist 名稱依 case 而變, calQCAP 是固定檔名。"""
+        """calQRCFS names its netlist after the case; calQCAP is fixed."""
         a1, _ = expected_artifacts(self.cfg, "NTN_1", self.qa)
         a2, _ = expected_artifacts(self.cfg, "PDIO_9", self.qa)
         self.assertIn("NTN_1.spf", " ".join(a.relpath for a in a1))
@@ -89,7 +89,7 @@ class ExpectationTest(unittest.TestCase):
         self.assertTrue(any("calMYSTERY" in p for p in problems), problems)
 
     def test_new_flow_can_be_added_by_config_only(self):
-        """新增一種 EDA tool = 加一個 profile, 不需要改程式。"""
+        """Adding an EDA tool is adding a profile, not changing code."""
         qa = Settings().qa
         qa.flows["calMYSTERY"] = FlowProfile(netlists=["{case}_out.spf"])
         cfg = parse_arcx_cfg(make_arcx_cfg(
@@ -102,11 +102,11 @@ class ExpectationTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 假成功偵測 —— 這是整個系統最重要的能力
+# False success detection -- the most important capability in the system
 # ---------------------------------------------------------------------------
 
 class FakeSuccessTest(unittest.TestCase):
-    """四個 case 都有 .complete marker, 人工看全部像成功。"""
+    """All four cases carry a .complete marker and look successful by eye."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -129,15 +129,15 @@ class FakeSuccessTest(unittest.TestCase):
         self.assertTrue(self.report.merged_case_result("NTN_1").passed)
 
     def test_missing_netlist_detected(self):
-        """marker 說完成, 但 netlist 根本沒產出來。"""
+        """The marker says finished, but the netlist was never produced."""
         self.assertIn("NETLIST_MISSING", issue_ids(self.report, "NDIO_1"))
 
     def test_empty_netlist_detected(self):
-        """檔案在但是 0 byte —— 只看「存不存在」會漏掉。"""
+        """The file exists but is 0 bytes; checking existence alone misses it."""
         self.assertIn("NETLIST_EMPTY", issue_ids(self.report, "PDIO_1"))
 
     def test_missing_flow_dir_detected(self):
-        """整個 flow 沒跑 —— 比產出物寫失敗更嚴重。"""
+        """The whole flow never ran, which is worse than a failed write."""
         ids = issue_ids(self.report, "RES_HI")
         self.assertIn("FLOW_DIR_MISSING", ids)
 
@@ -152,7 +152,7 @@ class FakeSuccessTest(unittest.TestCase):
             self.assertEqual(resolved[case_id], CaseState.FAILED, case_id)
 
     def test_failed_cases_marked_for_rerun(self):
-        """FAILED 的 case run dir 要被刪掉重跑, 成功的保留。"""
+        """FAILED run dirs get deleted and rerun; successful ones are kept."""
         self.assertEqual(
             self.report.merged_case_result("NTN_1").completeness()[0],
             Completeness.COMPLETE)
@@ -169,7 +169,7 @@ class NoConfigTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_missing_cfg_yields_unknown_not_pass(self):
-        """沒有 arcx.cfg 時, 絕不能把 case 當成通過。"""
+        """Without arcx.cfg a case must never be treated as passing."""
         snapshot, observation, _cfg = build(
             self.tmp.name, [CaseSpec("NTN_1", "complete", artifacts="none")])
         report = QaRunner(Settings()).run_index(snapshot, observation, None)
@@ -180,7 +180,7 @@ class NoConfigTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# index 層級
+# Index level
 # ---------------------------------------------------------------------------
 
 class ReportCheckTest(unittest.TestCase):
@@ -215,7 +215,7 @@ class ReportCheckTest(unittest.TestCase):
         self.assertIn("REPORT_DIR_MISSING", self._index_ids(report))
 
     def test_missing_report_file_detected(self):
-        """目錄在但裡面的 Report_QC_Cc / Summary 不見了。"""
+        """The directory exists but Report_QC_Cc or the Summary is missing."""
         from tests.fixtures.fake_run import make_report_dirs
 
         wave = os.path.join(self.tmp.name, "wave_001")
@@ -242,11 +242,13 @@ class ReportCheckTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 卡住的分級判定
+# Graded stall detection
 # ---------------------------------------------------------------------------
 
 class QuietTest(unittest.TestCase):
-    """分級而非二元 —— runtime 從 10 分鐘到 3 天都有, 硬判會誤報。"""
+    """Graded, not binary: runtimes span ten minutes to three days, so a hard
+    rule would raise false alarms.
+    """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -277,7 +279,7 @@ class QuietTest(unittest.TestCase):
         self.assertEqual(issues[0].severity, Severity.FATAL)
 
     def test_downgraded_when_artifacts_already_present(self):
-        """不寫 log 但產出物都齊了, 通常只是在收尾 —— 不該當成卡住。"""
+        """Quiet with every artifact present is usually tidy-up, not a stall."""
         issues = self._run(9 * 3600, artifacts="full")
         self.assertEqual(issues[0].severity, Severity.WARN)
         self.assertTrue(issues[0].evidence["artifacts_ready"])
@@ -288,7 +290,7 @@ class QuietTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Registry 行為
+# Registry behaviour
 # ---------------------------------------------------------------------------
 
 class RegistryTest(unittest.TestCase):
@@ -305,16 +307,16 @@ class RegistryTest(unittest.TestCase):
                 return None
 
     def test_crashing_check_is_isolated(self):
-        """一條壞規則絕不能讓整個監控停擺。"""
+        """One bad rule must never stop the whole monitoring."""
         registry = QaRegistry()
 
-        @registry.check(id="BOOM", title="會爆的檢查")
+        @registry.check(id="BOOM", title="a check that explodes")
         def boom(ctx):
-            raise RuntimeError("這是故意的")
+            raise RuntimeError("deliberate")
 
-        @registry.check(id="FINE", title="正常的檢查")
+        @registry.check(id="FINE", title="a working check")
         def fine(ctx):
-            return ctx.fail("我有跑到")
+            return ctx.fail("I ran")
 
         tmp = tempfile.TemporaryDirectory()
         try:
@@ -331,7 +333,7 @@ class RegistryTest(unittest.TestCase):
     def test_crash_is_unknown_not_pass(self):
         registry = QaRegistry()
 
-        @registry.check(id="BOOM", title="會爆的檢查")
+        @registry.check(id="BOOM", title="a check that explodes")
         def boom(ctx):
             raise RuntimeError("x")
 
@@ -361,7 +363,9 @@ class RegistryTest(unittest.TestCase):
             tmp.cleanup()
 
     def test_every_builtin_check_has_a_docstring(self):
-        """docstring 就是 UI 上的說明 —— 缺了使用者看不懂這條在檢查什麼。"""
+        """The docstring is the UI description; without it nobody can tell
+        what the check does.
+        """
         missing = [s.id for s in REGISTRY.all() if not s.doc]
         self.assertEqual(missing, [])
 
@@ -386,7 +390,7 @@ class ResolverTest(unittest.TestCase):
         self.assertIn("NETLIST_MISSING", reason)
 
     def test_completed_with_unknown_is_failed_not_done(self):
-        """檢查不了絕不能當成成功。"""
+        """Could not check must never count as success."""
         state, _ = resolve_case_state(
             CaseState.COMPLETED_MARKER,
             [self._issue("CFG_EXPECTATION_UNAVAILABLE", Severity.UNKNOWN)])
@@ -409,7 +413,7 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(state, CaseState.RUNNING)
 
     def test_lsf_confirmed_states_not_rewritten(self):
-        """LOST / SUSPENDED 是 LSF 直接證實的事實, QA 不該改寫。"""
+        """LOST and SUSPENDED are facts LSF confirmed; QA must not rewrite them."""
         for base in (CaseState.LOST, CaseState.SUSPENDED, CaseState.QUEUED):
             state, _ = resolve_case_state(
                 base, [self._issue("CASE_QUIET", Severity.FATAL)])
@@ -421,12 +425,13 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# PRE —— arcx.cfg 檢查
+# PRE -- arcx.cfg validation
 # ---------------------------------------------------------------------------
 
 class ConfigCheckTest(unittest.TestCase):
-    """提交前的 cfg 驗證。投資報酬率最高的一層 ——
-    設定錯誤造成的失敗大多在提交前就看得出來, 而送出去要等好幾小時才會發現。
+    """Pre-submission cfg validation, the layer with the best return: most
+    configuration mistakes are visible before submitting, and finding them
+    afterwards costs hours of waiting.
     """
 
     def setUp(self):
@@ -463,7 +468,9 @@ class ConfigCheckTest(unittest.TestCase):
         self.assertIn("CFG_PATH_NOT_FOUND", ids)
 
     def test_disabled_line_path_not_checked(self):
-        """行首 0 的設定不生效 —— 檢查它的路徑只會製造假警報。"""
+        """A leading 0 makes the setting inactive; checking its path would
+        only manufacture a false alarm.
+        """
         _r, ids = self._check(
             "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
             "0 RCX_TECH_QTF = /definitely/not/here\nEND_SETTINGS\n")
@@ -482,10 +489,12 @@ class ConfigCheckTest(unittest.TestCase):
         self.assertNotIn("CFG_PATH_NOT_FOUND", ids)
 
     def test_only_listed_keys_are_path_checked(self):
-        """未列在 cfg_path_keys 的設定即使長得像路徑也不檢查。
+        """Settings outside cfg_path_keys are not checked even if they look
+        like paths.
 
-        「看起來像路徑就檢查」會對輸出路徑、樣板字串產生大量假警報,
-        假警報多了就沒人看了。
+        Checking anything path-shaped would produce false alarms on output
+        paths and templates, and once there are false alarms nobody reads the
+        warnings.
         """
         _r, ids = self._check(
             "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
@@ -502,14 +511,16 @@ class ConfigCheckTest(unittest.TestCase):
             self.assertIn("CFG_PATH_NOT_FOUND", ids, key)
 
     def test_env_var_paths_skipped_not_reported_missing(self):
-        """含 $ 的值無法在這裡解析, 列為 skipped 而不是誤報成缺失。"""
+        """Values containing $ cannot be resolved here; they are skipped
+        rather than reported as missing.
+        """
         result, ids = self._check(
             "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
             "1 RCX_TECH_QTF = $TECH_ROOT/a.qtf\nEND_SETTINGS\n")
         self.assertNotIn("CFG_PATH_NOT_FOUND", ids)
 
     def test_duplicate_block_name_detected(self):
-        """同名 block 的產出目錄會互相覆蓋, 而且不會有任何錯誤訊息。"""
+        """Same-named blocks overwrite each other with no error message."""
         _r, ids = self._check(
             "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n"
             "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQRCFS\nEND_SETTINGS\n")
@@ -526,7 +537,9 @@ class ConfigCheckTest(unittest.TestCase):
         self.assertIn("CFG_UNKNOWN_FLOW", ids)
 
     def test_all_blocks_disabled_detected(self):
-        """會安靜地跑完卻什麼都不產出 —— 最浪費 TAT 的錯誤。"""
+        """It runs to completion quietly and produces nothing, the most
+        wasteful failure there is.
+        """
         _r, ids = self._check(
             "0 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n")
         self.assertIn("CFG_ALL_BLOCKS_DISABLED", ids)
@@ -551,7 +564,7 @@ class ConfigCheckTest(unittest.TestCase):
 
 
 class ReportSummaryCountTest(unittest.TestCase):
-    """每個 QC_* 底下恰好一個 Summary —— 多於一個通常是前一輪殘留。"""
+    """Exactly one Summary per QC_* directory; more is usually a leftover."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

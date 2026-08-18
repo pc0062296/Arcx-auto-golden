@@ -1,8 +1,10 @@
-"""狀態快取的讀寫 (Phase 0 最小版)。
+"""Reading and writing the state cache.
 
-重要前提 (architecture 決策 2): **檔案系統是唯一真相, 這裡只是快取。**
-快取損毀、遺失、格式不符時一律當作「沒有前一次狀態」重新開始, 絕不丟例外。
-唯一會因此損失的是跨次呼叫的進度記憶 (stall 偵測的計時), 這是可接受的降級。
+The premise (architecture decision 2): **the filesystem is the only truth and
+this is just a cache.** A damaged, missing or version-mismatched cache is
+treated as "no previous state" and never raises. The only thing lost is the
+progress memory across calls (the stall timer), which is an acceptable
+degradation.
 """
 
 from __future__ import annotations
@@ -19,19 +21,20 @@ SCHEMA_VERSION = 1
 
 
 class SnapshotStore:
-    """把 IndexRunSnapshot 存成 JSON, 讓 stall 偵測能跨次呼叫累積。"""
+    """Persist IndexRunSnapshots so stall detection accumulates across calls."""
 
     def __init__(self, path: str) -> None:
         self.path = os.path.abspath(os.path.expanduser(path))
 
-    # -- 讀 ------------------------------------------------------------
+    # -- read ----------------------------------------------------------
 
     def load(self) -> Dict[str, IndexRunSnapshot]:
         raw = read_json(self.path, default=None)
         if not isinstance(raw, dict):
             return {}
         if raw.get("schema_version") != SCHEMA_VERSION:
-            # 版本不符就整份丟掉重來 —— 快取而已, 不需要遷移邏輯
+            # A version mismatch throws the whole file away: it is only a
+            # cache, so migration logic would be dead weight.
             return {}
         result: Dict[str, IndexRunSnapshot] = {}
         for key, payload in (raw.get("index_runs") or {}).items():
@@ -40,7 +43,7 @@ class SnapshotStore:
                 result[key] = snapshot
         return result
 
-    # -- 寫 ------------------------------------------------------------
+    # -- write ---------------------------------------------------------
 
     def save(self, snapshots: Dict[str, IndexRunSnapshot]) -> None:
         payload = {
@@ -53,7 +56,7 @@ class SnapshotStore:
 
 
 # --------------------------------------------------------------------------
-# 序列化
+# Serialisation
 # --------------------------------------------------------------------------
 
 def _serialize_case(snap: CaseSnapshot) -> Dict[str, Any]:
@@ -131,21 +134,23 @@ def _deserialize_index_run(data: Any) -> Optional[IndexRunSnapshot]:
 
 
 # ==========================================================================
-# RunStore —— daemon 的持久化 (Phase 1b)
+# RunStore -- what the daemon persists
 # ==========================================================================
 
 class RunStore:
-    """一次監控工作階段的所有持久化資料。
+    """Everything one monitoring session persists.
 
         ~/.arcx-auto/runs/<run_id>/
-          manifest.json   不可變: 建立時間、監控目標、cfg 路徑
-          state.json      可變快照, atomic write —— UI 唯讀這一份
-          events.jsonl    append-only 狀態轉移
-          audit.jsonl     append-only 所有寫入型動作
-          commands/       UI/CLI 投遞的動作意圖, daemon 消化後刪除
+          manifest.json   immutable: creation time, targets, cfg path
+          state.json      mutable snapshot, written atomically; the UI reads it
+          events.jsonl    append-only state transitions
+          audit.jsonl     append-only record of every write action
+          commands/       action intents posted by the UI/CLI, consumed by the
+                          daemon and then deleted
 
-    再次強調 (architecture 決策 2): **檔案系統是唯一真相, 這裡只是快取。**
-    整個目錄刪掉後重新掃描就能還原, 只會損失歷史紀錄。
+    Again (architecture decision 2): **the filesystem is the only truth and
+    this is a cache.** Delete the whole directory and a rescan rebuilds it;
+    only the history is lost.
     """
 
     def __init__(self, root: str, run_id: str) -> None:
@@ -161,11 +166,11 @@ class RunStore:
     def ensure(self) -> None:
         os.makedirs(self.commands_dir, exist_ok=True)
 
-    # -- manifest (不可變) ---------------------------------------------
+    # -- manifest (immutable) ------------------------------------------
 
     def write_manifest(self, payload: Dict[str, Any]) -> None:
-        """只在第一次建立時寫入 —— manifest 記錄的是「當初的意圖」,
-        後續發生什麼事都不該改寫它。
+        """Written once, at creation. The manifest records the original
+        intent, and nothing that happens later should rewrite it.
         """
         self.ensure()
         if os.path.exists(self.manifest_path):
@@ -175,7 +180,7 @@ class RunStore:
     def read_manifest(self) -> Dict[str, Any]:
         return read_json(self.manifest_path, default={}) or {}
 
-    # -- state (可變快照) ----------------------------------------------
+    # -- state (mutable snapshot) --------------------------------------
 
     def write_state(self, payload: Dict[str, Any]) -> None:
         atomic_write_json(self.state_path, payload)
@@ -183,24 +188,24 @@ class RunStore:
     def read_state(self) -> Dict[str, Any]:
         return read_json(self.state_path, default={}) or {}
 
-    # -- 追加式紀錄 ----------------------------------------------------
+    # -- append-only records -------------------------------------------
 
     def append_events(self, records: Iterable[Dict[str, Any]]) -> None:
         for record in records:
             append_jsonl(self.events_path, record)
 
     def append_audit(self, record: Dict[str, Any]) -> None:
-        """所有寫入型動作都要留下誰/何時/對什麼/為什麼。"""
+        """Every write action records who, when, on what, and why."""
         enriched = dict(record)
         enriched.setdefault("ts", time.time())
         enriched.setdefault("pid", os.getpid())
         append_jsonl(self.audit_path, enriched)
 
-    # -- 探索 ----------------------------------------------------------
+    # -- discovery -----------------------------------------------------
 
     @staticmethod
     def list_runs(root: str) -> List[str]:
-        """列出所有既有的 run id, 最近更新的排前面。"""
+        """List existing run ids, most recently updated first."""
         runs_dir = os.path.join(
             os.path.abspath(os.path.expanduser(root)), "runs")
         try:

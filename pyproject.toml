@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "arcx-auto-golden"
 version = "0.1.0"
-description = "Arcx RC extraction 自動化提交、監控、判定與重跑系統"
+description = "Automated submission, monitoring, QA and rerun for Arcx RC extraction"
 requires-python = ">=3.9"
-# 核心零第三方相依。PyYAML 只在讀 .yaml 設定檔時 lazy import,
-# 沒有它就改用 .json 設定檔。
+# Zero third-party dependencies in the core. PyYAML is imported lazily and
+# only when reading a .yaml settings file; use .json instead if absent.
 dependencies = []
 
 [project.optional-dependencies]

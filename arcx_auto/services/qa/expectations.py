@@ -1,9 +1,9 @@
-"""從 arcx.cfg 推導出「這個 case 應該產出什麼」。
+"""Derive what a case should produce from arcx.cfg.
 
-這是 QA 的地圖。case run dir 內該有哪些檔案完全由 cfg 決定:
+This is QA's map. What belongs in a case run dir comes entirely from the cfg:
 
     arcx.cfg                              case run dir
-    ─────────────────────────────────────────────────────────────────
+    ---------------------------------------------------------------------
     BEGIN_SETTINGS: blocking_naming_qcap  NTN_1/
       QC_FLOW = calQCAP                     blocking_naming_qcap_calQCAP/
     END_SETTINGS                              work_calQCAP/
@@ -13,8 +13,8 @@
       QC_FLOW = calQRCFS                        work_calQRCFS/
     END_SETTINGS                                  NTN_1.spf
 
-每個 flow 產出什麼由 settings.qa.flows 定義 —— 新增一種 EDA tool
-只需要在設定裡加一個 profile, 不需要改程式。
+What each flow produces is declared in settings.qa.flows, so adding a new EDA
+tool is a settings change rather than a code change.
 """
 
 from __future__ import annotations
@@ -31,11 +31,11 @@ def expected_artifacts(
     case_id: str,
     qa: QaSettings,
 ) -> Tuple[Tuple[ExpectedArtifact, ...], Tuple[str, ...]]:
-    """算出某個 case 應該產出哪些檔案。
+    """Work out which files a case should produce.
 
-    回傳 (artifacts, problems)。``problems`` 是 cfg 本身的問題
-    (block 沒寫 QC_FLOW、flow 不認得), 由呼叫端轉成 issue ——
-    這一層是純函數, 不產生 issue。
+    Returns (artifacts, problems). ``problems`` describes faults in the cfg
+    itself -- a block with no QC_FLOW, an unrecognised flow -- which the caller
+    turns into issues. This layer is pure and raises no issues of its own.
     """
     artifacts: List[ExpectedArtifact] = []
     problems: List[str] = []
@@ -43,19 +43,21 @@ def expected_artifacts(
     for block in config.enabled_blocks:
         flow = block.flow
         if not flow:
-            problems.append("block %s 沒有設定 QC_FLOW" % block.name)
+            problems.append("block %s has no QC_FLOW" % block.name)
             continue
 
         profile = qa.flows.get(flow)
         if profile is None:
             problems.append(
-                "block %s 的 QC_FLOW = %s 不在已知 flow 清單中 (%s)"
-                % (block.name, flow, ", ".join(sorted(qa.flows)) or "空")
+                "block %s has QC_FLOW = %s, which is not a known flow (%s)"
+                % (block.name, flow, ", ".join(sorted(qa.flows)) or "none")
             )
             continue
 
         if not profile.netlists:
-            problems.append("flow %s 沒有定義任何產出物, 無法驗證" % flow)
+            problems.append(
+                "flow %s declares no artifacts, so nothing can be verified"
+                % flow)
             continue
 
         for template in profile.netlists:
@@ -74,7 +76,7 @@ def expected_artifacts(
 
 
 def expected_flow_dirs(config: ArcxConfig) -> Tuple[str, ...]:
-    """case run dir 底下應該存在的 <block>_<flow> 目錄。"""
+    """The <block>_<flow> directories that should exist in a case run dir."""
     names = []
     for block in config.enabled_blocks:
         name = block.output_dir_name
@@ -84,9 +86,11 @@ def expected_flow_dirs(config: ArcxConfig) -> Tuple[str, ...]:
 
 
 def _fill(template: str, block: CfgBlock, flow: str, case_id: str) -> str:
-    """套用路徑樣板。未知的 {變數} 保持原樣而不是丟例外 ——
-    設定寫錯時應該產生一個「找不到檔案」的 issue 讓人看到, 而不是讓整個
-    QA 流程崩掉。
+    """Apply a path template.
+
+    An unknown {placeholder} is left as-is rather than raising: a mistake in
+    settings should surface as a "file not found" issue somebody can see, not
+    as a crash that takes the whole QA pass down.
     """
     try:
         return template.format(flow=flow, block=block.name, case=case_id)

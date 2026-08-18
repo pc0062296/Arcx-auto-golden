@@ -1,7 +1,8 @@
-"""終端輸出格式化。
+"""Terminal output formatting.
 
-刻意不依賴任何第三方套件 (rich / tabulate) —— 內網環境安裝相依套件是摩擦,
-而表格渲染只需要幾十行。
+Deliberately free of third-party packages (rich, tabulate): installing
+dependencies on an air gapped network is friction, and table rendering is a
+few dozen lines.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from typing import List, Optional, Sequence
 
 
 def display_width(text: str) -> int:
-    """計算終端顯示寬度 (CJK 字元佔 2 格)。"""
+    """Terminal display width; wide (CJK) characters count as two columns."""
     width = 0
     for char in text:
         width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
@@ -46,9 +47,9 @@ def render_table(
     aligns: Optional[Sequence[str]] = None,
     max_col_width: int = 60,
 ) -> str:
-    """渲染一張對齊的文字表格。"""
+    """Render an aligned text table."""
     if not rows:
-        return "  (無資料)"
+        return "  (no data)"
 
     columns = len(headers)
     aligns = list(aligns or ["left"] * columns)

@@ -1,6 +1,6 @@
-"""arcx.cfg 解析。
+"""arcx.cfg parsing.
 
-這個檔案是 QA 的地圖 —— 解析錯了, 期望產出物就全錯。
+This file is QA's map: parse it wrongly and every expected artifact is wrong.
 """
 
 import os
@@ -47,13 +47,13 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(cfg.blocks[0].settings["RCX_TECH_QTF"], "/path/to/file")
 
     def test_output_dir_name(self):
-        """case run dir 底下的目錄名 = <block>_<QC_FLOW>。"""
+        """The directory inside a case run dir is <block>_<QC_FLOW>."""
         cfg = parse_arcx_cfg(self._write(REAL_CFG))
         self.assertEqual(cfg.blocks[0].output_dir_name,
                          "blocking_naming_qcap_calQCAP")
 
     def test_leading_zero_disables_a_setting(self):
-        """行首旗標 0 目前解讀為停用。"""
+        """A leading 0 disables the line."""
         cfg = parse_arcx_cfg(self._write(
             "1 BEGIN_SETTINGS: a\n1 QC_FLOW = calQCAP\n0 OPT = x\nEND_SETTINGS\n"))
         self.assertIn("OPT", cfg.blocks[0].disabled_keys)
@@ -71,7 +71,7 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(cfg.blocks[0].flow, "calQCAP")
 
     def test_settimgs_typo_tolerated(self):
-        """使用者範例中出現過 BEGIN_SETTIMGS 這個拼法。"""
+        """The BEGIN_SETTIMGS misspelling has been seen in the wild."""
         cfg = parse_arcx_cfg(self._write(
             "1 BEGIN_SETTIMGS: a\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n"))
         self.assertEqual([b.name for b in cfg.blocks], ["a"])
@@ -89,11 +89,12 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(cfg.blocks[0].warnings)
 
     def test_duplicate_block_name_warns(self):
-        """兩個同名 block 的產出目錄會互相覆蓋。"""
+        """Two blocks with one name write into the same output directory."""
         cfg = parse_arcx_cfg(self._write(
             "1 BEGIN_SETTINGS: a\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n"
             "1 BEGIN_SETTINGS: a\n1 QC_FLOW = calQRCFS\nEND_SETTINGS\n"))
-        self.assertTrue(any("出現 2 次" in w for w in cfg.warnings), cfg.warnings)
+        self.assertTrue(any("appears 2 times" in w for w in cfg.warnings),
+                        cfg.warnings)
 
     def test_empty_file_warns(self):
         cfg = parse_arcx_cfg(self._write(""))
@@ -126,10 +127,11 @@ END_SETTINGS
 
 
 class RealFormatTest(unittest.TestCase):
-    """使用者提供的真實 arcx.cfg 格式。
+    """The real arcx.cfg format.
 
-    這份範例揭露了兩個會讓 parser 完全失效的差異:
-    BEGIN_SETTING 是單數 (END_SETTINGS 卻是複數), 以及 g: 開頭的共同變數。
+    This sample exposed two differences that broke the parser outright:
+    BEGIN_SETTING is singular while END_SETTINGS is plural, and the g: prefixed
+    shared variables.
     """
 
     def setUp(self):
@@ -143,7 +145,9 @@ class RealFormatTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_begin_setting_singular_parses(self):
-        """BEGIN_SETTING (單數) 必須能解析 —— 否則整個檔案變成 0 個 block。"""
+        """BEGIN_SETTING (singular) must parse, or the whole file yields
+        zero blocks.
+        """
         self.assertEqual([b.name for b in self.cfg.blocks],
                          ["blocking_nameing_1"])
 
@@ -151,7 +155,7 @@ class RealFormatTest(unittest.TestCase):
         self.assertEqual(self.cfg.blocks[0].flow, "calQCAP")
 
     def test_globals_collected_separately(self):
-        """g: 開頭的共同變數不屬於任何 block。"""
+        """g: prefixed shared variables belong to no block."""
         self.assertEqual(self.cfg.globals["QCA"], "Yes")
         self.assertEqual(self.cfg.globals["O_CAL_SET_ENV"],
                          "setenv LICENSE 123@lic9")
@@ -161,22 +165,24 @@ class RealFormatTest(unittest.TestCase):
         self.assertEqual(len(self.cfg.blocks), 1)
 
     def test_value_with_spaces_preserved(self):
-        """TOOL_VERSION_LVS 的值是「指令 + 參數」, 不是單純的路徑。"""
+        """TOOL_VERSION_LVS holds a command plus arguments, not a bare path."""
         self.assertEqual(self.cfg.blocks[0].settings["TOOL_VERSION_LVS"],
                          "/source.csh tool_build")
 
     def test_no_spurious_warnings(self):
-        """真實格式不該產生任何警告 —— 每次都警告等於沒有警告。"""
+        """The real format must produce no warnings: warning every time is
+        the same as not warning at all.
+        """
         self.assertEqual(self.cfg.warnings, ())
 
     def test_settimg_typo_still_warns(self):
-        """只有 N 打成 M 這種明顯筆誤才警告。"""
+        """Only an obvious typo -- N written as M -- warrants a warning."""
         path = os.path.join(self.tmp.name, "typo.cfg")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("1 BEGIN_SETTIMG : x\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n")
         cfg = parse_arcx_cfg(path)
         self.assertEqual([b.name for b in cfg.blocks], ["x"])
-        self.assertTrue(any("M" in w for w in cfg.warnings), cfg.warnings)
+        self.assertTrue(any("N typed as M" in w for w in cfg.warnings), cfg.warnings)
 
     def test_disabled_global_skipped(self):
         path = os.path.join(self.tmp.name, "g.cfg")

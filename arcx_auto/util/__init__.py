@@ -1,4 +1,4 @@
-"""共用小工具。不依賴 arcx_auto 的其他模組。"""
+"""Shared helpers. Depends on nothing else in arcx_auto."""
 
 from arcx_auto.util.atomic import atomic_write_json, append_jsonl, read_json
 from arcx_auto.util.textfmt import (

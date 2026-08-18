@@ -1,8 +1,9 @@
-"""L2 Service Layer —— 業務邏輯。
+"""L2 Service Layer - business logic.
 
-只透過 L1 adapter 碰外界。其中 StateEngine 與 WavePlanner 是**完全純函數**,
-可以在沒有 LSF / NFS / Arcx 的機器上完整測試 —— 這是本專案最重要的一筆設計投資,
-因為真實 job 要跑好幾天, 靠實跑來驗證邏輯的迭代速度無法接受。
+Reaches the outside world only through L1 adapters. StateEngine and
+WavePlanner are **completely pure functions**, testable on a machine with no
+LSF, no NFS and no Arcx -- the most valuable design investment in the project,
+because real jobs take days and validating logic by running them is hopeless.
 """
 
 from arcx_auto.services.state_engine import (

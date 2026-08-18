@@ -1,4 +1,4 @@
-"""Daemon: 持久化、重啟還原、錯誤隔離、單一實例。"""
+"""Daemon: persistence, restart recovery, error isolation, single instance."""
 
 import json
 import os
@@ -61,13 +61,13 @@ class DaemonRunTest(unittest.TestCase):
                          {"1000", "1001"})
 
     def test_state_detects_fake_success(self):
-        """demo 裡有帶 .complete marker 卻沒有產出物的 case。"""
+        """The demo contains cases with a .complete marker but no artifacts."""
         self._daemon().run()
         ids = {i["id"] for i in self._state()["issues"]}
         self.assertIn("NETLIST_MISSING", ids)
 
     def test_manifest_is_immutable(self):
-        """manifest 記錄的是「當初的意圖」, 後續不該被改寫。"""
+        """The manifest records the original intent and must not be rewritten."""
         self._daemon().run()
         store = RunStore(self.state_root, "t")
         first = store.read_manifest()
@@ -93,24 +93,30 @@ class DaemonRunTest(unittest.TestCase):
         self.assertIn("to_state", events[0])
 
     def test_restart_restores_previous_snapshots(self):
-        """重啟後必須接續上次的判定, 否則 stall 計時每次重啟都歸零。"""
+        """A restart must resume the previous verdicts, or stall timers reset
+        to zero every time.
+        """
         self._daemon().run()
         second = self._daemon()
         second.run()
         self.assertEqual(len(second.monitor.previous), 2)
 
     def test_works_without_any_prior_state(self):
-        """state.json 不見了也要能從 run folder 重建 —— 檔案系統才是真相。"""
+        """Losing state.json must still rebuild from the run folders: the
+        filesystem is the truth.
+        """
         self._daemon().run()
         os.remove(RunStore(self.state_root, "t").state_path)
         self.assertEqual(self._daemon().run(), 0)
         self.assertEqual(self._state()["totals"]["indexes"], 2)
 
     def test_scan_failure_does_not_kill_daemon(self):
-        """NFS 抽風、LSF 逾時是常態, 一次 tick 失敗不能讓監控整個死掉。"""
+        """NFS hiccups and LSF timeouts are routine; one failed tick must not
+        kill the monitoring.
+        """
         class Exploding(MonitorService):
             def scan(self, *args, **kwargs):
-                raise RuntimeError("模擬 NFS 抽風")
+                raise RuntimeError("simulated NFS hiccup")
 
         daemon = Daemon(
             DaemonOptions(run_id="boom", wave_dirs=[self.demo["wave_dir"]],
@@ -120,10 +126,12 @@ class DaemonRunTest(unittest.TestCase):
         )
         self.assertEqual(daemon.run(), 0)
         state = self._state("boom")
-        self.assertIn("模擬 NFS 抽風", state["daemon"]["last_error"])
+        self.assertIn("simulated NFS hiccup", state["daemon"]["last_error"])
 
     def test_error_state_still_updates_timestamp(self):
-        """掃描失敗也要更新 state.json, 否則 UI 顯示過期資料卻看起來正常。"""
+        """A failed scan still updates state.json, or the UI shows stale data
+        while looking healthy.
+        """
         class Exploding(MonitorService):
             def scan(self, *args, **kwargs):
                 raise RuntimeError("x")
@@ -143,7 +151,7 @@ class DaemonRunTest(unittest.TestCase):
         self.assertEqual(self._state("multi")["daemon"]["tick"], 3)
 
     def test_second_daemon_is_refused(self):
-        """daemon 是唯一寫入者 —— 兩個同時跑會直接破壞這個不變式。"""
+        """The daemon is the single writer; two at once break that outright."""
         first = self._daemon(run_id="lock")
         first.store.ensure()
         lock = FileLock(first.store.dir + "/daemon.lock").acquire()
@@ -153,11 +161,11 @@ class DaemonRunTest(unittest.TestCase):
             lock.release()
 
     def test_arcx_cfg_auto_discovered_in_wave_dir(self):
-        """沒指定 --arcx-cfg 時應該在 wave 目錄下找到它。"""
+        """Without --arcx-cfg it should be found in the wave directory."""
         daemon = self._daemon(run_id="cfg")
         daemon.run()
         ids = {i["id"] for i in self._state("cfg")["issues"]}
-        # 找得到 cfg -> 不會出現「不知道該檢查什麼」
+        # cfg found -> no "I do not know what to check" issue
         self.assertNotIn("CFG_EXPECTATION_UNAVAILABLE", ids)
 
     def test_missing_cfg_yields_unknown_issue(self):

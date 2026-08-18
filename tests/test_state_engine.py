@@ -1,7 +1,8 @@
-"""StateEngine: 狀態判定。
+"""StateEngine: deciding states.
 
-全部是純函數測試 —— 不碰檔案系統、不碰 LSF。這正是把判定邏輯做成純函數的
-價值: 可以在毫秒內窮舉「job 跑了三天才卡住」這種真實情況下要等三天的情境。
+Every test is pure -- no filesystem, no LSF. That is the payoff of keeping the
+decision logic pure: a scenario like "the job ran for three days and then got
+stuck" can be enumerated in milliseconds instead of waiting three days.
 """
 
 import unittest
@@ -57,9 +58,10 @@ class BasicTransitionTest(unittest.TestCase):
         self.assertEqual(snap.state, CaseState.COMPLETED_MARKER)
 
     def test_complete_wins_over_run(self):
-        """marker 優先序 complete > run > queue。
+        """Marker precedence is complete > run > queue.
 
-        .run 沒被清掉不影響「Arcx 認為跑完了」這個事實, 但要記錄不一致。
+        A .run that was never cleared does not change the fact that Arcx
+        considers the case finished, but the inconsistency is recorded.
         """
         snap, _ = transition_case(
             None, obs(markers=[MarkerKind.COMPLETE, MarkerKind.RUN]), ctx())
@@ -67,9 +69,11 @@ class BasicTransitionTest(unittest.TestCase):
         self.assertTrue(snap.marker_inconsistent)
 
     def test_complete_marker_is_not_done(self):
-        """.complete 只代表 Arcx 認為跑完, 不代表結果正確。
+        """.complete only means Arcx thinks it finished, not that the result
+        is correct.
 
-        DONE 必須等 QA 驗證通過 (Phase 1) —— 這個分離是抓「假成功」的關鍵。
+        DONE requires QA to pass; that separation is what catches false
+        success.
         """
         snap, _ = transition_case(None, obs(markers=[MarkerKind.COMPLETE]), ctx())
         self.assertNotEqual(snap.state, CaseState.DONE)
@@ -101,7 +105,9 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(second.silent_for(T0 + 1800), 1800.0)
 
     def test_stall_detected_past_threshold(self):
-        """STALLED 的定義是「job 還活著但沒有進度」, 所以必須有活著的 LSF job。"""
+        """STALLED means "alive but not progressing", so a live LSF job is
+        required.
+        """
         alive = LsfJobView(job_id="7", state=LsfState.RUN)
         c = ctx(now=T0)
         first, _ = transition_case(
@@ -118,10 +124,11 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(second.state, CaseState.STALLED)
 
     def test_lost_takes_priority_over_stalled(self):
-        """job 消失 + log 不動 -> LOST 而非 STALLED。
+        """A vanished job plus a still log means LOST, not STALLED.
 
-        兩者都成立時 LOST 是更精確的診斷 (job 死了), 而 STALLED 會誤導工程師
-        去查「為什麼跑很慢」, 實際上它根本沒在跑。
+        When both hold, LOST is the more precise diagnosis (the job died).
+        STALLED would send an engineer looking for why it is slow when it is
+        not running at all.
         """
         c = ctx(now=T0, grace=300.0, stall=3600.0)
         first, _ = transition_case(
@@ -134,10 +141,12 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(second.state, CaseState.LOST)
 
     def test_first_observation_seeds_silence_from_mtime(self):
-        """關鍵: 首次觀測 (或 daemon 重啟後) 必須用 mtime 當起算點。
+        """Key: the first observation (and every daemon restart) must seed
+        from mtime.
 
-        若一律從 now 起算, 一個卡住三天的 case 每次重啟都會看起來很健康,
-        而系統設計要求「重啟後能從檔案系統重建全部狀態」。
+        Always starting from now would make a case stuck for three days look
+        healthy after every restart, while the design requires rebuilding all
+        state from the filesystem.
         """
         snap, _ = transition_case(
             None,
@@ -147,7 +156,7 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(snap.state, CaseState.STALLED)
 
     def test_future_mtime_is_clamped(self):
-        """時鐘不同步時不該出現負的靜止時間。"""
+        """Clock skew must not produce a negative quiet time."""
         snap, _ = transition_case(
             None,
             obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0 + 5000),
@@ -165,25 +174,28 @@ class LsfTest(unittest.TestCase):
         self.assertEqual(snap.state, CaseState.SUSPENDED)
 
     def test_lost_requires_grace_period(self):
-        """LSF job 消失後不能立刻判 LOST —— marker 與 LSF 的可見性有落差。"""
+        """A vanished LSF job is not immediately LOST: markers and LSF have
+        different visibility lag.
+        """
         c = ctx(now=T0, grace=300.0)
         first, _ = transition_case(
             None, obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0), c)
-        # job 消失, 但還在 grace 期內
+        # the job is gone, but still inside the grace period
         mid, _ = transition_case(
             first, obs(markers=[MarkerKind.RUN], log_size=100),
             ctx(now=T0 + 100, grace=300.0))
         self.assertEqual(mid.state, CaseState.RUNNING)
-        # 超過 grace
+        # past the grace period
         late, _ = transition_case(
             mid, obs(markers=[MarkerKind.RUN], log_size=100),
             ctx(now=T0 + 400, grace=300.0))
         self.assertEqual(late.state, CaseState.LOST)
 
     def test_never_lost_when_lsf_data_unavailable(self):
-        """bjobs 抽風時絕不能把所有 case 判成 LOST。
+        """A bjobs hiccup must never mark every case LOST.
 
-        寧可停在 RUNNING 讓人看到, 也不要誤報一整片。
+        Better to leave them RUNNING and visible than to raise a false alarm
+        across the board.
         """
         c = ctx(now=T0, lsf_available=False)
         first, _ = transition_case(
@@ -209,16 +221,17 @@ class LsfTest(unittest.TestCase):
         self.assertEqual(back.state, CaseState.RUNNING)
 
     def test_completed_case_never_judged_lost(self):
-        """已完成的 case 沒有 LSF job 是正常的, 不該被判 LOST。"""
+        """A finished case has no LSF job, and that is normal, not LOST."""
         snap, _ = transition_case(
             None, obs(markers=[MarkerKind.COMPLETE]), ctx(now=T0))
         self.assertEqual(snap.state, CaseState.COMPLETED_MARKER)
 
 
     def test_queued_case_also_goes_lost_when_job_never_appears(self):
-        """.queue marker 存在但 LSF 從頭到尾沒有這個 job -> 從未真的被提交。
+        """A .queue marker with no LSF job ever means it was never submitted.
 
-        grace period 涵蓋 Arcx「先寫 marker 再 bsub」的時間差。
+        The grace period covers the gap between Arcx writing the marker and
+        calling bsub.
         """
         c = ctx(now=T0, grace=300.0)
         first, _ = transition_case(None, obs(markers=[MarkerKind.QUEUE]), c)
@@ -264,7 +277,7 @@ class EventTest(unittest.TestCase):
 
 
 class CompletenessTest(unittest.TestCase):
-    """rerun 刪除清單的判定 (architecture §6.1)。"""
+    """Deciding the rerun delete list (architecture 6.1)."""
 
     def _snap(self, state, inconsistent=False):
         from arcx_auto.domain.models import CaseSnapshot
@@ -289,10 +302,11 @@ class CompletenessTest(unittest.TestCase):
             self.assertEqual(result, Completeness.INCOMPLETE, state)
 
     def test_unknown_state_is_unknown_not_complete(self):
-        """關鍵安全性質: 判不出來時絕不能傾向「保留」。
+        """A key safety property: undecidable must never lean towards keeping.
 
-        漏刪未完成 -> 殘缺結果被當成功交付 (不可回收);
-        誤刪已完成 -> 只是浪費一次運算  (可回收)。
+        Failing to delete an incomplete case ships a truncated result as a
+        success, which cannot be undone. Deleting a complete one only wastes a
+        run, which can.
         """
         result, _ = classify_completeness(self._snap(CaseState.UNKNOWN))
         self.assertEqual(result, Completeness.UNKNOWN)

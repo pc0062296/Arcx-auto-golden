@@ -1,11 +1,13 @@
-"""狀態機 —— **完全純函數**, 零 I/O。
+"""The state machine -- **completely pure**, zero I/O.
 
-輸入: 前一次的判定 (CaseSnapshot) + 這次的觀測 (CaseObservation) + 門檻
-輸出: 新的判定 + 狀態轉移事件
+    in:  the previous verdict (CaseSnapshot) + this observation
+         (CaseObservation) + thresholds
+    out: a new verdict + the state transition events
 
-把「解釋」與「觀測」分開的價值:
-  * 可以用假資料在毫秒內窮舉所有情境, 不需要真的跑 job
-  * 判定邏輯要調整時, 完全不會碰到 I/O 程式碼
+Separating interpretation from observation buys two things:
+  * every situation can be enumerated with fake data in milliseconds instead of
+    by actually running jobs
+  * changing a judgement never touches I/O code
 """
 
 from __future__ import annotations
@@ -26,11 +28,12 @@ from arcx_auto.domain.models import (
 
 @dataclass(frozen=True)
 class TransitionContext:
-    """判定門檻。
+    """Decision thresholds.
 
-    ``lsf_data_available`` 是刻意存在的安全開關: LSF 查不到時
-    (開發機、bjobs 暫時抽風), 絕不能因為「找不到 job」就把 case 判成 LOST。
-    寧可停在 RUNNING 讓人看到, 也不要誤報。
+    ``lsf_data_available`` is a deliberate safety switch: when LSF cannot be
+    queried (a dev box, or bjobs having a bad day) a case must never be called
+    LOST just because no job was found. Better to leave it RUNNING and visible
+    than to raise a false alarm across the board.
     """
 
     now: float
@@ -57,7 +60,7 @@ class TransitionContext:
 
 
 # --------------------------------------------------------------------------
-# 單一 case
+# One case
 # --------------------------------------------------------------------------
 
 def transition_case(
@@ -65,22 +68,25 @@ def transition_case(
     obs: CaseObservation,
     ctx: TransitionContext,
 ) -> Tuple[CaseSnapshot, List[StateEvent]]:
-    """推導單一 case 的新狀態。純函數, 相同輸入永遠得到相同輸出。"""
+    """Derive the new state of one case. Pure: same input, same output."""
     now = ctx.now
 
-    # --- 1. 進度追蹤 ------------------------------------------------------
-    # 用 log 的 size 而非 mtime 判斷「有沒有進度」: NFS 的 mtime 不可靠,
-    # 而且有些 tool 會 touch 檔案卻沒有實質輸出。只有 size 真的變大才算有進度。
+    # --- 1. Progress tracking --------------------------------------------
+    # Progress is measured by log size, not mtime: NFS mtimes are unreliable
+    # and some tools touch a file without writing anything. Only real growth
+    # counts as progress.
     #
-    # 但**第一次觀測**沒有歷史可比, 這時改用 mtime 當作起算點而不是 now。
-    # 這件事比看起來重要: daemon 重啟 / CLI 重跑時, 若一律從 now 起算,
-    # 一個真的卡住三天的 case 會看起來很健康, 而且每次重啟都再健康一次。
-    # 用 mtime 當種子, 重啟後立刻就能還原正確的靜止時間 (架構決策 2:
-    # 系統必須能從檔案系統重建全部狀態)。
+    # The **first** observation has no history to compare against, so it seeds
+    # from mtime rather than from now. That matters more than it looks: if it
+    # always started from now, a case that has been stuck for three days would
+    # look healthy after every daemon restart -- and would look healthy again
+    # after the next one. Seeding from mtime restores the true quiet time
+    # immediately (architecture decision 2: rebuild all state from the
+    # filesystem).
     size = obs.log_size or 0
     if prev is None:
         last_progress_at = obs.log_mtime if obs.log_mtime else now
-        # 觀測到未來時間 (時鐘不同步) 時退回 now, 避免出現負的靜止時間
+        # A timestamp in the future (clock skew) would give negative quiet time
         if last_progress_at > now:
             last_progress_at = now
         last_progress_size = size
@@ -91,7 +97,7 @@ def transition_case(
         last_progress_at = prev.last_progress_at
         last_progress_size = prev.last_progress_size
 
-    # --- 2. LSF 缺席追蹤 --------------------------------------------------
+    # --- 2. Tracking a missing LSF job -----------------------------------
     lsf_state = obs.lsf.state if obs.lsf else None
     lsf_job_id = obs.lsf.job_id if obs.lsf else (prev.lsf_job_id if prev else None)
 
@@ -106,7 +112,7 @@ def transition_case(
     else:
         lsf_missing_since = None
 
-    # --- 3. 狀態判定 ------------------------------------------------------
+    # --- 3. Decide the state ---------------------------------------------
     state, reason = _decide_state(
         obs=obs,
         ctx=ctx,
@@ -115,8 +121,9 @@ def transition_case(
         last_progress_at=last_progress_at,
     )
 
-    # 用 base_state 比對而不是 state: state 可能已被 StateResolver 收斂成
-    # DONE / FAILED / STALLED, 拿它來比會讓 entered_state_at 每個 tick 重置。
+    # Compare base against base, not against the resolved state: `state` may
+    # already have been narrowed to DONE / FAILED / STALLED by StateResolver,
+    # and comparing against that would reset entered_state_at every tick.
     prev_base = (prev.base_state or prev.state) if prev else None
     entered_state_at = (
         prev.entered_state_at if prev and prev_base == state else now
@@ -145,7 +152,7 @@ def transition_case(
         events.append(
             StateEvent(
                 ts=now,
-                index_key="",  # 由 transition_index_run 補上
+                index_key="",  # filled in by transition_index_run
                 case_id=obs.case_id,
                 from_state=prev_base,
                 to_state=state,
@@ -168,61 +175,66 @@ def _decide_state(
     lsf_missing_since: Optional[float],
     last_progress_at: float,
 ) -> Tuple[CaseState, str]:
-    """狀態判定的優先順序。
+    """State precedence.
 
-    marker 的優先序是 complete > run > queue —— 即使 .run 沒被清掉,
-    只要 .complete 出現就視為 Arcx 認定跑完 (不一致另外由 QA 記錄)。
+    Markers rank complete > run > queue: even if .run was never cleared, a
+    .complete means Arcx considers the case finished. The inconsistency is
+    recorded separately.
     """
     now = ctx.now
 
-    # 3.1 完成 marker 優先。注意: 這只代表 Arcx 認為跑完了,
-    #     不代表結果正確 —— DONE 要等 QA 驗證通過 (Phase 1)。
+    # 3.1 A complete marker wins. Note this only means Arcx believes it
+    #     finished; DONE requires QA to pass.
     if obs.has_complete_marker:
         if obs.marker_inconsistent:
-            return (CaseState.COMPLETED_MARKER, "有 .complete, 但 .run/.queue 未清除")
-        return (CaseState.COMPLETED_MARKER, "有 .complete marker, 待 QA 驗證")
+            return (CaseState.COMPLETED_MARKER,
+                    ".complete present but .run/.queue were not cleared")
+        return (CaseState.COMPLETED_MARKER,
+                ".complete marker present, awaiting QA")
 
-    # 3.2 LSF 明確回報 suspended
+    # 3.2 LSF explicitly reports a suspension
     if lsf_state is not None and lsf_state.is_suspended:
-        return (CaseState.SUSPENDED, "LSF 回報 %s" % lsf_state.value)
+        return (CaseState.SUSPENDED, "LSF reports %s" % lsf_state.value)
 
-    # 3.3 job 應該在但 LSF 找不到 -> 過了 grace period 才敢判 LOST
+    # 3.3 A job should exist but LSF has none -- only LOST past the grace period
     if lsf_missing_since is not None:
         missing_for = now - lsf_missing_since
         if missing_for >= ctx.lost_grace_sec:
             return (
                 CaseState.LOST,
-                "marker 停在執行中, 但 LSF job 已消失 %.0fs" % missing_for,
+                "marker says in flight but the LSF job has been gone for %.0fs"
+                % missing_for,
             )
-        # 還在 grace 期內: 不改判, 沿用 marker 的解讀
+        # still inside the grace period: keep reading the markers as they are
 
-    # 3.4 執行中
+    # 3.4 Running
     if obs.has_run_marker:
         silent = now - last_progress_at
         if silent >= ctx.stall_threshold_sec:
             return (
                 CaseState.STALLED,
-                "有 .run marker, 但 log 已 %.0f 分鐘沒有成長" % (silent / 60.0),
+                ".run marker present but the log has not grown for %.0f minutes"
+                % (silent / 60.0),
             )
-        return (CaseState.RUNNING, "有 .run marker")
+        return (CaseState.RUNNING, ".run marker present")
 
-    # 3.5 排隊中
+    # 3.5 Queued
     if obs.has_queue_marker:
-        return (CaseState.QUEUED, "有 .queue marker")
+        return (CaseState.QUEUED, ".queue marker present")
 
-    # 3.6 沒有任何 marker
+    # 3.6 No markers at all
     if obs.case_dir_exists:
         return (
             CaseState.PENDING,
-            "有 case run dir 但沒有任何 marker (尚未提交, 或 marker 遺失)",
+            "case run dir exists but no marker (not submitted, or marker lost)",
         )
     if obs.log_path:
-        return (CaseState.UNKNOWN, "只有 log 沒有 marker 也沒有 run dir")
-    return (CaseState.PENDING, "尚未出現任何 marker")
+        return (CaseState.UNKNOWN, "a log with no marker and no run dir")
+    return (CaseState.PENDING, "no marker has appeared yet")
 
 
 # --------------------------------------------------------------------------
-# 整個 index run folder
+# A whole index run folder
 # --------------------------------------------------------------------------
 
 def transition_index_run(
@@ -230,7 +242,7 @@ def transition_index_run(
     obs: IndexRunObservation,
     ctx: TransitionContext,
 ) -> Tuple[IndexRunSnapshot, List[StateEvent]]:
-    """對一個 index run folder 的所有 case 做狀態轉移。"""
+    """Run the transition for every case in one index run folder."""
     prev_cases: Dict[str, CaseSnapshot] = dict(prev.cases) if prev else {}
     new_cases: Dict[str, CaseSnapshot] = {}
     events: List[StateEvent] = []
@@ -243,12 +255,13 @@ def transition_index_run(
         for event in case_events:
             events.append(replace(event, index_key=obs.index_key))
 
-    # 曾經看過但這次消失的 case: 保留上次的判定, 不要讓它從畫面上憑空不見。
-    # 目錄被刪或掃描失敗都可能造成這種情況, 值得留著讓人發現。
+    # Cases seen before but missing now keep their previous verdict rather than
+    # vanishing from the display. A deleted directory or a failed scan both
+    # cause this, and both are worth noticing.
     for case_id, old in prev_cases.items():
         if case_id not in new_cases:
             new_cases[case_id] = replace(
-                old, note="本次掃描未觀測到此 case (可能已被刪除)"
+                old, note="not observed in this scan (may have been deleted)"
             )
 
     snapshot = IndexRunSnapshot(
@@ -262,33 +275,36 @@ def transition_index_run(
 
 
 # --------------------------------------------------------------------------
-# rerun 的刪除清單判定
+# The rerun delete list
 # --------------------------------------------------------------------------
 
 def classify_completeness(snapshot: CaseSnapshot) -> Tuple[Completeness, str]:
-    """判定 rerun 時「這個 case 的 run dir 要不要刪掉重跑」。
+    """Decide whether a rerun should delete this case's run dir.
 
-    刻意的例外 (architecture §6.1): 在這個決策上「不確定 -> 傾向刪掉重跑」,
-    與系統其他地方的「不確定就停手」相反。理由是後果不對稱 ——
-      誤刪已完成  -> 浪費一次運算, 結果仍正確            (可回收)
-      漏刪未完成  -> 殘缺結果被當成功交付                 (不可回收)
+    A deliberate exception (architecture 6.1): here "not sure" leans towards
+    deleting and rerunning, the opposite of the rest of the system. The costs
+    are asymmetric:
+      mistakenly deleting a complete case -> one wasted run, result still right
+      mistakenly keeping an incomplete one -> a truncated result shipped as good
 
-    UNKNOWN 預設會進刪除清單, 但在 UI 以不同顏色標示、可取消勾選,
-    且刪除前一律先備份到 .arcx_auto/attempts/N/。
+    UNKNOWN therefore lands in the delete list by default, but the UI marks it
+    differently and it can be unticked, and everything is backed up into
+    .arcx_auto/attempts/N/ before deletion.
     """
     state = snapshot.state
 
     if state == CaseState.DONE:
-        return (Completeness.COMPLETE, "QA 已驗證通過")
+        return (Completeness.COMPLETE, "QA verified")
     if state == CaseState.COMPLETED_MARKER:
         if snapshot.marker_inconsistent:
             return (
                 Completeness.UNKNOWN,
-                "有 .complete 但 .run/.queue 未清除, 收尾狀態存疑",
+                ".complete present but .run/.queue were not cleared; "
+                "the tidy-up state is doubtful",
             )
-        return (Completeness.COMPLETE, "有 .complete marker")
+        return (Completeness.COMPLETE, ".complete marker present")
     if state in (CaseState.PENDING, CaseState.QUEUED, CaseState.RUNNING,
                  CaseState.SUSPENDED, CaseState.STALLED, CaseState.LOST,
                  CaseState.FAILED):
-        return (Completeness.INCOMPLETE, "狀態為 %s, 未完成" % state.value)
-    return (Completeness.UNKNOWN, "狀態為 %s, 無法判定" % state.value)
+        return (Completeness.INCOMPLETE, "state is %s, not finished" % state.value)
+    return (Completeness.UNKNOWN, "state is %s, cannot decide" % state.value)

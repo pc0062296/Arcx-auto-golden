@@ -1,30 +1,31 @@
-"""檔案系統 adapter。
+"""Filesystem adapter.
 
-真實的 index run folder 長這樣:
+A real index run folder looks like this:
 
-    .queue.NDIO_1                  <- marker, case id 是 cell 名稱
+    .queue.NDIO_1                  markers; the case id is a cell name
     .run.PDIO_1
     .complete.NTN_1
-    NDIO_1/  PDIO_1/  NTN_1/       <- 每個 case 的 run dir (rerun 時刪這些)
-    QC_Cc/  QC_Ct/  QC_Spice/      <- Arcx 整理的 report, 不是 case
-    submit_bjob_cmd_file_1.log     <- log, 檔名只有流水號
-    cmd_folder/cmd_file_1          <- 送進 LSF 的 script, 內含 `cd <case run dir>`
+    NDIO_1/  PDIO_1/  NTN_1/       per-case run dirs (a rerun deletes these)
+    QC_Cc/  QC_Ct/  QC_Spice/      reports Arcx assembles, not cases
+    submit_bjob_cmd_file_1.log     logs, named only by sequence number
+    cmd_folder/cmd_file_1          the submitted script, containing `cd <dir>`
 
-兩個關鍵慣例:
+Two conventions drive the implementation:
 
-  1. **case id 是 cell 名稱, 沒有共同樣式。**
-     所以 case run dir 用排除法辨識 (不是 QC_* / cmd_folder / 隱藏目錄),
-     而不是用 include pattern。
+  1. **Case ids are cell names with no shared pattern.** Case run dirs are
+     therefore identified by exclusion (not QC_*, not cmd_folder, not hidden)
+     rather than by an include pattern.
 
-  2. **log 檔名與 case 沒有直接關係。**
-     submit_bjob_cmd_file_1.log 依編號配對 cmd_folder/cmd_file_1,
-     再從該 script 的 `cd <path>` 得知它屬於哪個 case。
-     這是唯一可靠的對應方式 —— 編號順序不保證等於任何排序。
+  2. **Log filenames say nothing about their case.** submit_bjob_cmd_file_1.log
+     pairs by number with cmd_folder/cmd_file_1, and that script's `cd <path>`
+     names the case. It is the only reliable mapping -- the numbering is not
+     guaranteed to match any ordering.
 
-效能設計 (NFS 上動輒數萬個 entry):
-  * 一次 os.scandir 掃完整個目錄, 在記憶體裡分類, 不做 per-case 的 exists()
-  * cmd_file 只讀開頭幾 KB, 且結果快取 (script 送出後就不會再變)
-  * log 只 stat (size/mtime), 不讀內容
+Performance notes for NFS folders with tens of thousands of entries:
+  * one os.scandir pass classifies the whole directory in memory; never
+    per-case exists() calls, which become N NFS round trips
+  * cmd_file contents are read once and cached; the script never changes
+  * logs are only stat'ed for size and mtime, never read
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ from arcx_auto.domain.models import CaseObservation, IndexRunObservation
 
 
 class FsAdapter:
-    """封裝所有對 run folder 的唯讀存取。"""
+    """Wraps every read-only access to a run folder."""
 
     def __init__(self, layout: Optional[LayoutSettings] = None) -> None:
         self.layout = layout or LayoutSettings()
@@ -51,11 +52,12 @@ class FsAdapter:
         self._non_case_res = [
             re.compile(pattern) for pattern in self.layout.non_case_dir_regexes
         ]
-        # cmd_file 路徑 -> 解析出的執行路徑。script 送出後不會變, 只需讀一次。
+        # cmd_file path -> resolved execution path. Read once; scripts do not
+        # change after submission.
         self._cmd_cache: Dict[str, Optional[str]] = {}
 
     # ------------------------------------------------------------------
-    # 掃描 index run folder
+    # Scanning an index run folder
     # ------------------------------------------------------------------
 
     def scan_index_run_folder(
@@ -64,13 +66,14 @@ class FsAdapter:
         index_key: Optional[str] = None,
         now: Optional[float] = None,
     ) -> IndexRunObservation:
-        """掃描一個 index run folder, 產出觀測快照。
+        """Scan one index run folder into an observation.
 
-        case 的來源刻意取三者的**聯集**: marker / case run dir / cmd_file 解析出的 log。
-        三者缺一都代表某種異常, 只看其中一個會漏掉:
-          - 只有 dir 沒有 marker  -> case 建立了但從未被提交
-          - 只有 marker 沒有 dir  -> 目錄被誤刪或尚未建立
-          - 只有 log 沒有 marker  -> marker 寫入失敗
+        Cases are the **union** of markers, case run dirs, and cmd_file-resolved
+        logs. Each missing piece signals a different failure, so looking at only
+        one of them loses information:
+          - dir but no marker  -> the case exists but was never submitted
+          - marker but no dir  -> the directory was deleted, or not yet created
+          - log but no marker  -> the marker write failed
         """
         import time
 
@@ -83,7 +86,7 @@ class FsAdapter:
                 index_key=key,
                 run_folder=run_folder,
                 observed_at=now,
-                error="run folder 不存在或不是目錄",
+                error="run folder does not exist or is not a directory",
             )
 
         try:
@@ -93,7 +96,7 @@ class FsAdapter:
                 index_key=key,
                 run_folder=run_folder,
                 observed_at=now,
-                error="無法讀取 run folder: %s" % exc,
+                error="cannot read run folder: %s" % exc,
             )
 
         markers: Dict[str, Set[MarkerKind]] = {}
@@ -110,15 +113,15 @@ class FsAdapter:
             if marker_match:
                 try:
                     kind = MarkerKind(marker_match.group("kind"))
-                except ValueError:  # pragma: no cover - regex 已限定三種
+                except ValueError:  # pragma: no cover - regex limits the kinds
                     unknown_markers.append((name, marker_match.group("case")))
                     continue
                 markers.setdefault(marker_match.group("case"), set()).add(kind)
                 continue
 
-            # 已知三種以外、但長得像 marker 的檔案。使用者確認這不正常,
-            # 所以獨立記錄並在 UI 特別顯示 —— 而且它仍然證明「這個 case 存在」,
-            # 因此下面會把它的 case id 併入 case 清單。
+            # Shaped like a marker but not one of the known three. Confirmed
+            # abnormal, so it is recorded separately and surfaced in the UI.
+            # It still proves the case exists, so its id joins the case list.
             any_marker = self._marker_any_re.match(name)
             if any_marker:
                 unknown_markers.append((name, any_marker.group("case")))
@@ -133,9 +136,8 @@ class FsAdapter:
                 if self._report_re.match(name):
                     report_dirs.append(name)
                 elif self._is_case_dir_name(name):
-                    # case run dir 的名字就是 cell 名稱, 用排除法辨識
                     case_dirs[name] = entry.path
-                # 其餘 (cmd_folder / 隱藏目錄) 是已知的非 case 目錄, 不算 unmatched
+                # anything else (cmd_folder, hidden dirs) is a known non-case
                 continue
 
             log_match = self._log_re.match(name)
@@ -145,7 +147,6 @@ class FsAdapter:
 
             unmatched.append(name)
 
-        # log -> cmd_file -> case
         logs_by_case, cmd_by_case, exec_by_case, unresolved = self._resolve_logs(
             run_folder, logs_by_num
         )
@@ -187,11 +188,12 @@ class FsAdapter:
         )
 
     def _is_case_dir_name(self, name: str) -> bool:
-        """排除法: 不是 report / cmd_folder / 隱藏目錄的, 就當作 case run dir。
+        """Exclusion rule: not a report, not cmd_folder, not hidden -> a case.
 
-        用排除法而非 include pattern, 是因為 case id 是 cell 名稱
-        (NDIO_1 / PDIO_1 / NTN_1 ...), 沒有共同樣式可比對。
-        代價是新增的非 case 目錄會被誤認 —— 所以排除清單放在設定裡可擴充。
+        Exclusion rather than an include pattern because case ids are cell names
+        (NDIO_1, PDIO_1, NTN_1) with nothing in common. The cost is that a new
+        kind of non-case directory would be misread, which is why the exclusion
+        list is configurable.
         """
         return not any(pattern.match(name) for pattern in self._non_case_res)
 
@@ -202,9 +204,9 @@ class FsAdapter:
     def _resolve_logs(
         self, run_folder: str, logs_by_num: Dict[str, str]
     ) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str], List[str]]:
-        """把每個 log 依編號配對 cmd_file, 再解析出它屬於哪個 case。
+        """Pair each log with its cmd_file by number and resolve its case.
 
-        回傳 (logs_by_case, cmd_by_case, exec_by_case, unresolved_logs)。
+        Returns (logs_by_case, cmd_by_case, exec_by_case, unresolved_logs).
         """
         logs_by_case: Dict[str, str] = {}
         cmd_by_case: Dict[str, str] = {}
@@ -236,16 +238,16 @@ class FsAdapter:
     def read_cmd_exec_path(
         self, cmd_path: str, run_folder: Optional[str] = None
     ) -> Optional[str]:
-        """從 cmd_file script 讀出它 cd 進去的執行路徑。
+        """Read the execution path a cmd_file script cd's into.
 
             #!/bin/csh -f
             source xxxx
             cd /path/to/index/NDIO_1
             ...
 
-        script 裡可能有多個 cd。優先採用**位於 run folder 底下**的那一個
-        (那才是 case run dir); 找不到時退回最後一個絕對路徑的 cd。
-        結果快取 —— script 送出後就不會再變。
+        A script may contain several cd lines. Prefer the one **under the run
+        folder** (that is the case run dir); otherwise fall back to the last
+        absolute cd. Cached, since the script never changes after submission.
         """
         cmd_path = os.path.abspath(cmd_path)
         cache_key = "%s|%s" % (cmd_path, run_folder or "")
@@ -276,14 +278,14 @@ class FsAdapter:
         return result
 
     # ------------------------------------------------------------------
-    # 尋找 index run folder
+    # Finding index run folders
     # ------------------------------------------------------------------
 
     def list_index_run_folders(self, wave_dir: str) -> List[Tuple[str, str]]:
-        """列出 wave 目錄底下由 Arcx 建立的 index run folder。
+        """List the index run folders Arcx created under a wave directory.
 
-        回傳 [(index_key, abs_path), ...]。跳過我們自己的 .arcx_auto/
-        與其他隱藏目錄。
+        Returns [(index_key, abs_path), ...], skipping our own .arcx_auto/ and
+        any other hidden directory.
         """
         wave_dir = os.path.abspath(os.path.expanduser(wave_dir))
         result: List[Tuple[str, str]] = []
@@ -305,11 +307,11 @@ class FsAdapter:
         return sorted(result)
 
     # ------------------------------------------------------------------
-    # 小工具
+    # Small helpers
     # ------------------------------------------------------------------
 
     def stat_file(self, path: Optional[str]) -> Tuple[Optional[int], Optional[float]]:
-        """回傳 (size, mtime)。取不到就回 (None, None), 不丟例外。"""
+        """Return (size, mtime), or (None, None) rather than raising."""
         if not path:
             return (None, None)
         try:
@@ -319,10 +321,10 @@ class FsAdapter:
         return (st.st_size, st.st_mtime)
 
     def read_head(self, path: str, nbytes: int) -> str:
-        """讀檔案開頭。
+        """Read the beginning of a file.
 
-        errors='replace' —— EDA tool 的 log 常混雜非 UTF-8 位元組,
-        絕不能因為編碼問題讓整個監控掛掉。
+        errors='replace' because EDA tool logs routinely contain non-UTF-8
+        bytes, and an encoding problem must never take the monitor down.
         """
         try:
             with open(path, "rb") as handle:
@@ -332,10 +334,10 @@ class FsAdapter:
         return raw.decode("utf-8", errors="replace")
 
     def count_gds(self, index_path: str) -> Tuple[int, List[str]]:
-        """數 index path 底下的 GDS 檔數 (= case 數)。
+        """Count GDS files under an index path; that is the case count.
 
-        回傳 (count, sample_names)。同樣用單次 scandir, 不用 glob ——
-        glob 會對每個 pattern 各掃一次目錄。
+        One scandir pass rather than glob, which would rescan the directory once
+        per pattern.
         """
         index_path = os.path.abspath(os.path.expanduser(index_path))
         if not os.path.isdir(index_path):
@@ -361,7 +363,7 @@ class FsAdapter:
         return (len(names), names)
 
     def disk_free_ratio(self, path: str) -> Optional[float]:
-        """回傳剩餘空間比例 (0.0 ~ 1.0)。取不到回 None。"""
+        """Free space as a ratio between 0.0 and 1.0, or None."""
         try:
             st = os.statvfs(os.path.expanduser(path))
         except OSError:
@@ -375,10 +377,10 @@ _NATURAL_RE = re.compile(r"(\d+)")
 
 
 def natural_key(name: str) -> Tuple:
-    """自然排序: NDIO_1 < NDIO_2 < NDIO_10。
+    """Natural sort: NDIO_1 < NDIO_2 < NDIO_10.
 
-    case id 是 cell 名稱, 純字串排序會把 NDIO_10 排在 NDIO_2 前面,
-    在 UI 上看起來像資料錯亂。
+    Case ids are cell names, and plain string ordering would put NDIO_10 before
+    NDIO_2, which reads as corrupted data in the UI.
     """
     parts = _NATURAL_RE.split(name)
     key: List[Tuple[int, object]] = []

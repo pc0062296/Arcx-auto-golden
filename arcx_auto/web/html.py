@@ -1,7 +1,8 @@
-"""HTML 產生。純函數: 資料 -> 字串。
+"""HTML generation. Pure functions: data in, string out.
 
-沒有樣板引擎、沒有前端 build chain —— 內網環境裝東西是摩擦, 而這個
-儀表板的複雜度不值得引入相依。CSS 內嵌, 沒有外部資源。
+No template engine and no frontend build chain -- installing things on an air
+gapped network is friction, and this dashboard is not complex enough to justify
+a dependency. The CSS is inlined and nothing is fetched externally.
 """
 
 from __future__ import annotations
@@ -10,7 +11,8 @@ import html
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-# 狀態的顏色語意: 需要人處理的用暖色, 進行中的用藍色, 完成的用綠色
+# Colour semantics: warm for things needing attention, blue for in flight,
+# green for finished
 _STATE_CLASS = {
     "FAILED": "bad", "LOST": "bad", "STALLED": "bad",
     "SUSPENDED": "warn", "UNKNOWN": "warn", "COMPLETED_MARKER": "warn",
@@ -88,12 +90,12 @@ def page(title: str, body: str, refresh: int = 0,
         "<header><h1>%s</h1><span class='meta'>%s</span>"
         "<span class='meta'>%s</span></header><main>%s</main></body></html>"
         % (refresh_tag, esc(title), CSS, trail or esc(title), esc(meta),
-           esc("更新於 " + time.strftime("%H:%M:%S")), body)
+           esc("updated " + time.strftime("%H:%M:%S")), body)
     )
 
 
 def cards(items: Sequence[Tuple[str, Any, str]]) -> str:
-    """(標籤, 數值, css class) 的統計卡片列。"""
+    """A row of stat cards, each (label, value, css class)."""
     if not items:
         return ""
     html_parts = []
@@ -108,8 +110,8 @@ def cards(items: Sequence[Tuple[str, Any, str]]) -> str:
 
 
 def table(headers: Sequence[str], rows: Sequence[Sequence[str]],
-          numeric: Sequence[int] = (), empty: str = "沒有資料") -> str:
-    """rows 的儲存格已是 HTML —— 呼叫端負責 esc()。"""
+          numeric: Sequence[int] = (), empty: str = "no data") -> str:
+    """Row cells are already HTML; the caller is responsible for esc()."""
     if not rows:
         return "<div class='empty'>%s</div>" % esc(empty)
     head = "".join(
@@ -136,7 +138,7 @@ def severity_pill(severity: str) -> str:
 
 
 def progress_bar(counts: Dict[str, int]) -> str:
-    """各狀態的比例條。"""
+    """A proportional bar of the state mix."""
     total = sum(counts.values())
     if not total:
         return ""
