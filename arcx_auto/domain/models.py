@@ -90,13 +90,17 @@ class CaseObservation:
     判斷交給 StateEngine (純函數) 與 QA Registry。
     """
 
-    case_id: str
+    case_id: str                          # cell 名稱, 例如 NDIO_1
     markers: FrozenSet[MarkerKind] = frozenset()
     case_dir: Optional[str] = None        # case run dir 的絕對路徑 (rerun 時刪這個)
     case_dir_exists: bool = False
     log_path: Optional[str] = None
     log_size: Optional[int] = None
     log_mtime: Optional[float] = None
+    # cmd_folder/cmd_file_N —— 送進 LSF 的 script。
+    # 它裡面的 `cd <path>` 是唯一能把 log 對回 case 的可靠依據。
+    cmd_file: Optional[str] = None
+    exec_path: Optional[str] = None       # cmd_file 裡 cd 進去的路徑
     artifacts: Tuple[str, ...] = ()       # Phase 1 由 QA 使用
     lsf: Optional[LsfJobView] = None
 
@@ -133,6 +137,9 @@ class IndexRunObservation:
     cases: Dict[str, CaseObservation] = field(default_factory=dict)
     report_dirs: Tuple[str, ...] = ()     # QC_Cc / QC_Ct / QC_Spice ...
     unmatched_entries: Tuple[str, ...] = ()  # 無法歸類的檔案, 用來發現慣例變動
+    # 有 log 但無法從 cmd_file 判定屬於哪個 case。
+    # 這代表有一個 case 我們**監控不到**, 必須讓人看到而不是靜默忽略。
+    unresolved_logs: Tuple[str, ...] = ()
     error: Optional[str] = None           # 掃描失敗時的原因 (例如路徑不存在)
 
     @property
@@ -167,6 +174,7 @@ class CaseSnapshot:
     lsf_missing_since: Optional[float] = None
     case_dir: Optional[str] = None
     log_path: Optional[str] = None
+    exec_path: Optional[str] = None
     marker_inconsistent: bool = False
     note: Optional[str] = None
 

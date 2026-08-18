@@ -114,13 +114,24 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
             time.sleep(interval)
         first = False
 
-        snapshots, lsf_note = _scan_once(args, settings, fs, collector, store)
+        snapshots, observations, lsf_note = _scan_once(
+            args, settings, fs, collector, store
+        )
 
         if args.json:
             payload = {
                 "generated_at": time.time(),
                 "lsf_note": lsf_note,
                 "index_runs": [as_json_dict(s) for s in snapshots],
+                "scan_issues": [
+                    {
+                        "index_key": o.index_key,
+                        "unresolved_logs": list(o.unresolved_logs),
+                        "unmatched_entries": list(o.unmatched_entries),
+                    }
+                    for o in observations
+                    if o.unresolved_logs or o.unmatched_entries
+                ],
             }
             print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         else:
@@ -128,7 +139,8 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
                 print("\n" + "=" * 72)
                 print("掃描時間: %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
             print(render.render_status(
-                snapshots, now=time.time(), detail=args.detail, lsf_note=lsf_note
+                snapshots, now=time.time(), detail=args.detail,
+                lsf_note=lsf_note, observations=observations,
             ))
 
         if not interval:
@@ -176,7 +188,7 @@ def _scan_once(args, settings, fs, collector, store):
     if store:
         store.save(updated)
 
-    return snapshots, lsf_note
+    return snapshots, observations, lsf_note
 
 
 # --------------------------------------------------------------------------

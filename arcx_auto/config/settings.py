@@ -30,15 +30,31 @@ class LayoutSettings:
     全部以 regex 描述, 因為 Arcx 版本或設定不同時, 命名可能微調。
     """
 
-    # .queue.case1 / .run.case1 / .complete.case1
+    # .queue.NDIO_1 / .run.PDIO_1 / .complete.NTN_1
+    # case id 是 cell 名稱, 不是流水號, 所以這裡必須用寬鬆的 .+
     marker_regex: str = r"^\.(?P<kind>queue|run|complete)\.(?P<case>.+)$"
-    # case1/ case2/ ...  (rerun 時要刪的目錄)
-    case_dir_regex: str = r"^(?P<case>case\d+)$"
-    # submit_bjob_cmd_file_1.log  ->  case1
+
+    # submit_bjob_cmd_file_1.log
+    #   -> 依編號配對 cmd_folder/cmd_file_1
+    #   -> 讀該 script 的 `cd <path>` 得知這個 log 屬於哪個 case
+    # 檔名本身**不含** case 名稱, 編號與 case 之間也沒有固定關係,
+    # 所以唯一可靠的對應方式就是讀 cmd_file。
     log_regex: str = r"^submit_bjob_cmd_file_(?P<num>\d+)\.log$"
-    log_case_template: str = "case{num}"
+    cmd_dir_name: str = "cmd_folder"
+    cmd_file_template: str = "cmd_file_{num}"
+    cmd_cd_regex: str = r"^\s*cd\s+[\"']?(?P<path>[^\s\"';#]+)"
+    cmd_file_head_bytes: int = 16384
+
     # QC_Cc/ QC_Ct/ QC_Spice/  —— Arcx 整理的 report, 不是 case dir
     report_dir_regex: str = r"^QC_.+$"
+
+    # case run dir 的名字就是 cell 名稱, 沒有共同樣式可以比對,
+    # 因此改用排除法: run folder 底下不符合這些樣式的目錄就是 case run dir。
+    # (rerun 時要刪的就是這些目錄)
+    non_case_dir_regexes: List[str] = field(
+        default_factory=lambda: [r"^QC_.+$", r"^cmd_folder$", r"^\..*$"]
+    )
+
     # Arcx 自己在 wave 目錄下建立的 index run folder
     index_run_folder_regex: str = r"^(?P<index>[^./].*)$"
 

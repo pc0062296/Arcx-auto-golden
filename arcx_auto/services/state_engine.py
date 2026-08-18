@@ -131,6 +131,7 @@ def transition_case(
         lsf_missing_since=lsf_missing_since,
         case_dir=obs.case_dir or (prev.case_dir if prev else None),
         log_path=obs.log_path or (prev.log_path if prev else None),
+        exec_path=obs.exec_path or (prev.exec_path if prev else None),
         marker_inconsistent=obs.marker_inconsistent,
         note=reason,
     )

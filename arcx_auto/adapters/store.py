@@ -68,6 +68,7 @@ def _serialize_case(snap: CaseSnapshot) -> Dict[str, Any]:
         "lsf_missing_since": snap.lsf_missing_since,
         "case_dir": snap.case_dir,
         "log_path": snap.log_path,
+        "exec_path": snap.exec_path,
         "marker_inconsistent": snap.marker_inconsistent,
         "note": snap.note,
     }
@@ -87,6 +88,7 @@ def _deserialize_case(data: Dict[str, Any]) -> Optional[CaseSnapshot]:
             lsf_missing_since=data.get("lsf_missing_since"),
             case_dir=data.get("case_dir"),
             log_path=data.get("log_path"),
+            exec_path=data.get("exec_path"),
             marker_inconsistent=bool(data.get("marker_inconsistent")),
             note=data.get("note"),
         )

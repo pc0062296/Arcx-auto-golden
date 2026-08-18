@@ -5,7 +5,13 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Sequence
 
 from arcx_auto.domain.enums import CaseState, Completeness, PlanMode
-from arcx_auto.domain.models import DirMap, IndexRunSnapshot, IndexSpec, WavePlan
+from arcx_auto.domain.models import (
+    DirMap,
+    IndexRunObservation,
+    IndexRunSnapshot,
+    IndexSpec,
+    WavePlan,
+)
 from arcx_auto.services.state_engine import classify_completeness
 from arcx_auto.util.textfmt import (
     format_duration,
@@ -34,6 +40,7 @@ def render_status(
     now: float,
     detail: bool = False,
     lsf_note: Optional[str] = None,
+    observations: Optional[Sequence["IndexRunObservation"]] = None,
 ) -> str:
     """狀態總覽。"""
     lines: List[str] = []
@@ -93,6 +100,11 @@ def render_status(
             attention_rows,
         ))
 
+    scan_issues = _render_scan_issues(observations or ())
+    if scan_issues:
+        lines.append("")
+        lines.append(scan_issues)
+
     if detail:
         for snapshot in snapshots:
             lines.append("")
@@ -116,6 +128,28 @@ def render_status(
                 aligns=["left", "left", "left", "right", "right", "right", "left"],
             ))
     return "\n".join(lines)
+
+
+def _render_scan_issues(observations: Sequence["IndexRunObservation"]) -> str:
+    """顯示掃描時無法歸類的東西。
+
+    這兩類是「Arcx 的檔案慣例變了」或「有 case 我們監控不到」的早期訊號,
+    靜默忽略的話, 系統會在自己已經瞎掉的情況下回報一切正常。
+    """
+    rows = []
+    for obs in observations:
+        for name in obs.unresolved_logs:
+            rows.append([
+                obs.index_key, "log 無法對應到 case", name,
+                "找不到或無法解析對應的 cmd_file",
+            ])
+        for name in obs.unmatched_entries:
+            rows.append([obs.index_key, "無法歸類的檔案", name, "不符合任何已知慣例"])
+    if not rows:
+        return ""
+    return "== 掃描異常 (%d) ==\n" % len(rows) + render_table(
+        ["index", "類型", "名稱", "說明"], rows, max_col_width=50
+    )
 
 
 def _render_state_summary(totals: Dict[str, int]) -> str:
@@ -142,9 +176,9 @@ def _completeness_label(completeness: Completeness) -> str:
 
 
 def _case_sort(case_id: str):
-    import re
-    match = re.search(r"(\d+)$", case_id)
-    return (int(match.group(1)) if match else 10 ** 9, case_id)
+    """case id 是 cell 名稱, 用自然排序避免 NDIO_10 排在 NDIO_2 前面。"""
+    from arcx_auto.adapters.fs import natural_key
+    return natural_key(case_id)
 
 
 # --------------------------------------------------------------------------

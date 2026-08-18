@@ -115,6 +115,26 @@ python3 -m unittest tests.test_state_engine  # 單一模組
 `tests/fixtures/fake_run.py` 可以在毫秒內造出各種 run folder 情境，
 包含真實 job 要跑三天才會出現的狀況（卡住、job 消失、marker 不一致）。
 
+### run folder 的兩個關鍵慣例
+
+```
+.queue.NDIO_1  .run.PDIO_1  .complete.NTN_1     marker，case id 是 cell 名稱
+NDIO_1/  PDIO_1/  NTN_1/                        case run dir（rerun 時刪這些）
+QC_Cc/  QC_Ct/  QC_Spice/                       Arcx 的 report，不是 case
+submit_bjob_cmd_file_1.log                      log，檔名只有流水號
+cmd_folder/cmd_file_1                           script，內含 `cd <case run dir>`
+```
+
+**① case id 是 cell 名稱，沒有共同樣式** → case run dir 用排除法辨識，
+排除清單在 `layout.non_case_dir_regexes`。
+
+**② log 檔名與 case 沒有關係** → `submit_bjob_cmd_file_1.log` 依編號配對
+`cmd_folder/cmd_file_1`，再從 script 的 `cd <path>` 取 basename 得到 case id。
+編號順序不保證等於任何排序，測試中有專門案例擋住「用編號猜」的偷懶實作。
+
+無法解析的 log 會進 `unresolved_logs` 並顯示在 `status` 的「掃描異常」區 ——
+代表有一個 case 我們監控不到，不能靜默忽略。
+
 ### 架構鐵律
 
 依賴方向單向往下，絕不反向：

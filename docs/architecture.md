@@ -503,12 +503,55 @@ O_QCAP_LSF_NUM = 4
 
 ### 9.3 Index run folder 內的檔案慣例
 
+真實範例：
+
+```
+.queue.NDIO_1                  marker，case id 是 cell 名稱
+.run.PDIO_1
+.complete.NTN_1
+NDIO_1/  PDIO_1/  NTN_1/       每個 case 的 run dir（rerun 時刪這些）
+QC_Cc/  QC_Ct/  QC_Spice/      Arcx 整理的 report，不是 case
+submit_bjob_cmd_file_1.log     log，檔名只有流水號
+cmd_folder/cmd_file_1          送進 LSF 的 script，內含 `cd <case run dir>`
+```
+
 | 型態 | 樣式 | 意義 |
 |---|---|---|
-| marker | `.queue.<case>` / `.run.<case>` / `.complete.<case>` | case 狀態 |
-| case run dir | `case<N>/` | 單一 case 的工作目錄（rerun 時刪這個） |
-| log | `submit_bjob_cmd_file_<N>.log` | 對應 `case<N>` 的 Arcx + EDA tool 輸出 |
+| marker | `.queue.<cell>` / `.run.<cell>` / `.complete.<cell>` | case 狀態 |
+| case run dir | `<cell>/` | 單一 case 的工作目錄（**rerun 時刪這個**） |
+| log | `submit_bjob_cmd_file_<N>.log` | Arcx + EDA tool 輸出 |
+| cmd script | `cmd_folder/cmd_file_<N>` | 送進 LSF 的 script |
 | report | `QC_Cc/` `QC_Ct/` `QC_Spice/` | Arcx 整理的 report，**不是 case dir** |
+
+**兩個關鍵慣例，直接決定了實作方式：**
+
+**① case id 是 cell 名稱，沒有共同樣式。**
+`NDIO_1` / `PDIO_1` / `NTN_1` 之間沒有可比對的 pattern，所以 case run dir
+必須用**排除法**辨識（不是 `QC_*`、不是 `cmd_folder`、不是隱藏目錄），
+而不是用 include pattern。代價是新增的非 case 目錄會被誤認為 case ——
+因此排除清單放在設定裡可擴充（`layout.non_case_dir_regexes`）。
+
+**② log 檔名與 case 之間沒有任何關係。**
+`submit_bjob_cmd_file_1.log` 依編號配對 `cmd_folder/cmd_file_1`，
+再讀該 script 的 `cd <path>`，取 basename 才得到 case id：
+
+```
+submit_bjob_cmd_file_1.log
+    └─(編號)─► cmd_folder/cmd_file_1
+                   └─ `cd /path/to/index/NDIO_1`
+                          └─ basename ─► case = NDIO_1
+```
+
+編號順序**不保證**等於任何排序，所以絕不能用「第 N 個 log 對第 N 個 case」
+這種捷徑。測試中有專門的案例（`cmd_file_1` → `ZZZ_LAST`，`cmd_file_2` →
+`AAA_FIRST`）來擋住這種偷懶實作。
+
+這條鏈同時解決了 LSF job 對應的問題：cmd_file 給出的執行路徑是**確定性**的，
+不需要去猜格式多變的 log 內容。
+
+**無法解析時必須讓人看到。** 有 log 但 cmd_file 缺失或無法解析，代表
+「有一個 case 我們監控不到」——記錄進 `unresolved_logs` 並顯示在 UI 上。
+靜默忽略的話，系統會在自己已經瞎掉的情況下回報一切正常。
 
 全部樣式都可在 config 覆寫，不寫死在程式邏輯裡。
 

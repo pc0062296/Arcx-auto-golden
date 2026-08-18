@@ -207,6 +207,25 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out)["max_slots_per_wave"], 7)
 
+    def test_shipped_default_yaml_has_no_unknown_fields(self):
+        """config/default.yaml 與 Settings dataclass 很容易悄悄長歪。
+
+        任何「未知設定欄位」警告都代表範本裡有個欄位其實不會生效 ——
+        使用者改了卻沒作用是最難查的那種問題。
+        """
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("環境沒有 PyYAML")
+        from arcx_auto.config.settings import load_settings
+
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config", "default.yaml",
+        )
+        _settings, warnings = load_settings(path)
+        self.assertEqual(warnings, [])
+
     def test_unknown_config_field_warns_but_continues(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = os.path.join(tmp, "c.json")

@@ -15,15 +15,25 @@ run_root: "./arcx_runs"        # wave 隔離目錄的根
 # 對外部世界的所有假設都集中在這裡, 不寫死在程式邏輯中。
 # ---------------------------------------------------------------------------
 layout:
-  # .queue.case1 / .run.case1 / .complete.case1
+  # .queue.NDIO_1 / .run.PDIO_1 / .complete.NTN_1
+  # case id 是 cell 名稱, 不是流水號, 所以這裡必須用寬鬆的 .+
   marker_regex: '^\.(?P<kind>queue|run|complete)\.(?P<case>.+)$'
-  # case1/ case2/ ...  <- rerun 時要刪的就是這些目錄
-  case_dir_regex: '^(?P<case>case\d+)$'
-  # submit_bjob_cmd_file_1.log  ->  case1
+
+  # log 檔名只有流水號, 與 case 沒有任何關係。對應方式:
+  #   submit_bjob_cmd_file_1.log -> cmd_folder/cmd_file_1 -> `cd <path>` -> case
   log_regex: '^submit_bjob_cmd_file_(?P<num>\d+)\.log$'
-  log_case_template: "case{num}"
+  cmd_dir_name: "cmd_folder"
+  cmd_file_template: "cmd_file_{num}"
+  cmd_cd_regex: '^\s*cd\s+["'']?(?P<path>[^\s"'';#]+)'
+  cmd_file_head_bytes: 16384
+
   # QC_Cc/ QC_Ct/ QC_Spice/  <- Arcx 整理的 report, 不是 case dir
   report_dir_regex: '^QC_.+$'
+
+  # case run dir 的名字就是 cell 名稱, 沒有共同樣式, 因此用排除法辨識:
+  # run folder 底下不符合這些樣式的目錄, 就是 case run dir (rerun 時刪這些)。
+  # 環境中若出現新的非 case 目錄, 加進這個清單即可, 不需要改程式。
+  non_case_dir_regexes: ['^QC_.+$', '^cmd_folder$', '^\..*$']
 
   gds_globs: ["*.gds", "*.gds.gz", "*.GDS", "*.gds.bz2"]
   special_cfg_name: "special.cfg"
