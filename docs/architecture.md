@@ -582,9 +582,50 @@ JSONL 的 append-only 天然抗損毀（斷電最多壞最後一行），JSON �
 **行程模型**：兩個獨立 process。
 ```
 process A: arcx-auto daemon    ← setsid/nohup 常駐，唯一寫入者，threading + sleep loop
-process B: arcx-auto ui        ← 隨開隨關，唯讀 state.json，動作寫 commands/
+process B: arcx-auto web       ← 隨開隨關，唯讀 state.json，動作寫 commands/
 ```
 不用 asyncio：`scandir` / `bjobs` / `stat` 全是 blocking I/O，同步程式碼 + thread pool 更好懂也更好除錯。
+
+daemon 的三個性質：
+
+- **可隨時被 kill 並重啟。** 啟動時從 `state.json` 載回上一次的判定（讓 stall 計時延續），
+  但那份檔案不見了也能從 run folder 重建 —— 檔案系統才是唯一真相。
+- **一次 tick 失敗不能讓 daemon 死掉。** NFS 抽風、LSF 逾時都是常態，錯誤記進
+  `daemon.last_error` 讓 UI 看得到，然後繼續下一個 tick。掃描失敗時**仍然更新
+  `state.json` 的時間戳** —— 否則 UI 會顯示過期資料卻看起來一切正常。
+- **daemon 自己也要被監控。** UI 上會標示「逾 15 分鐘未更新」。daemon 靜默死掉時
+  畫面停在最後一刻看起來正常，那是最危險的情況。
+
+---
+
+## 8.1 Web UI（Phase 1b）
+
+**只用標準庫 `http.server`，不引入 FastAPI/Flask。**
+
+理由：這是單人、綁 `127.0.0.1`、**唯讀**的儀表板，不是對外服務。標準庫足夠，
+而內網環境安裝套件是實實在在的摩擦。零相依也讓「複製一份程式碼過去就能跑」成立。
+（有測試強制核心零第三方相依，新增任何 import 都必須明確加進白名單。）
+
+安全性質：
+
+- 預設只綁 `127.0.0.1` —— 不對外提供服務，因此不需要認證
+- 全部是 GET，**沒有任何寫入端點**。Phase 3 的動作會走 `commands/` 檔案投遞
+- run id 用「列出既有 run 再比對」查表，不把使用者輸入拼進路徑 → 沒有 path traversal 的空間
+
+四層 drill-down，每層都只渲染 daemon 已經算好的 `state.json`，不自己算任何東西：
+
+```
+/                                    所有 run；最醒目的是「需要你決定：N 件」
+/run/<id>                            index 列表 + issue 摘要（同 id 聚合）
+/run/<id>/index/<key>                case 表格 + 掃描異常
+/run/<id>/index/<key>/case/<case>    狀態、路徑、每個 issue 的說明與證據
+/api/state/<id>                      原始 JSON
+```
+
+**issue 摘要按 id 聚合**：200 個 case 犯同一個錯時，工程師需要看到的是
+「NETLIST_MISSING × 200」而不是 200 行一樣的訊息。
+
+**安靜時間依長短升級醒目程度**（§7.6）：< 4h 正常、4~8h 黃、> 8h 紅。
 
 ---
 
@@ -701,10 +742,11 @@ Drain 順序固定為：**先 `bkill` parent，再 `-djp` 子 job**（反過來�
 
 | Phase | 內容 | 狀態 |
 |---|---|---|
-| **0** | Domain + FsAdapter + Collector + StateEngine + `status` CLI | ✅ 本次實作 |
-| **2a** | ArcxAdapter(dir_map/special.cfg) + WavePlanner + `plan` CLI | ✅ 本次實作 |
-| 1 | Store + Daemon 骨架 + QA Registry + 唯讀 Web UI | 待做 |
-| 2b | Preflight + WorkspaceBuilder + Launcher + SubmissionController + Launch Wizard | 待做 |
+| **0** | Domain + FsAdapter + Collector + StateEngine + `status` CLI | ✅ 已完成 |
+| **2a** | ArcxAdapter(dir_map/special.cfg) + WavePlanner + `plan` CLI | ✅ 已完成 |
+| **1a** | arcx.cfg parser + QA Registry + StateResolver + PRE 檢查 | ✅ 已完成 |
+| **1b** | Store + LockManager + Daemon + 唯讀 Web UI | ✅ 已完成 |
+| 2b | WorkspaceBuilder + Launcher + SubmissionController + Launch Wizard | 待做 |
 | 3 | Rerun Drain 狀態機 + 人工觸發一鍵重跑 + Triage Queue | 待做 |
 | 4 | PolicyEngine 自動 remediation（先 shadow mode 兩週） | 待做 |
 | 5 | Status Exporter + 公用碟總覽頁 + 歷史趨勢 | 待做 |

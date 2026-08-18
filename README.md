@@ -14,8 +14,8 @@ RC extraction 自動化提交、監控、判定與重跑系統。
 |---|---|---|
 | **0** | Domain + FsAdapter + Collector + StateEngine + `status` CLI | ✅ 已完成 |
 | **2a** | ArcxAdapter (dir_map / special.cfg) + WavePlanner + `plan` CLI | ✅ 已完成 |
-| **1a** | arcx.cfg parser + QA Registry + StateResolver | ✅ 已完成 |
-| 1b | Store + Daemon + 唯讀 Web UI | 待做 |
+| **1a** | arcx.cfg parser + QA Registry + StateResolver + PRE 檢查 | ✅ 已完成 |
+| **1b** | Store + LockManager + Daemon + 唯讀 Web UI | ✅ 已完成 |
 | 2b | Preflight + WorkspaceBuilder + Launcher + SubmissionController | 待做 |
 | 3 | Rerun Drain 狀態機 + Triage Queue | 待做 |
 | 4 | PolicyEngine 自動 remediation | 待做 |
@@ -75,6 +75,32 @@ python3 -m arcx_auto plan --dir-map /path/to/dir_map \
 
 所有指令都支援 `--json`，方便接後續工具或存檔比對。
 
+## 持續監控 + Web UI
+
+```bash
+# 終端機 1：daemon（唯一的寫入者）
+python3 -m arcx_auto daemon --run-id nightly --wave-dir /path/to/wave_001
+
+# 終端機 2：Web UI（唯讀，隨開隨關）
+python3 -m arcx_auto web            # 然後用 Chrome 開 http://127.0.0.1:8765/
+```
+
+Web UI 只用標準庫 `http.server`，預設只綁 `127.0.0.1`、沒有任何寫入端點。
+四層 drill-down：所有 run → index 列表 + issue 摘要 → case 表格 → 單一 case 的證據。
+
+daemon 可以隨時 Ctrl-C 再重啟 —— 它會從 `state.json` 接續上次的判定，
+即使那份檔案不見了也能從 run folder 重建。
+
+## 提交前檢查 arcx.cfg
+
+```bash
+python3 -m arcx_auto check-cfg /path/to/arcx.cfg
+```
+
+檢查 block 名稱是否重複、`QC_FLOW` 是否認得、引用的檔案是否存在。
+**行首旗標 `0` 或被 `#` 註解掉的行不會被檢查** —— 那些設定不生效，
+驗證它們只會製造假警報。
+
 ---
 
 ## 指令總覽
@@ -86,6 +112,9 @@ python3 -m arcx_auto plan --dir-map /path/to/dir_map \
 | `plan --dir-map FILE --index ...` | 產生分波計畫（**不執行**） |
 | `inspect dir-map FILE` | 解析 dir_map，檢查 index 是否有缺漏 |
 | `inspect index PATH...` | 解析 special.cfg 與 GDS 數，算出 slot 需求 |
+| `check-cfg FILE` | 提交前檢查 arcx.cfg（有 FATAL 時 exit code 1） |
+| `daemon --wave-dir PATH` | 持續監控，把狀態寫進 state root |
+| `web` | 啟動本機 Web UI（唯讀，只綁 127.0.0.1） |
 
 常用選項：`--json`、`--detail`、`--watch SEC`、`--state-file`、`--no-lsf`、`-c CONFIG`。
 

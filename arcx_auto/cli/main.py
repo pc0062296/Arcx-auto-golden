@@ -28,9 +28,11 @@ from arcx_auto.adapters.lsf import LsfAdapter
 from arcx_auto.adapters.store import SnapshotStore
 from arcx_auto.cli import render
 from arcx_auto.config.settings import Settings, load_settings
+from arcx_auto.daemon import Daemon, DaemonOptions
 from arcx_auto.domain.enums import PlanMode
 from arcx_auto.domain.models import IndexRunSnapshot, IndexSpec, as_json_dict
 from arcx_auto.services.collector import Collector
+from arcx_auto.services.monitor import MonitorService
 from arcx_auto.services.qa import QaRunner
 from arcx_auto.services.qa.runner import IndexQaReport
 from arcx_auto.services.state_engine import (
@@ -38,6 +40,7 @@ from arcx_auto.services.state_engine import (
     transition_index_run,
 )
 from arcx_auto.services.state_resolver import resolve_case_state
+from arcx_auto.web import WebOptions, serve
 from arcx_auto.services.wave_planner import plan_waves
 
 
@@ -91,6 +94,29 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--show-command", action="store_true",
                       help="顯示每個 wave 會執行的 Arcx 指令")
     plan.add_argument("--json", action="store_true", help="輸出 JSON")
+
+    # -- daemon --------------------------------------------------------
+    daemon = sub.add_parser(
+        "daemon", help="持續監控並把狀態寫進 state root (供 Web UI 讀取)")
+    daemon.add_argument("--run-id", help="這次監控的名稱 (預設由時間產生)")
+    daemon.add_argument("--wave-dir", action="append", default=[],
+                        help="要監控的 wave 目錄 (可重複)")
+    daemon.add_argument("--run-folder", action="append", default=[],
+                        help="要監控的 index run folder (可重複)")
+    daemon.add_argument("--arcx-cfg",
+                        help="arcx.cfg 路徑 (預設在 wave 目錄下自動尋找)")
+    daemon.add_argument("--interval", type=float,
+                        help="固定掃描間隔 (秒)。預設依是否有 case 在跑分層調整")
+    daemon.add_argument("--once", action="store_true", help="只掃一次就結束")
+    daemon.add_argument("--no-lsf", action="store_true", help="不查詢 LSF")
+
+    # -- web -----------------------------------------------------------
+    web = sub.add_parser("web", help="啟動本機 Web UI (唯讀, 只綁 127.0.0.1)")
+    web.add_argument("--host", default="127.0.0.1",
+                     help="預設只聽 loopback。改成別的位址等於對外開放服務。")
+    web.add_argument("--port", type=int, default=8765)
+    web.add_argument("--refresh", type=int, default=30,
+                     help="頁面自動刷新間隔 (秒), 0 為關閉")
 
     # -- check-cfg -----------------------------------------------------
     check = sub.add_parser("check-cfg",
@@ -173,58 +199,28 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _scan_once(args, settings, fs, collector, store):
-    now = time.time()
+    """一次掃描。業務邏輯全在 MonitorService 裡, 這裡只負責前後的 I/O。"""
+    monitor = MonitorService(
+        settings=settings, collector=collector, enable_qa=not args.no_qa)
+    if store:
+        monitor.prime(store.load())
 
-    lsf_jobs: List = []
-    lsf_note: Optional[str] = None
-    if args.no_lsf:
-        lsf_note = "已指定 --no-lsf"
-    else:
-        lsf_jobs, error = collector.fetch_lsf_jobs()
-        if error:
-            lsf_note = error
-
-    lsf_available = lsf_note is None
-
-    if args.wave_dir:
-        observations = collector.collect_wave(args.wave_dir, lsf_jobs=lsf_jobs, now=now)
-        if not observations:
-            print("  (wave 目錄底下沒有找到任何 index run folder: %s)"
-                  % args.wave_dir, file=sys.stderr)
-    else:
-        observations = [
-            collector.collect_index_run(folder, lsf_jobs=lsf_jobs, now=now)
-            for folder in args.run_folder
-        ]
-
-    previous: Dict[str, IndexRunSnapshot] = store.load() if store else {}
-    ctx = TransitionContext.from_settings(
-        settings.monitor, lsf_data_available=lsf_available, now=now
+    result = monitor.scan(
+        wave_dirs=[args.wave_dir] if args.wave_dir else [],
+        run_folders=list(args.run_folder or []),
+        arcx_config=_load_arcx_cfg(args, settings),
+        use_lsf=not args.no_lsf,
     )
 
-    arcx_config = _load_arcx_cfg(args, settings)
-    runner = None if args.no_qa else QaRunner(settings)
-
-    snapshots: List[IndexRunSnapshot] = []
-    reports: List[IndexQaReport] = []
-    updated: Dict[str, IndexRunSnapshot] = dict(previous)
-
-    for observation in observations:
-        key = observation.run_folder
-        snapshot, _events = transition_index_run(previous.get(key), observation, ctx)
-
-        if runner is not None:
-            report = runner.run_index(snapshot, observation, arcx_config, now=now)
-            reports.append(report)
-            snapshot = _apply_qa(snapshot, report)
-
-        snapshots.append(snapshot)
-        updated[key] = snapshot
+    if args.wave_dir and not result.observations:
+        print("  (wave 目錄底下沒有找到任何 index run folder: %s)"
+              % args.wave_dir, file=sys.stderr)
 
     if store:
-        store.save(updated)
+        store.save(monitor.previous)
 
-    return snapshots, observations, reports, lsf_note
+    return (list(result.snapshots), list(result.observations),
+            list(result.qa_reports), result.lsf_note)
 
 
 def _load_arcx_cfg(args, settings: Settings) -> Optional[ArcxConfig]:
@@ -251,21 +247,6 @@ def _load_arcx_cfg(args, settings: Settings) -> Optional[ArcxConfig]:
                 print("  ! arcx.cfg: %s" % warning, file=sys.stderr)
             return config
     return None
-
-
-def _apply_qa(snapshot: IndexRunSnapshot, report: IndexQaReport) -> IndexRunSnapshot:
-    """把 QA 結果收斂進 case 狀態 (COMPLETED_MARKER -> DONE / FAILED)。"""
-    from dataclasses import replace
-
-    cases = {}
-    for case_id, case in snapshot.cases.items():
-        issues = report.issues_for(case_id)
-        base = case.base_state or case.state
-        final, reason = resolve_case_state(base, issues)
-        cases[case_id] = replace(
-            case, state=final, note=reason or case.note) if final != case.state \
-            else case
-    return replace(snapshot, cases=cases)
 
 
 # --------------------------------------------------------------------------
@@ -318,6 +299,54 @@ def cmd_plan(args: argparse.Namespace, settings: Settings) -> int:
     else:
         print(render.render_plan(plan, show_command=args.show_command,
                                  commands=commands))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# daemon / web
+# --------------------------------------------------------------------------
+
+def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
+    if not args.wave_dir and not args.run_folder:
+        print("錯誤: 至少要指定一個 --wave-dir 或 --run-folder", file=sys.stderr)
+        return 2
+
+    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
+    options = DaemonOptions(
+        run_id=run_id,
+        wave_dirs=[os.path.abspath(os.path.expanduser(p)) for p in args.wave_dir],
+        run_folders=[os.path.abspath(os.path.expanduser(p))
+                     for p in args.run_folder],
+        arcx_cfg=args.arcx_cfg,
+        interval_sec=args.interval,
+        use_lsf=not args.no_lsf,
+        once=args.once,
+    )
+    daemon = Daemon(options, settings=settings)
+    print("監控中 run_id=%s  state=%s" % (run_id, daemon.store.dir))
+    if not args.once:
+        print("Web UI: arcx-auto web    (Ctrl-C 停止 daemon)")
+    return daemon.run()
+
+
+def cmd_web(args: argparse.Namespace, settings: Settings) -> int:
+    options = WebOptions(
+        state_root=settings.expanded_state_root(),
+        host=args.host,
+        port=args.port,
+        refresh_sec=args.refresh,
+    )
+    url = "http://%s:%d/" % (options.host, options.port)
+    print("Web UI: %s" % url)
+    print("state root: %s" % options.state_root)
+    if options.host not in ("127.0.0.1", "localhost", "::1"):
+        print("  ! 注意: 綁在 %s 等於對外開放這個服務。" % options.host,
+              file=sys.stderr)
+    print("Ctrl-C 結束。")
+    try:
+        serve(options)
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
@@ -401,6 +430,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     handlers = {
         "status": cmd_status,
+        "daemon": cmd_daemon,
+        "web": cmd_web,
         "plan": cmd_plan,
         "check-cfg": cmd_check_cfg,
         "inspect": cmd_inspect,

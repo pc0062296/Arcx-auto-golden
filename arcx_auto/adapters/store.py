@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, Iterable, List, Optional
 
 from arcx_auto.domain.enums import CaseState, LsfState
 from arcx_auto.domain.models import CaseSnapshot, IndexRunSnapshot
-from arcx_auto.util.atomic import atomic_write_json, read_json
+from arcx_auto.util.atomic import append_jsonl, atomic_write_json, read_json
 
 SCHEMA_VERSION = 1
 
@@ -127,3 +128,91 @@ def _deserialize_index_run(data: Any) -> Optional[IndexRunSnapshot]:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+# ==========================================================================
+# RunStore —— daemon 的持久化 (Phase 1b)
+# ==========================================================================
+
+class RunStore:
+    """一次監控工作階段的所有持久化資料。
+
+        ~/.arcx-auto/runs/<run_id>/
+          manifest.json   不可變: 建立時間、監控目標、cfg 路徑
+          state.json      可變快照, atomic write —— UI 唯讀這一份
+          events.jsonl    append-only 狀態轉移
+          audit.jsonl     append-only 所有寫入型動作
+          commands/       UI/CLI 投遞的動作意圖, daemon 消化後刪除
+
+    再次強調 (architecture 決策 2): **檔案系統是唯一真相, 這裡只是快取。**
+    整個目錄刪掉後重新掃描就能還原, 只會損失歷史紀錄。
+    """
+
+    def __init__(self, root: str, run_id: str) -> None:
+        self.run_id = run_id
+        self.dir = os.path.join(
+            os.path.abspath(os.path.expanduser(root)), "runs", run_id)
+        self.manifest_path = os.path.join(self.dir, "manifest.json")
+        self.state_path = os.path.join(self.dir, "state.json")
+        self.events_path = os.path.join(self.dir, "events.jsonl")
+        self.audit_path = os.path.join(self.dir, "audit.jsonl")
+        self.commands_dir = os.path.join(self.dir, "commands")
+
+    def ensure(self) -> None:
+        os.makedirs(self.commands_dir, exist_ok=True)
+
+    # -- manifest (不可變) ---------------------------------------------
+
+    def write_manifest(self, payload: Dict[str, Any]) -> None:
+        """只在第一次建立時寫入 —— manifest 記錄的是「當初的意圖」,
+        後續發生什麼事都不該改寫它。
+        """
+        self.ensure()
+        if os.path.exists(self.manifest_path):
+            return
+        atomic_write_json(self.manifest_path, payload)
+
+    def read_manifest(self) -> Dict[str, Any]:
+        return read_json(self.manifest_path, default={}) or {}
+
+    # -- state (可變快照) ----------------------------------------------
+
+    def write_state(self, payload: Dict[str, Any]) -> None:
+        atomic_write_json(self.state_path, payload)
+
+    def read_state(self) -> Dict[str, Any]:
+        return read_json(self.state_path, default={}) or {}
+
+    # -- 追加式紀錄 ----------------------------------------------------
+
+    def append_events(self, records: Iterable[Dict[str, Any]]) -> None:
+        for record in records:
+            append_jsonl(self.events_path, record)
+
+    def append_audit(self, record: Dict[str, Any]) -> None:
+        """所有寫入型動作都要留下誰/何時/對什麼/為什麼。"""
+        enriched = dict(record)
+        enriched.setdefault("ts", time.time())
+        enriched.setdefault("pid", os.getpid())
+        append_jsonl(self.audit_path, enriched)
+
+    # -- 探索 ----------------------------------------------------------
+
+    @staticmethod
+    def list_runs(root: str) -> List[str]:
+        """列出所有既有的 run id, 最近更新的排前面。"""
+        runs_dir = os.path.join(
+            os.path.abspath(os.path.expanduser(root)), "runs")
+        try:
+            names = [n for n in os.listdir(runs_dir)
+                     if os.path.isdir(os.path.join(runs_dir, n))]
+        except OSError:
+            return []
+
+        def sort_key(name: str) -> float:
+            try:
+                return -os.path.getmtime(os.path.join(runs_dir, name, "state.json"))
+            except OSError:
+                return 0.0
+
+        return sorted(names, key=sort_key)

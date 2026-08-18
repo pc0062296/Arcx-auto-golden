@@ -30,12 +30,15 @@ class Py39CompatTest(unittest.TestCase):
         PyYAML 只在讀 .yaml 設定檔時才 import (lazy), 不算核心相依。
         """
         allowed_stdlib_prefixes = (
+            # 每加一個都要有意識地過一次 —— 這個清單就是相依性的閘門
             "arcx_auto", "os", "re", "sys", "time", "json", "typing",
             "dataclasses", "enum", "argparse", "subprocess", "shutil",
             "tempfile", "getpass", "unicodedata", "fnmatch", "pathlib",
             "collections", "itertools", "functools", "contextlib", "io",
             "ast", "unittest", "threading", "hashlib", "uuid", "errno",
             "math", "textwrap", "traceback", "logging",
+            # daemon 與 web (Phase 1b) 用到的
+            "socket", "fcntl", "signal", "http", "urllib", "html",
         )
         offenders = []
         for path in sorted((ROOT / "arcx_auto").rglob("*.py")):
