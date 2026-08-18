@@ -59,6 +59,7 @@ def _serialize_case(snap: CaseSnapshot) -> Dict[str, Any]:
     return {
         "case_id": snap.case_id,
         "state": snap.state.value,
+        "base_state": snap.base_state.value if snap.base_state else None,
         "entered_state_at": snap.entered_state_at,
         "last_progress_at": snap.last_progress_at,
         "last_progress_size": snap.last_progress_size,
@@ -79,6 +80,8 @@ def _deserialize_case(data: Dict[str, Any]) -> Optional[CaseSnapshot]:
         return CaseSnapshot(
             case_id=data["case_id"],
             state=CaseState(data["state"]),
+            base_state=(CaseState(data["base_state"])
+                        if data.get("base_state") else None),
             entered_state_at=float(data["entered_state_at"]),
             last_progress_at=float(data["last_progress_at"]),
             last_progress_size=int(data.get("last_progress_size") or 0),

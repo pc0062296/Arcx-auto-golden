@@ -93,6 +93,50 @@ lsf:
   quiescent_timeout_sec: 900
 
 # ---------------------------------------------------------------------------
+# QA 檢查 (architecture §7)
+#
+# 期望產出物是從 arcx.cfg **推導**出來的, 不是寫死的:
+#
+#   arcx.cfg                              case run dir
+#   BEGIN_SETTINGS: <block>               <block>_<QC_FLOW>/
+#     QC_FLOW = <flow>                      work_<QC_FLOW>/
+#   END_SETTINGS                              <該 flow 的 netlist>
+# ---------------------------------------------------------------------------
+qa:
+  # 每個 EDA tool flow 產出什麼。新增一種 tool = 在這裡加一個項目, 不需要改程式。
+  # 樣板變數: {flow} {block} {case}
+  flows:
+    calQCAP:
+      work_dir: "work_{flow}"
+      netlists: ["CCI_DB.spice"]      # 固定檔名
+      min_bytes: 1
+    calQRCFS:
+      work_dir: "work_{flow}"
+      netlists: ["{case}.spf"]        # 檔名跟著 cell 走
+      min_bytes: 1
+
+  # netlist 小於這個大小視為無效 (檔案被建立後 job 立刻死掉的情況)
+  min_netlist_bytes: 1
+
+  # 要停用的檢查 id。放在這裡就不用刪程式。
+  disabled_checks: []
+
+  reports:
+    required_dirs: ["QC_Cc", "QC_Ct"]     # 一定會存在, 缺了是 FATAL
+    optional_dirs: ["QC_Spice"]           # 有才檢查內容
+    main_file_template: "Report_{dir}"
+    # Report_QC_Cc_Summary_SCCB3 —— 後綴會變, 所以用 glob
+    summary_glob_template: "Report_{dir}_Summary_*"
+
+  # 「多久沒寫 log」的分級門檻。
+  # 刻意分級而非二元判定: 單一 case runtime 從 10 分鐘到 3 天都有,
+  # 而且存在「不寫 log 但產出物已經齊了」的正常情況。
+  quiet:
+    warn_after_sec: 14400               # 4h  少見, 值得看一眼
+    stalled_after_sec: 28800            # 8h  基本上可判定卡住
+    downgrade_when_artifacts_ready: true
+
+# ---------------------------------------------------------------------------
 # 公用碟匯出 (architecture §9.5)
 # 只放衍生資料 —— 真相永遠在 state_root 與 run folder, 這裡可隨時整個重建。
 # ---------------------------------------------------------------------------

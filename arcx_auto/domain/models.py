@@ -166,7 +166,7 @@ class CaseSnapshot:
     """
 
     case_id: str
-    state: CaseState
+    state: CaseState              # 最終狀態 (經 StateResolver 收斂)
     entered_state_at: float
     last_progress_at: float
     last_progress_size: int = 0
@@ -181,6 +181,10 @@ class CaseSnapshot:
     exec_path: Optional[str] = None
     marker_inconsistent: bool = False
     note: Optional[str] = None
+    # StateEngine 判出的結構性狀態 (只看 marker + LSF)。
+    # 與 state 分開保存, 因為狀態轉移必須拿 base 跟 base 比 —— 拿收斂後的
+    # state 去比的話, COMPLETED_MARKER -> DONE 會被誤認成「每個 tick 都在變」。
+    base_state: Optional[CaseState] = None
 
     def silent_for(self, now: float) -> float:
         """log 已經多久沒有成長 (秒)。"""

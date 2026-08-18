@@ -383,45 +383,158 @@ daemon 在任何一步被 kill，重啟後從 `state.json` 的 `rerun_phase` 接
 
 ## 7. QA Registry 與 Policy
 
-EDA tool 的 error/warning 訊息又雜又常變，**用產出物存在性判斷比 parse log 可靠一個數量級**。
-因此 QA 以產出物與 marker 為主，log 只用來判斷「多久沒更新」。
+### 7.1 三個 stage，同一種輸出
 
-```python
-@qa_check(id="ARTIFACT_MISSING",    severity=FATAL, scope=CASE,  stage=POST)
-@qa_check(id="ARTIFACT_EMPTY",      severity=FATAL, scope=CASE,  stage=POST)
-@qa_check(id="ARTIFACT_TRUNCATED",  severity=FATAL, scope=CASE,  stage=POST)
-@qa_check(id="MARKER_INCONSISTENT", severity=FATAL, scope=CASE,  stage=POST)
-@qa_check(id="CASE_NEVER_STARTED",  severity=FATAL, scope=INDEX, stage=POST)
-@qa_check(id="CASE_STALLED",        severity=WARN,  scope=CASE,  stage=LIVE)
-@qa_check(id="LSF_MEMLIMIT",        severity=FATAL, scope=CASE,  stage=POST)
-@qa_check(id="DISK_LOW",            severity=WARN,  scope=GLOBAL,stage=LIVE)
+只判「是否成功」是不夠的 —— TAT 的損失有一半來自「卡住但沒人發現」。
+等到 `.complete` 才做 QA，等於放棄了執行中的所有觀測機會。
+
+| Stage | 問什麼 | 何時跑 | 成本 |
+|---|---|---|---|
+| `PRE` | 這個 case 能不能跑？ | 提交前，一次 | 低 |
+| `LIVE` | 它現在健康嗎？ | 執行中，每個 tick | 低（只用已有的觀測） |
+| `POST` | 它真的成功了嗎？ | `.complete` 出現後，一次 | 高（要進 case run dir 讀檔） |
+
+三者的輸出都是同一種 `Issue`（id + severity + evidence），交給同一套 Policy
+決定動作。這是為什麼要統一成一個 Registry，而不是做兩套系統。
+
+### 7.2 State 與 Issue 是兩回事
+
+| | State | Issue |
+|---|---|---|
+| 數量 | **唯一、互斥** | **可多個並存** |
+| 性質 | 「它現在在哪」 | 「它有什麼問題」 |
+| 變更頻率 | 幾乎不變 | 一直在加 |
+| 誰產生 | StateEngine（純函數） | QA function（可插拔） |
+
+三層分工，方向永遠單向（issue → state）：
+
+```
+StateEngine    只看 marker + LSF  →  base_state
+               ∈ {PENDING, QUEUED, RUNNING, SUSPENDED, COMPLETED_MARKER, LOST}
+                        │
+QA Registry    產出 Issue[]
+               LIVE →  CASE_QUIET / LSF_SUSPENDED / CASE_NEVER_STARTED / ...
+               POST →  NETLIST_MISSING / NETLIST_EMPTY / FLOW_DIR_MISSING / ...
+                        │
+StateResolver  base_state + issues  →  final_state
+               COMPLETED_MARKER + 任何 blocking issue  →  FAILED
+               COMPLETED_MARKER + 全部通過             →  DONE
+               RUNNING          + FATAL 的 CASE_QUIET  →  STALLED
+               其餘原樣保留（LOST/SUSPENDED 是 LSF 證實的事實，QA 不改寫）
 ```
 
-Registry 的三個性質：
-- **ID 是介面**。YAML 只認 ID 不認實作，改 QA 實作不需動 policy。
-- **scope × stage 決定何時被呼叫**（case/index/global × pre/live/post），Daemon 不需知道有哪些檢查。
-- **每個 Issue 帶 evidence**（檔案路徑、實際值 vs 期望值），直接餵給 UI。
+**為什麼「卡住」的判斷放在 QA 而不是 StateEngine**：它的條件會一直調整
+（cell 大小、安靜階段、產出物是否已齊）。留在 StateEngine 會讓那個純函數長成大雜燴，
+而且改一條判斷就要動核心程式。放進 QA 之後，StateEngine 保持精簡，
+state 仍然唯一。
+
+`CaseSnapshot` 同時保存 `base_state` 與 `state` —— 狀態轉移必須拿 base 跟 base 比，
+否則 `COMPLETED_MARKER → DONE` 會被誤認成「每個 tick 都在變」。
+
+### 7.3 期望產出物由 arcx.cfg 推導，不是寫死的
+
+```
+arcx.cfg                              case run dir
+─────────────────────────────────────────────────────────────────
+1 BEGIN_SETTINGS: blocking_naming_qcap  NTN_1/
+1   QC_FLOW = calQCAP                     blocking_naming_qcap_calQCAP/
+END_SETTINGS                                work_calQCAP/
+                                              CCI_DB.spice
+
+1 BEGIN_SETTINGS: blocking_naming_qrcfs     blocking_naming_qrcfs_calQRCFS/
+1   QC_FLOW = calQRCFS                        work_calQRCFS/
+END_SETTINGS                                    NTN_1.spf
+```
+
+路徑規則：`<block>_<QC_FLOW>/work_<QC_FLOW>/<該 flow 的 netlist>`
+
+每個 flow 產出什麼由 `settings.qa.flows` 定義：
+
+```yaml
+qa:
+  flows:
+    calQCAP:   {work_dir: "work_{flow}", netlists: ["CCI_DB.spice"]}
+    calQRCFS:  {work_dir: "work_{flow}", netlists: ["{case}.spf"]}
+```
+
+**新增一種 EDA tool = 在設定裡加一個 profile，不需要改程式。**
+
+這也是為什麼提交時必須把 arcx.cfg 快照進 wave 目錄（§8）——
+三天後回頭做 QA，用的必須是當時那份 cfg。
+
+### 7.4 兩層 API
+
+**宣告層（YAML）** 涵蓋「檔案要在、要夠大」這類 80% 的情況，工程師不用寫 Python。
+
+**程式層（decorator）** 用於需要邏輯的檢查。一條檢查通常 3~10 行：
+
+```python
+@qa_check(id="NETLIST_MISSING", title="netlist 缺失",
+          severity=Severity.FATAL, scope=CASE, stage=POST)
+def netlist_missing(case: CaseContext) -> Optional[Issue]:
+    """期望的 netlist 檔案不存在。
+
+    這是抓「假成功」的主力 —— Arcx 寫了 .complete，但檔案根本沒產出來。
+    """
+    missing = [a for a in case.expected_artifacts if not case.exists(a.relpath)]
+    if not missing:
+        return None
+    return case.fail("缺少 %d 個 netlist" % len(missing),
+                     evidence={"missing": [a.relpath for a in missing]})
+```
+
+簡潔度來自 `CaseContext`：所有路徑相對 case run dir、**有快取**（十條檢查掃同一個
+case，每個目錄只 scandir 一次）、**不丟例外**（讀不到回 None）。
+docstring 直接顯示在 UI 上，文件與程式不會走歪。
+
+### 7.5 三個不可妥協的性質
+
+**① 「不知道」是一等公民。**
+`Severity.UNKNOWN` 專門用於「我檢查不了」——沒有 cfg 快照、格式不認得、
+QA function 自己爆炸。這種情況**絕不能當成 pass**，而且在 rerun 判定上偏向
+「刪掉重跑」（§6.1 的不對稱原則）。
+
+**② QA function 自己爆炸不能拖垮系統。**
+既然要讓工程師自己加規則，他們寫的 function 一定會有 bug。每條檢查都在 try 裡跑，
+爆炸的轉成 `QA_INTERNAL_ERROR`（UNKNOWN 嚴重度，附 traceback）並繼續跑其他檢查。
+
+**③ id 是介面。**
+policy.yaml 只認 id 不認實作，所以改檢查的實作不需要動 policy。
+重複註冊同一個 id 會直接報錯 —— 靜默覆蓋是最難查的那種問題。
+停用一條檢查用 `qa.disabled_checks`，不需要刪程式。
+
+### 7.6 「卡住」是分級顯示，不是二元判定
+
+單一 case 的 runtime 從 10 分鐘到 3 天都有，而且存在「不寫 log 但產出物已經齊了」
+的正常情況。硬判會大量誤報，所以系統負責把「安靜多久」講清楚並隨時間升級醒目程度，
+**判斷交給人**：
+
+```yaml
+quiet:
+  warn_after_sec: 14400          # 4h   少見，值得看一眼        → WARN
+  stalled_after_sec: 28800       # 8h   基本上可判定卡住        → FATAL
+  downgrade_when_artifacts_ready: true   # 產出物已齊 → 降一級
+```
+
+### 7.7 Policy（Phase 4）
 
 ```yaml
 policies:
-  ARTIFACT_MISSING:    {action: rerun_wave, max_auto: 1}
-  ARTIFACT_TRUNCATED:  {action: rerun_wave, max_auto: 1}
-  LSF_MEMLIMIT:        {action: rerun_wave, mem_multiplier: 2.0, max_auto: 2}
+  NETLIST_MISSING:     {action: rerun_wave, max_auto: 1}
+  NETLIST_EMPTY:       {action: rerun_wave, max_auto: 1}
+  FLOW_DIR_MISSING:    {action: escalate}
+  CASE_QUIET:          {action: escalate}
   CASE_NEVER_STARTED:  {action: escalate}
-  CASE_STALLED:        {action: escalate}
-  MARKER_INCONSISTENT: {action: escalate}
-  DISK_LOW:            {action: pause_submission}
+  QA_INTERNAL_ERROR:   {action: escalate}
 
 default: {action: escalate}          # 原則：不確定就停手
 
 budgets:
   max_auto_actions_per_run: 20
   cooldown_sec: 900
-  same_issue_burst_limit: 5          # 同一 ID 短時間爆量 → 停自動、全面升級
+  same_issue_burst_limit: 5          # 同一 id 短時間爆量 → 停自動、全面升級
   global_kill_switch: false
 ```
-
----
 
 ## 8. 儲存與行程模型
 

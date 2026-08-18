@@ -14,7 +14,8 @@ RC extraction 自動化提交、監控、判定與重跑系統。
 |---|---|---|
 | **0** | Domain + FsAdapter + Collector + StateEngine + `status` CLI | ✅ 已完成 |
 | **2a** | ArcxAdapter (dir_map / special.cfg) + WavePlanner + `plan` CLI | ✅ 已完成 |
-| 1 | Store + Daemon + QA Registry + 唯讀 Web UI | 待做 |
+| **1a** | arcx.cfg parser + QA Registry + StateResolver | ✅ 已完成 |
+| 1b | Store + Daemon + 唯讀 Web UI | 待做 |
 | 2b | Preflight + WorkspaceBuilder + Launcher + SubmissionController | 待做 |
 | 3 | Rerun Drain 狀態機 + Triage Queue | 待做 |
 | 4 | PolicyEngine 自動 remediation | 待做 |
@@ -134,6 +135,38 @@ cmd_folder/cmd_file_1                           script，內含 `cd <case run di
 
 無法解析的 log 會進 `unresolved_logs` 並顯示在 `status` 的「掃描異常」區 ——
 代表有一個 case 我們監控不到，不能靜默忽略。
+
+### QA：期望產出物由 arcx.cfg 推導
+
+```
+arcx.cfg                                case run dir
+1 BEGIN_SETTINGS: blocking_naming_qcap    NTN_1/
+1   QC_FLOW = calQCAP                       blocking_naming_qcap_calQCAP/
+END_SETTINGS                                  work_calQCAP/
+                                                CCI_DB.spice
+```
+
+規則：`<block>_<QC_FLOW>/work_<QC_FLOW>/<該 flow 的 netlist>`。
+每個 flow 產出什麼定義在 `qa.flows` —— **新增一種 EDA tool 只要改設定，不用改程式**。
+
+要加一條檢查，在 `arcx_auto/services/qa/checks_case.py` 複製一個既有的來改：
+
+```python
+@qa_check(id="NETLIST_MISSING", title="netlist 缺失",
+          severity=Severity.FATAL, scope=CASE, stage=POST)
+def netlist_missing(case: CaseContext) -> Optional[Issue]:
+    """這段 docstring 會直接顯示在 UI 上。"""
+    missing = [a for a in case.expected_artifacts if not case.exists(a.relpath)]
+    if not missing:
+        return None
+    return case.fail("缺少 %d 個 netlist" % len(missing),
+                     evidence={"missing": [a.relpath for a in missing]})
+```
+
+要停用一條：設定裡的 `qa.disabled_checks` 加上它的 id，不用刪程式。
+
+QA 的三個不可妥協性質：**「不知道」絕不當成通過**（`Severity.UNKNOWN`）、
+**一條壞規則不能拖垮監控**（每條檢查獨立 try）、**id 是介面**（重複註冊直接報錯）。
 
 ### 架構鐵律
 

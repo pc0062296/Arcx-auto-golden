@@ -146,6 +146,71 @@ class LsfSettings:
 
 
 @dataclass
+class FlowProfile:
+    """一個 EDA tool flow 在 case run dir 內留下什麼。
+
+    路徑樣板可用的變數:
+        {flow}   QC_FLOW 的值, 例如 calQCAP
+        {block}  arcx.cfg 內的 block 名稱
+        {case}   case id (cell 名稱), 例如 NTN_1
+
+    新增一種 EDA tool = 在設定裡加一個 profile, 不需要改程式。
+    """
+
+    work_dir: str = "work_{flow}"
+    netlists: List[str] = field(default_factory=list)
+    min_bytes: int = 1
+
+
+@dataclass
+class ReportSettings:
+    """index run folder 底下的 QC_* report 目錄。"""
+
+    # 一定會存在的, 缺了就是 FATAL
+    required_dirs: List[str] = field(default_factory=lambda: ["QC_Cc", "QC_Ct"])
+    # 有的話要檢查內容, 沒有也不算錯 (未來再補其他 QC_* 的邏輯)
+    optional_dirs: List[str] = field(default_factory=lambda: ["QC_Spice"])
+    # QC_Cc/Report_QC_Cc
+    main_file_template: str = "Report_{dir}"
+    # QC_Cc/Report_QC_Cc_Summary_SCCB3  —— 後綴會變, 所以用 glob
+    summary_glob_template: str = "Report_{dir}_Summary_*"
+
+
+@dataclass
+class QuietSettings:
+    """「多久沒寫 log」的分級門檻。
+
+    刻意做成**分級顯示**而不是二元判定: 單一 case 的 runtime 從 10 分鐘到
+    3 天都有, 而且存在「不寫 log 但產出物已經齊了」的正常情況。
+    系統負責把「安靜多久」講清楚並隨時間升級醒目程度, 判斷交給人。
+    """
+
+    warn_after_sec: float = 14400.0      # 4h  —— 少見, 值得看一眼
+    stalled_after_sec: float = 28800.0   # 8h  —— 基本上可判定卡住
+    # 產出物都齊了才安靜下來, 通常只是在收尾 -> 降一級, 避免誤報
+    downgrade_when_artifacts_ready: bool = True
+
+
+@dataclass
+class QaSettings:
+    """QA 檢查設定。"""
+
+    flows: Dict[str, FlowProfile] = field(default_factory=lambda: {
+        "calQCAP": FlowProfile(netlists=["CCI_DB.spice"]),
+        "calQRCFS": FlowProfile(netlists=["{case}.spf"]),
+    })
+    min_netlist_bytes: int = 1
+    reports: ReportSettings = field(default_factory=ReportSettings)
+    quiet: QuietSettings = field(default_factory=QuietSettings)
+    # arcx.cfg 中值看起來像絕對路徑的設定, 提交前要檢查檔案是否存在
+    verify_cfg_paths: bool = True
+    # 這些 key 即使長得像路徑也不檢查 (輸出路徑等執行後才會產生)
+    cfg_path_check_skip_keys: List[str] = field(default_factory=list)
+    # 要停用的檢查 id。放在設定裡, 這樣不需要刪程式就能關掉一條規則。
+    disabled_checks: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ExportSettings:
     """公用碟匯出 (architecture §9.5)。
 
@@ -170,6 +235,7 @@ class Settings:
     plan: PlanSettings = field(default_factory=PlanSettings)
     gate: GateSettings = field(default_factory=GateSettings)
     lsf: LsfSettings = field(default_factory=LsfSettings)
+    qa: QaSettings = field(default_factory=QaSettings)
     export: ExportSettings = field(default_factory=ExportSettings)
     source_path: Optional[str] = None
 
@@ -196,9 +262,40 @@ def _apply_overrides(target: Any, data: Dict[str, Any], path: str = "") -> List[
         current = getattr(target, key)
         if is_dataclass(current) and isinstance(value, dict):
             warnings.extend(_apply_overrides(current, value, where))
+        elif isinstance(current, dict) and isinstance(value, dict):
+            # 例如 qa.flows: {calQCAP: {...}} —— 值本身是 dataclass 時,
+            # 逐項合併而不是整個換掉, 這樣使用者只覆寫一個 flow 的一個欄位
+            # 也不會把其他預設值弄丟。
+            merged = dict(current)
+            for sub_key, sub_value in value.items():
+                existing = merged.get(sub_key)
+                if is_dataclass(existing) and isinstance(sub_value, dict):
+                    warnings.extend(_apply_overrides(
+                        existing, sub_value, "%s.%s" % (where, sub_key)))
+                elif isinstance(sub_value, dict) and _prototype(current) is not None:
+                    prototype = _prototype(current)
+                    fresh = prototype()
+                    warnings.extend(_apply_overrides(
+                        fresh, sub_value, "%s.%s" % (where, sub_key)))
+                    merged[sub_key] = fresh
+                else:
+                    merged[sub_key] = sub_value
+            setattr(target, key, merged)
         else:
             setattr(target, key, value)
     return warnings
+
+
+def _prototype(mapping: Dict[str, Any]) -> Optional[type]:
+    """從既有的值推斷這個 dict 裡裝的是哪種 dataclass。
+
+    用於「使用者新增了一個預設值裡沒有的 flow」的情況 —— 我們需要知道
+    該用哪個型別去建立它。
+    """
+    for value in mapping.values():
+        if is_dataclass(value) and not isinstance(value, type):
+            return type(value)
+    return None
 
 
 def _read_config_file(path: str) -> Dict[str, Any]:

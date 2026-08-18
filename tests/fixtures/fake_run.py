@@ -47,6 +47,13 @@ class CaseSpec:
         orphan_dir     只有 run dir, 沒有 marker 也沒有 log           (從未被提交)
         orphan_marker  只有 marker, 沒有 run dir                      (目錄被誤刪)
         no_cmd_file    有 log 但 cmd_file 缺失                        (無法對應到 case)
+
+    artifacts 控制產出物 (case run dir 內的巢狀結構):
+        full            每個 block 的 netlist 都完整
+        missing_netlist flow 目錄與 work 目錄都在, 但 netlist 沒產出來 (假成功)
+        empty_netlist   netlist 存在但是 0 byte (job 一開始就死了)
+        missing_flow    整個 <block>_<flow>/ 目錄不存在 (該 flow 根本沒跑)
+        none            什麼都沒有
     """
 
     def __init__(
@@ -55,11 +62,13 @@ class CaseSpec:
         kind: str = "complete",
         log_bytes: int = 4096,
         age_sec: float = 0.0,
+        artifacts: str = "full",
     ) -> None:
         self.case_id = case_id
         self.kind = kind
         self.log_bytes = log_bytes
         self.age_sec = age_sec
+        self.artifacts = artifacts
 
 
 _MARKERS: Dict[str, List[str]] = {
@@ -106,8 +115,8 @@ def make_index_run_folder(
     os.makedirs(folder, exist_ok=True)
     cmd_dir = os.path.join(folder, "cmd_folder")
 
-    for name in report_dirs:
-        os.makedirs(os.path.join(folder, name), exist_ok=True)
+    if report_dirs:
+        make_report_dirs(folder, tuple(report_dirs))
 
     now = time.time()
     num = start_num
@@ -121,6 +130,7 @@ def make_index_run_folder(
 
         if _HAS_DIR[spec.kind]:
             os.makedirs(case_dir, exist_ok=True)
+            _make_artifacts(case_dir, spec.case_id, spec.artifacts)
 
         if _HAS_CMD[spec.kind]:
             os.makedirs(cmd_dir, exist_ok=True)
@@ -142,6 +152,66 @@ def make_index_run_folder(
         num += 1
 
     return folder
+
+
+DEFAULT_BLOCKS = (
+    ("blocking_naming_qcap", "calQCAP", "CCI_DB.spice"),
+    ("blocking_naming_qrcfs", "calQRCFS", "{case}.spf"),
+)
+
+
+def make_arcx_cfg(path, blocks=DEFAULT_BLOCKS):
+    """造一份 arcx.cfg, 格式與真實範例一致 (含行首的旗標欄)。"""
+    lines = []
+    for name, flow, _netlist in blocks:
+        lines.append("1 BEGIN_SETTINGS: %s" % name)
+        lines.append("1 QC_FLOW = %s" % flow)
+        lines.append("1 RCX_TECH_QTF = /path/to/%s.qtf" % flow)
+        lines.append("1 RCX_LAYER_NAME_MAP = /path/to/%s.map" % flow)
+        lines.append("END_SETTINGS")
+        lines.append("")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+    return path
+
+
+def _make_artifacts(case_dir, case_id, mode, blocks=DEFAULT_BLOCKS):
+    """造出 <block>_<flow>/work_<flow>/<netlist> 的巢狀結構。"""
+    if mode == "none":
+        return
+    for name, flow, netlist_tmpl in blocks:
+        flow_dir = os.path.join(case_dir, "%s_%s" % (name, flow))
+        if mode == "missing_flow":
+            continue
+        work_dir = os.path.join(flow_dir, "work_%s" % flow)
+        os.makedirs(work_dir, exist_ok=True)
+        if mode == "missing_netlist":
+            continue
+        netlist = os.path.join(work_dir, netlist_tmpl.format(case=case_id))
+        body = b"" if mode == "empty_netlist" else (
+            ("* netlist for %s (%s)\n" % (case_id, flow)).encode() + b"R1 a b 1k\n" * 200
+        )
+        with open(netlist, "wb") as handle:
+            handle.write(body)
+
+
+def make_report_dirs(folder, names=("QC_Cc", "QC_Ct", "QC_Spice"),
+                     summary_suffix="SCCB3", skip_files=()):
+    """造 QC_* report 目錄:
+
+        QC_Cc/Report_QC_Cc
+        QC_Cc/Report_QC_Cc_Summary_SCCB3
+    """
+    for name in names:
+        path = os.path.join(folder, name)
+        os.makedirs(path, exist_ok=True)
+        if name in skip_files:
+            continue
+        for filename in ("Report_%s" % name,
+                         "Report_%s_Summary_%s" % (name, summary_suffix)):
+            with open(os.path.join(path, filename), "w", encoding="utf-8") as h:
+                h.write("# %s\n" % filename)
 
 
 def make_index_source(
@@ -216,30 +286,35 @@ def build_demo(root: str) -> Dict[str, str]:
 
     dir_map_path = make_dir_map(os.path.join(root, "dir_map"), entries)
 
+    # QA 需要 arcx.cfg 才知道該檢查哪些產出物
+    cfg_path = make_arcx_cfg(os.path.join(wave, "arcx.cfg"))
+
     # index 1000: 與使用者提供的真實 ls -a 完全一致
     #   .queue.NDIO_1 / .run.PDIO_1 / .complete.NTN_1
     make_index_run_folder(wave, "1000", [
-        CaseSpec("NDIO_1", "queued"),
-        CaseSpec("PDIO_1", "running", log_bytes=20480),
-        CaseSpec("NTN_1", "complete"),
+        CaseSpec("NDIO_1", "queued", artifacts="none"),
+        CaseSpec("PDIO_1", "running", log_bytes=20480, artifacts="none"),
+        CaseSpec("NTN_1", "complete", artifacts="full"),
     ])
 
-    # index 1001: 各種異常。cell 名稱刻意讓「編號順序 != 字母順序」,
-    # 藉此證明系統沒有偷偷用編號去猜 case。
+    # index 1001: 各種異常。
+    # cell 名稱刻意讓「編號順序 != 字母順序」, 證明系統沒有偷偷用編號猜 case。
+    # 前三個都有 .complete marker —— 人工看全部像成功, 只有第一個是真的。
     make_index_run_folder(wave, "1001", [
-        CaseSpec("PMOS_10", "complete"),                       # cmd_file_1
+        CaseSpec("PMOS_10", "complete", artifacts="full"),           # 真成功
+        CaseSpec("NMOS_1", "complete", artifacts="missing_netlist"), # 假成功
+        CaseSpec("CAP_MIM", "complete", artifacts="empty_netlist"),  # 假成功
         CaseSpec("PMOS_2", "stalled", log_bytes=2048,
-                 age_sec=7200),                                # cmd_file_2
-        CaseSpec("NMOS_1", "inconsistent"),                    # cmd_file_3
-        CaseSpec("RES_HI", "orphan_dir"),                      # (無 cmd_file)
-        CaseSpec("CAP_MIM", "orphan_marker"),                  # cmd_file_5
-        CaseSpec("DIODE_X", "no_cmd_file"),                    # log 但無 cmd_file
+                 age_sec=9 * 3600, artifacts="none"),                # 卡住 9 小時
+        CaseSpec("RES_HI", "orphan_dir", artifacts="none"),          # 從未提交
+        CaseSpec("DIODE_X", "no_cmd_file", artifacts="none"),        # 監控不到
     ])
 
     return {
         "root": root,
         "dir_map": dir_map_path,
         "wave_dir": wave,
+        "arcx_cfg": cfg_path,
         "sources": sources,
     }
 

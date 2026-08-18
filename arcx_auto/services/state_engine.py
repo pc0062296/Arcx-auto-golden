@@ -115,8 +115,11 @@ def transition_case(
         last_progress_at=last_progress_at,
     )
 
+    # 用 base_state 比對而不是 state: state 可能已被 StateResolver 收斂成
+    # DONE / FAILED / STALLED, 拿它來比會讓 entered_state_at 每個 tick 重置。
+    prev_base = (prev.base_state or prev.state) if prev else None
     entered_state_at = (
-        prev.entered_state_at if prev and prev.state == state else now
+        prev.entered_state_at if prev and prev_base == state else now
     )
 
     snapshot = CaseSnapshot(
@@ -134,16 +137,17 @@ def transition_case(
         exec_path=obs.exec_path or (prev.exec_path if prev else None),
         marker_inconsistent=obs.marker_inconsistent,
         note=reason,
+        base_state=state,
     )
 
     events: List[StateEvent] = []
-    if prev is None or prev.state != state:
+    if prev is None or prev_base != state:
         events.append(
             StateEvent(
                 ts=now,
                 index_key="",  # 由 transition_index_run 補上
                 case_id=obs.case_id,
-                from_state=prev.state if prev else None,
+                from_state=prev_base,
                 to_state=state,
                 reason=reason,
                 evidence={

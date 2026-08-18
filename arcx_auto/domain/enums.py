@@ -111,10 +111,16 @@ class Completeness(str, Enum):
 
 
 class Severity(str, Enum):
-    """QA issue 的嚴重度。"""
+    """QA issue 的嚴重度。
+
+    UNKNOWN 是刻意存在的一等公民: 「我檢查不了」絕不能被當成「通過」。
+    讀不到 case run dir、格式不認得、QA function 自己爆炸 —— 這些都是
+    UNKNOWN, 而 UNKNOWN 在 rerun 判定上偏向「刪掉重跑」(architecture §6.1)。
+    """
 
     INFO = "INFO"
     WARN = "WARN"
+    UNKNOWN = "UNKNOWN"
     FATAL = "FATAL"
 
 

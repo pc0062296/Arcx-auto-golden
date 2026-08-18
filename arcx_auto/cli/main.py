@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Sequence
 
 from arcx_auto import __version__
 from arcx_auto.adapters.arcx import ArcxAdapter
+from arcx_auto.adapters.arcx_cfg import ArcxConfig, parse_arcx_cfg
 from arcx_auto.adapters.fs import FsAdapter
 from arcx_auto.adapters.lsf import LsfAdapter
 from arcx_auto.adapters.store import SnapshotStore
@@ -30,10 +31,13 @@ from arcx_auto.config.settings import Settings, load_settings
 from arcx_auto.domain.enums import PlanMode
 from arcx_auto.domain.models import IndexRunSnapshot, IndexSpec, as_json_dict
 from arcx_auto.services.collector import Collector
+from arcx_auto.services.qa import QaRunner
+from arcx_auto.services.qa.runner import IndexQaReport
 from arcx_auto.services.state_engine import (
     TransitionContext,
     transition_index_run,
 )
+from arcx_auto.services.state_resolver import resolve_case_state
 from arcx_auto.services.wave_planner import plan_waves
 
 
@@ -65,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true", help="輸出 JSON")
     status.add_argument("--no-lsf", action="store_true",
                         help="不查詢 LSF (離線測試用)")
+    status.add_argument("--arcx-cfg",
+                        help="arcx.cfg 路徑。QA 需要它才知道該檢查哪些產出物; "
+                             "未指定時會在 wave 目錄下自動尋找")
+    status.add_argument("--no-qa", action="store_true",
+                        help="只做觀測, 不跑 QA 檢查")
+    status.add_argument("--issues", action="store_true",
+                        help="列出所有 QA issue")
 
     # -- plan ----------------------------------------------------------
     plan = sub.add_parser("plan", help="產生分波計畫 (不建立任何目錄、不提交)")
@@ -114,7 +125,7 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
             time.sleep(interval)
         first = False
 
-        snapshots, observations, lsf_note = _scan_once(
+        snapshots, observations, reports, lsf_note = _scan_once(
             args, settings, fs, collector, store
         )
 
@@ -123,6 +134,9 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
                 "generated_at": time.time(),
                 "lsf_note": lsf_note,
                 "index_runs": [as_json_dict(s) for s in snapshots],
+                "qa_issues": [
+                    as_json_dict(i) for r in reports for i in r.all_issues()
+                ],
                 "scan_issues": [
                     {
                         "index_key": o.index_key,
@@ -145,6 +159,7 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
             print(render.render_status(
                 snapshots, now=time.time(), detail=args.detail,
                 lsf_note=lsf_note, observations=observations,
+                qa_reports=reports, show_issues=args.issues,
             ))
 
         if not interval:
@@ -181,18 +196,70 @@ def _scan_once(args, settings, fs, collector, store):
         settings.monitor, lsf_data_available=lsf_available, now=now
     )
 
+    arcx_config = _load_arcx_cfg(args, settings)
+    runner = None if args.no_qa else QaRunner(settings)
+
     snapshots: List[IndexRunSnapshot] = []
+    reports: List[IndexQaReport] = []
     updated: Dict[str, IndexRunSnapshot] = dict(previous)
+
     for observation in observations:
         key = observation.run_folder
         snapshot, _events = transition_index_run(previous.get(key), observation, ctx)
+
+        if runner is not None:
+            report = runner.run_index(snapshot, observation, arcx_config, now=now)
+            reports.append(report)
+            snapshot = _apply_qa(snapshot, report)
+
         snapshots.append(snapshot)
         updated[key] = snapshot
 
     if store:
         store.save(updated)
 
-    return snapshots, observations, lsf_note
+    return snapshots, observations, reports, lsf_note
+
+
+def _load_arcx_cfg(args, settings: Settings) -> Optional[ArcxConfig]:
+    """找出 arcx.cfg。
+
+    優先順序: --arcx-cfg > <wave_dir>/arcx.cfg > <run_folder>/../arcx.cfg
+    找不到不是錯誤 —— QA 會產生 CFG_EXPECTATION_UNAVAILABLE 這個
+    UNKNOWN issue, 明確說「我不知道該檢查什麼」而不是默默放行。
+    """
+    candidates: List[str] = []
+    if getattr(args, "arcx_cfg", None):
+        candidates.append(args.arcx_cfg)
+    elif getattr(args, "wave_dir", None):
+        candidates.append(os.path.join(args.wave_dir, "arcx.cfg"))
+    else:
+        for folder in getattr(args, "run_folder", []) or []:
+            candidates.append(os.path.join(folder, os.pardir, "arcx.cfg"))
+
+    for candidate in candidates:
+        resolved = os.path.abspath(os.path.expanduser(candidate))
+        if os.path.isfile(resolved):
+            config = parse_arcx_cfg(resolved)
+            for warning in config.warnings:
+                print("  ! arcx.cfg: %s" % warning, file=sys.stderr)
+            return config
+    return None
+
+
+def _apply_qa(snapshot: IndexRunSnapshot, report: IndexQaReport) -> IndexRunSnapshot:
+    """把 QA 結果收斂進 case 狀態 (COMPLETED_MARKER -> DONE / FAILED)。"""
+    from dataclasses import replace
+
+    cases = {}
+    for case_id, case in snapshot.cases.items():
+        issues = report.issues_for(case_id)
+        base = case.base_state or case.state
+        final, reason = resolve_case_state(base, issues)
+        cases[case_id] = replace(
+            case, state=final, note=reason or case.note) if final != case.state \
+            else case
+    return replace(snapshot, cases=cases)
 
 
 # --------------------------------------------------------------------------

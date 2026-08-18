@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
-from arcx_auto.domain.enums import CaseState, Completeness, PlanMode
+from arcx_auto.domain.enums import CaseState, Completeness, PlanMode, Severity
 from arcx_auto.domain.models import (
     DirMap,
     IndexRunObservation,
@@ -12,6 +12,7 @@ from arcx_auto.domain.models import (
     IndexSpec,
     WavePlan,
 )
+from arcx_auto.domain.qa import Issue
 from arcx_auto.services.state_engine import classify_completeness
 from arcx_auto.util.textfmt import (
     format_duration,
@@ -41,6 +42,8 @@ def render_status(
     detail: bool = False,
     lsf_note: Optional[str] = None,
     observations: Optional[Sequence["IndexRunObservation"]] = None,
+    qa_reports: Optional[Sequence[object]] = None,
+    show_issues: bool = False,
 ) -> str:
     """狀態總覽。"""
     lines: List[str] = []
@@ -100,6 +103,11 @@ def render_status(
             attention_rows,
         ))
 
+    qa_block = _render_qa_issues(qa_reports or (), show_all=show_issues)
+    if qa_block:
+        lines.append("")
+        lines.append(qa_block)
+
     scan_issues = _render_scan_issues(observations or ())
     if scan_issues:
         lines.append("")
@@ -128,6 +136,73 @@ def render_status(
                 aligns=["left", "left", "left", "right", "right", "right", "left"],
             ))
     return "\n".join(lines)
+
+
+#: 嚴重度顯示順序與標記。UNKNOWN 刻意排在 WARN 之上 ——
+#: 「檢查不了」比「有小問題」更需要人來看。
+_SEVERITY_ORDER = [Severity.FATAL, Severity.UNKNOWN, Severity.WARN, Severity.INFO]
+_SEVERITY_MARK = {
+    Severity.FATAL: "!!",
+    Severity.UNKNOWN: "??",
+    Severity.WARN: "! ",
+    Severity.INFO: "  ",
+}
+
+
+def _render_qa_issues(reports: Sequence[object], show_all: bool = False) -> str:
+    """QA 發現的問題。
+
+    預設只列 FATAL / UNKNOWN (需要人處理的); --issues 才列全部。
+    同 id 的 issue 會被聚合 —— 200 個 case 犯同一個錯時, 工程師需要看到的是
+    「NETLIST_MISSING x 200」而不是 200 行一樣的訊息。
+    """
+    issues: List[Issue] = []
+    for report in reports:
+        issues.extend(getattr(report, "all_issues")())
+    if not issues:
+        return ""
+
+    if not show_all:
+        issues = [i for i in issues
+                  if i.severity in (Severity.FATAL, Severity.UNKNOWN)]
+        if not issues:
+            return ""
+
+    grouped: Dict[str, List[Issue]] = {}
+    for issue in issues:
+        grouped.setdefault(issue.id, []).append(issue)
+
+    def group_key(item):
+        first = item[1][0]
+        rank = (_SEVERITY_ORDER.index(first.severity)
+                if first.severity in _SEVERITY_ORDER else 99)
+        return (rank, -len(item[1]), item[0])
+
+    rows = []
+    for issue_id, group in sorted(grouped.items(), key=group_key):
+        first = group[0]
+        targets = sorted({i.case_id or i.index_key or "-" for i in group})
+        shown = ", ".join(targets[:4])
+        if len(targets) > 4:
+            shown += " ... (+%d)" % (len(targets) - 4)
+        rows.append([
+            _SEVERITY_MARK.get(first.severity, "  ") + " " + first.severity.value,
+            issue_id,
+            str(len(group)),
+            first.title or "",
+            shown,
+        ])
+
+    total = sum(len(g) for g in grouped.values())
+    header = "== QA 問題 (%d) ==" % total
+    if not show_all:
+        header += "   (只顯示 FATAL/UNKNOWN, 加 --issues 看全部)"
+    return header + "\n" + render_table(
+        ["嚴重度", "issue id", "數量", "說明", "對象"],
+        rows,
+        aligns=["left", "left", "right", "left", "left"],
+        max_col_width=44,
+    )
 
 
 def _render_scan_issues(observations: Sequence["IndexRunObservation"]) -> str:

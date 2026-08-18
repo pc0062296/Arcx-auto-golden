@@ -78,8 +78,44 @@ class CliTest(unittest.TestCase):
             ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf"])
         self.assertEqual(code, 0)
         self.assertIn("總覽", out)
-        self.assertIn("COMPLETED_MARKER", out)
+        self.assertIn("DONE", out)
         self.assertIn("STALLED", out)
+
+    def test_status_detects_fake_success(self):
+        """demo 裡有三個 case 帶 .complete marker, 只有一個真的成功。
+
+        人工看這三個都像成功 —— 這正是系統要抓的東西。
+        """
+        code, out, _ = run_cli(
+            ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf"])
+        self.assertEqual(code, 0)
+        self.assertIn("FAILED", out)
+        self.assertIn("NETLIST_MISSING", out)
+        self.assertIn("NETLIST_EMPTY", out)
+
+    def test_status_no_qa_keeps_raw_marker_state(self):
+        """--no-qa 時只做觀測, 不把 COMPLETED_MARKER 收斂成 DONE/FAILED。"""
+        code, out, _ = run_cli(
+            ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf", "--no-qa"])
+        self.assertEqual(code, 0)
+        self.assertIn("COMPLETED_MARKER", out)
+        self.assertNotIn("QA 問題", out)
+
+    def test_status_json_carries_qa_issues(self):
+        code, out, _ = run_cli(
+            ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf", "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        ids = {i["id"] for i in data["qa_issues"]}
+        self.assertIn("NETLIST_MISSING", ids)
+
+    def test_status_issues_flag_shows_warnings_too(self):
+        _c, brief, _ = run_cli(
+            ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf"])
+        _c, full, _ = run_cli(
+            ["status", "--wave-dir", self.demo["wave_dir"], "--no-lsf", "--issues"])
+        self.assertGreater(len(full), len(brief))
+        self.assertIn("CASE_QUIET", full)
 
     def test_status_json(self):
         code, out, _ = run_cli(
