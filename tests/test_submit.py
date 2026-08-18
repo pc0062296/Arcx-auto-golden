@@ -550,6 +550,46 @@ class PreflightCheckTest(unittest.TestCase):
             json.dump({"index_keys": ["1000"], "created_at": 1.0}, handle)
         self.assertIn("PREFLIGHT_INDEX_IN_USE", self._ids())
 
+    def test_a_missing_special_cfg_is_excluded_by_default(self):
+        """default_cpu_per_case ships as 0, meaning "do not guess". The index
+        is dropped from the plan and reported, rather than sized from a number
+        nobody checked.
+        """
+        from arcx_auto.adapters.arcx import ArcxAdapter
+
+        index_path = sorted(self.entries.values())[0]
+        os.remove(os.path.join(index_path, self.settings.layout.special_cfg_name))
+        arcx = ArcxAdapter(self.settings.layout, self.settings.plan)
+        specs = [arcx.build_index_spec(k, p)
+                 for k, p in sorted(self.entries.items())]
+        plan = plan_waves(specs, max_slots_per_wave=100)
+        ids = self._ids(plan=plan)
+        self.assertIn("PREFLIGHT_INDEX_EXCLUDED", ids)
+        self.assertNotIn("PREFLIGHT_SLOTS_ESTIMATED", ids)
+
+    def test_a_guessed_cpu_count_warns(self):
+        """Only when a fallback is configured does the index stay in the plan.
+
+        Then the slot cap -- the one thing keeping the queue from flooding --
+        is computed from a number nobody read, and a fallback smaller than the
+        real O_QCAP_LSF_NUM makes every wave containing that index bigger than
+        the cap suggests, silently, because the arithmetic still adds up.
+        """
+        from arcx_auto.adapters.arcx import ArcxAdapter
+
+        self.settings.plan.default_cpu_per_case = 4
+        index_path = sorted(self.entries.values())[0]
+        os.remove(os.path.join(index_path, self.settings.layout.special_cfg_name))
+        arcx = ArcxAdapter(self.settings.layout, self.settings.plan)
+        specs = [arcx.build_index_spec(k, p)
+                 for k, p in sorted(self.entries.items())]
+        self.assertTrue(any(s.cpu_estimated for s in specs))
+        plan = plan_waves(specs, max_slots_per_wave=100)
+        self.assertIn("PREFLIGHT_SLOTS_ESTIMATED", self._ids(plan=plan))
+
+    def test_a_real_special_cfg_does_not_warn(self):
+        self.assertNotIn("PREFLIGHT_SLOTS_ESTIMATED", self._ids())
+
 
 if __name__ == "__main__":
     unittest.main()

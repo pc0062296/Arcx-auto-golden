@@ -196,6 +196,13 @@ class QaRunner:
         cached = self._post_cache.get(key)
         if cached is not None:
             return cached
+        # A new attempt means the run dir was rebuilt, so every earlier verdict
+        # for this case describes files that have been moved aside. Drop them
+        # rather than let a long-lived daemon accumulate them for the life of
+        # the process.
+        for stale in [k for k in self._post_cache
+                      if k[0] == run_folder and k[1] == case_id]:
+            del self._post_cache[stale]
         result = self.registry.run(
             context, IssueScope.CASE, IssueStage.POST, case_id,
             disabled=self.disabled, attempt=attempt,

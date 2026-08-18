@@ -30,11 +30,13 @@ Two rules that are never bent:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import time
 from dataclasses import replace
 from typing import Callable, Dict, List, Optional, Tuple
 
+from arcx_auto.adapters.lock import FileLock, LockBusy
 from arcx_auto.adapters.lsf import LsfAdapter
 from arcx_auto.adapters.store import RunStore
 from arcx_auto.config.settings import Settings
@@ -95,6 +97,36 @@ class Remediator:
             say("dry run: nothing will be stopped, moved or submitted")
             return replace(outcome, phase=RerunPhase.REQUESTED)
 
+        # One wave directory, one writer. Without this two reruns started a
+        # minute apart both pass the quiescent gate, both move the same run
+        # dirs aside, and both resubmit -- leaving two Arcx parents writing
+        # into one wave. The lock lives in the wave dir itself, so it covers
+        # every machine that mounts the share.
+        lock = FileLock(
+            os.path.join(plan.wave_dir, ".arcx_auto", "lock"),
+            purpose="arcx-auto rerun wave=%s attempt=%d"
+                    % (plan.wave_name, plan.attempt),
+        )
+        try:
+            lock.acquire()
+        except LockBusy as exc:
+            message = "this wave is already being worked on: %s" % exc
+            say(message)
+            self._audit(run_id, "rerun_lock_busy", plan, {"error": str(exc)})
+            return replace(outcome, phase=RerunPhase.ABORTED, error=message)
+        except OSError as exc:
+            message = "could not take the wave lock: %s" % exc
+            say(message)
+            return replace(outcome, phase=RerunPhase.ABORTED, error=message)
+
+        try:
+            return self._run_locked(outcome, plan, run_id, say)
+        finally:
+            lock.release()
+
+    def _run_locked(self, outcome: RerunOutcome, plan: RerunPlan,
+                    run_id: str, say: Progress) -> RerunOutcome:
+        """The destructive part, with the wave lock held."""
         self._audit(run_id, "rerun_started", plan, {
             "delete": [d.case_id for d in plan.to_delete],
             "uncertain": [d.case_id for d in plan.uncertain],
@@ -207,7 +239,8 @@ class Remediator:
         settings = self.settings.lsf
         deadline = time.time() + settings.quiescent_timeout_sec
         checks: List[QuiescentCheck] = []
-        previous_markers = _marker_fingerprint(plan.wave_dir)
+        marker_re = re.compile(self.settings.layout.marker_any_regex)
+        previous_markers = _marker_fingerprint(plan.wave_dir, marker_re)
         confirmed = 0
 
         while confirmed < settings.quiescent_confirm_times:
@@ -221,7 +254,7 @@ class Remediator:
             self.sleep(settings.quiescent_interval_sec)
 
             jobs, _raw, error = self.lsf.count_jobs_under_path(plan.wave_dir)
-            markers = _marker_fingerprint(plan.wave_dir)
+            markers = _marker_fingerprint(plan.wave_dir, marker_re)
             changed = markers != previous_markers
             previous_markers = markers
 
@@ -354,17 +387,41 @@ class Remediator:
         self.store.append_audit(record)
 
 
-def _marker_fingerprint(wave_dir: str) -> Tuple[str, ...]:
-    """A stable fingerprint of every marker under the wave directory.
+def _marker_fingerprint(wave_dir: str, marker_re) -> Tuple[str, ...]:
+    """A stable fingerprint of the markers under the wave directory.
 
     A change between readings means something is still writing, which is
     exactly what the gate must not miss.
+
+    Two things this deliberately does **not** do:
+
+      * It does not recurse. Markers live one level down, in the index run
+        folders. Walking the whole tree would stat every netlist and every
+        QC_* report on NFS, three times, inside a 15 minute deadline.
+
+      * It does not treat every dot-file as a marker. NFS renames a file that
+        is deleted while still open to `.nfs0000...`, and those appear exactly
+        when jobs are being killed -- which is the moment this gate runs. A
+        fingerprint that counted them would churn on every reading, the
+        confirmation count would never reach K, and every rerun would abort at
+        the safety gate for a reason that has nothing to do with safety.
     """
     found: List[str] = []
-    for root, dirnames, filenames in os.walk(wave_dir):
-        if ".arcx_auto" in dirnames:
-            dirnames.remove(".arcx_auto")
-        for name in filenames:
-            if name.startswith("."):
-                found.append(os.path.join(root, name))
+    try:
+        index_dirs = [e.path for e in os.scandir(wave_dir)
+                      if e.is_dir() and e.name != ".arcx_auto"]
+    except OSError:
+        return ()
+    for index_dir in index_dirs:
+        try:
+            entries = list(os.scandir(index_dir))
+        except OSError:
+            # An unreadable directory is not proof of quiet. Feed a value that
+            # differs from any real reading so the gate keeps waiting instead
+            # of concluding "nothing changed".
+            found.append("%s\0unreadable\0%f" % (index_dir, time.time()))
+            continue
+        for entry in entries:
+            if marker_re.match(entry.name):
+                found.append(entry.path)
     return tuple(sorted(found))

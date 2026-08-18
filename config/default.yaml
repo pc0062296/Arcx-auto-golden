@@ -51,7 +51,10 @@ layout:
 # Monitoring thresholds
 # ---------------------------------------------------------------------------
 monitor:
-  stall_threshold_sec: 3600      # log unchanged this long -> STALLED
+  # Fallback only, used when QA is switched off. Normally qa.quiet does the
+  # grading and StateResolver promotes RUNNING to STALLED from its issue, so
+  # keep this equal to qa.quiet.stalled_after_sec or the shorter clock wins.
+  stall_threshold_sec: 28800     # 8h; log unchanged this long -> STALLED
   long_pend_warn_sec: 7200
   lost_grace_sec: 300            # wait this long after an LSF job vanishes
   log_head_bytes: 8192

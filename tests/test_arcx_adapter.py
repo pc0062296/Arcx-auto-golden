@@ -104,7 +104,7 @@ class SpecialCfgTest(unittest.TestCase):
 
     def test_reads_cpu_from_special_cfg(self):
         path = make_index_source(self.tmp.name, "1000", gds_count=5, cpu_per_case=7)
-        cpu, warnings = self.adapter.read_cpu_per_case(path)
+        cpu, warnings, _estimated = self.adapter.read_cpu_per_case(path)
         self.assertEqual(cpu, 7)
         self.assertEqual(warnings, [])
 

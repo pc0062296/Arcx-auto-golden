@@ -315,3 +315,27 @@ class CompletenessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StallThresholdAgreementTest(unittest.TestCase):
+    """Two settings mean "stalled" and both are live. They have to agree.
+
+    StateEngine runs first and sets base_state, and StateResolver only promotes
+    RUNNING -- so if MonitorSettings has the shorter clock it wins outright and
+    the graded 4h/8h escalation never gets a chance to apply. A case quiet for
+    seventy minutes, which is routine for this workload, would be displayed as
+    STALLED.
+    """
+
+    def test_the_state_machine_does_not_undercut_the_graded_grading(self):
+        from arcx_auto.config.settings import Settings
+
+        settings = Settings()
+        self.assertEqual(settings.monitor.stall_threshold_sec,
+                         settings.qa.quiet.stalled_after_sec)
+
+    def test_warn_comes_before_stalled(self):
+        from arcx_auto.config.settings import Settings
+
+        quiet = Settings().qa.quiet
+        self.assertLess(quiet.warn_after_sec, quiet.stalled_after_sec)

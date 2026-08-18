@@ -181,10 +181,18 @@ class ArcxAdapter:
             values[match.group("key")] = value
         return values, warnings
 
-    def read_cpu_per_case(self, index_path: str) -> Tuple[int, List[str]]:
+    def read_cpu_per_case(
+        self, index_path: str
+    ) -> Tuple[int, List[str], bool]:
         """Read the per-case CPU count from <index_path>/special.cfg.
 
         The key is O_QCAP_LSF_NUM, overridable in settings.
+
+        Returns (cpu, warnings, estimated). ``estimated`` says the number
+        is the configured default because the file could not be read --
+        the caller needs that as data, not as a warning string, because a
+        default that is smaller than the real value silently oversizes
+        every wave it appears in.
         """
         warnings: List[str] = []
         cfg_path = os.path.join(index_path, self.layout.special_cfg_name)
@@ -192,25 +200,25 @@ class ArcxAdapter:
 
         if not os.path.isfile(cfg_path):
             warnings.append("%s not found" % cfg_path)
-            return (self.plan.default_cpu_per_case, warnings)
+            return (self.plan.default_cpu_per_case, warnings, True)
 
         values, parse_warnings = self.parse_key_values(cfg_path)
         warnings.extend(parse_warnings)
 
         if key not in values:
             warnings.append("%s does not contain %s" % (cfg_path, key))
-            return (self.plan.default_cpu_per_case, warnings)
+            return (self.plan.default_cpu_per_case, warnings, True)
 
         raw = values[key]
         try:
             cpu = int(float(raw))
         except ValueError:
             warnings.append("%s = %r is not a number" % (key, raw))
-            return (self.plan.default_cpu_per_case, warnings)
+            return (self.plan.default_cpu_per_case, warnings, True)
 
         if cpu <= 0:
             warnings.append("%s = %d is not positive" % (key, cpu))
-        return (cpu, warnings)
+        return (cpu, warnings, False)
 
     # ------------------------------------------------------------------
     # IndexSpec
@@ -237,7 +245,7 @@ class ArcxAdapter:
         if gds_count == 0:
             warnings.append("no GDS files found in the index path")
 
-        cpu, cpu_warnings = self.read_cpu_per_case(resolved)
+        cpu, cpu_warnings, estimated = self.read_cpu_per_case(resolved)
         warnings.extend(cpu_warnings)
 
         keywords = self.match_keywords(resolved)
@@ -258,6 +266,7 @@ class ArcxAdapter:
             priority=1 if keywords else 0,
             warnings=tuple(warnings),
             error=error,
+            cpu_estimated=estimated,
         )
 
     def match_keywords(self, path: str) -> Tuple[str, ...]:

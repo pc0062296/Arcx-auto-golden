@@ -397,3 +397,253 @@ class RemediatorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Concurrency and the safety gate's inputs
+#
+# Three defects found while reviewing the finished flow. Each one is silent:
+# nothing crashes, the wrong answer just looks like the right one.
+# ---------------------------------------------------------------------------
+
+class WaveLockTest(unittest.TestCase):
+    """One wave directory, one writer.
+
+    Two reruns started a minute apart would both pass the quiescent gate (each
+    sees zero jobs, because the other has not submitted yet), both move the
+    same run dirs aside, and both resubmit -- two Arcx parents writing into one
+    wave, which is the thing the whole design forbids.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.settings = Settings()
+        self.settings.lsf.drain_retry_delay_sec = 0
+        self.settings.lsf.quiescent_interval_sec = 0
+        self.wave, self.cfg = build_wave(self.tmp.name, [
+            CaseSpec("NTN_1", "complete", artifacts="full"),
+            CaseSpec("NDIO_1", "complete", artifacts="missing_netlist"),
+        ])
+        self.plan = plan_for(self.wave, self.cfg, self.settings)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _remediator(self, lsf):
+        from arcx_auto.services.launcher import Launcher
+
+        return Remediator(self.settings, lsf=lsf,
+                          launcher=Launcher(self.settings, lsf=lsf),
+                          sleep=lambda _s: None)
+
+    def test_a_held_wave_lock_refuses_the_rerun(self):
+        from arcx_auto.adapters.lock import FileLock
+
+        held = FileLock(os.path.join(self.wave, ".arcx_auto", "lock"),
+                        purpose="pretend another rerun")
+        held.acquire()
+        try:
+            lsf = FakeLsf(counts=[0, 0, 0, 0])
+            outcome = self._remediator(lsf).run(self.plan, run_id="demo")
+        finally:
+            held.release()
+
+        self.assertEqual(outcome.phase, RerunPhase.ABORTED)
+        self.assertIn("already being worked on", outcome.error)
+        # Refused before anything was touched -- no bkill, no move.
+        self.assertEqual(lsf.killed_jobs, [])
+        self.assertEqual(outcome.backed_up, ())
+        self.assertTrue(os.path.isdir(os.path.join(self.wave, "1000", "NDIO_1")))
+
+    def test_the_lock_is_released_afterwards(self):
+        from arcx_auto.adapters.lock import FileLock
+
+        outcome = self._remediator(FakeLsf(counts=[0, 0, 0, 0])).run(
+            self.plan, run_id="demo")
+        self.assertEqual(outcome.phase, RerunPhase.MONITORING)
+        # A second rerun must be able to take the lock again.
+        again = FileLock(os.path.join(self.wave, ".arcx_auto", "lock"))
+        again.acquire()
+        again.release()
+
+    def test_a_dry_run_takes_no_lock(self):
+        from arcx_auto.adapters.lock import FileLock
+
+        held = FileLock(os.path.join(self.wave, ".arcx_auto", "lock"))
+        held.acquire()
+        try:
+            outcome = self._remediator(FakeLsf(counts=[0])).run(
+                self.plan, run_id="demo", dry_run=True)
+        finally:
+            held.release()
+        self.assertEqual(outcome.phase, RerunPhase.REQUESTED)
+
+
+class MarkerFingerprintTest(unittest.TestCase):
+    """What the quiescent gate is allowed to call "something changed".
+
+    The gate restarts its confirmation count whenever the marker set moves. If
+    the fingerprint is too broad it never settles and every rerun aborts at the
+    safety gate for a reason that has nothing to do with safety.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.settings = Settings()
+        self.wave, self.cfg = build_wave(self.tmp.name, [
+            CaseSpec("NTN_1", "complete", artifacts="full")])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fingerprint(self):
+        import re
+
+        from arcx_auto.services.remediator import _marker_fingerprint
+
+        return _marker_fingerprint(
+            self.wave, re.compile(self.settings.layout.marker_any_regex))
+
+    def test_real_markers_are_seen(self):
+        self.assertTrue(any(".complete.NTN_1" in p for p in self._fingerprint()))
+
+    def test_nfs_silly_rename_files_are_ignored(self):
+        """NFS renames a file deleted while still open to .nfs0000...
+
+        Those appear exactly when jobs are being killed, which is the moment
+        this gate runs. Counting them would churn the fingerprint on every
+        reading and the confirmation count would never reach K.
+        """
+        before = self._fingerprint()
+        open(os.path.join(self.wave, "1000", ".nfs00000000000a1b2c3d"), "w").close()
+        self.assertEqual(self._fingerprint(), before)
+
+    def test_artifacts_deep_in_the_tree_are_ignored(self):
+        """Markers live one level down. Walking the whole tree would stat every
+        netlist and QC_* report on NFS, three times, inside a 15 minute deadline.
+        """
+        before = self._fingerprint()
+        deep = os.path.join(self.wave, "1000", "NTN_1", "nested", "deeper")
+        os.makedirs(deep, exist_ok=True)
+        open(os.path.join(deep, ".complete.SOMETHING"), "w").close()
+        self.assertEqual(self._fingerprint(), before)
+
+    def test_a_marker_appearing_changes_the_fingerprint(self):
+        before = self._fingerprint()
+        open(os.path.join(self.wave, "1000", ".run.LATE_1"), "w").close()
+        self.assertNotEqual(self._fingerprint(), before)
+
+    def test_an_unreadable_index_dir_never_reads_as_quiet(self):
+        """A directory that cannot be listed is not proof that nothing moved."""
+        import unittest.mock as mock
+
+        with mock.patch("os.scandir", side_effect=_scandir_failing_on_index):
+            first = self._fingerprint()
+            second = self._fingerprint()
+        self.assertNotEqual(first, second)
+
+
+_REAL_SCANDIR = os.scandir
+
+
+def _scandir_failing_on_index(path):
+    if os.path.basename(str(path)) == "1000":
+        raise OSError("stale NFS file handle")
+    return _REAL_SCANDIR(path)
+
+
+class PostCacheAttemptTest(unittest.TestCase):
+    """POST results must not outlive the run dir they describe.
+
+    POST checks are expensive and their answer cannot change -- except through
+    a rerun, which rebuilds the run dir from scratch. The cache key therefore
+    carries the attempt number. The monitor used to pass a constant 1, so a
+    long-lived daemon kept serving the verdict computed *before* the rerun,
+    against files that had since been moved into .arcx_auto/attempts/.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.settings = Settings()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _scan(self, monitor, wave, cfg):
+        return monitor.scan(run_folders=[os.path.join(wave, "1000")],
+                            arcx_config=parse_arcx_cfg(cfg), use_lsf=False)
+
+    @staticmethod
+    def _fatal_ids(result):
+        return sorted(i.id for i in result.all_issues() if i.severity.name == "FATAL")
+
+    @staticmethod
+    def _rebuild(wave, spec):
+        """What a rerun leaves behind: the index run folder built again from
+        nothing, not the old one written over."""
+        import shutil
+
+        shutil.rmtree(os.path.join(wave, "1000"))
+        make_index_run_folder(wave, "1000", [spec])
+
+    def _record_rerun(self, wave):
+        """What Launcher._record does on a resubmission: append an attempt."""
+        path = os.path.join(wave, ".arcx_auto", "launch.json")
+        with open(path, encoding="utf-8") as handle:
+            launch = json.load(handle)
+        launch["attempts"].append({"attempt": 2, "job_id": "99999", "rerun": True})
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(launch, handle)
+
+    def test_post_is_recomputed_after_a_rerun(self):
+        from arcx_auto.services.monitor import MonitorService
+
+        wave, cfg = build_wave(self.tmp.name, [
+            CaseSpec("NDIO_1", "complete", artifacts="missing_netlist")])
+        monitor = MonitorService(self.settings)
+
+        broken = self._scan(monitor, wave, cfg)
+        self.assertTrue(self._fatal_ids(broken),
+                        "the truncated case should fail POST on attempt 1")
+
+        # The rerun: the run dir is rebuilt complete, and launch.json gains an
+        # attempt. Same MonitorService instance, as a running daemon would be.
+        self._rebuild(wave, CaseSpec("NDIO_1", "complete", artifacts="full"))
+        self._record_rerun(wave)
+
+        fixed = self._scan(monitor, wave, cfg)
+        self.assertEqual(
+            self._fatal_ids(fixed), [],
+            "a successful rerun still reported the pre-rerun POST verdict")
+
+    def test_a_rerun_that_made_it_worse_is_also_seen(self):
+        """The mirror image, and the dangerous one: attempt 1 passed, the rerun
+        broke it, and a stale cache would keep reporting success.
+        """
+        from arcx_auto.services.monitor import MonitorService
+
+        wave, cfg = build_wave(self.tmp.name, [
+            CaseSpec("NDIO_1", "complete", artifacts="full")])
+        monitor = MonitorService(self.settings)
+
+        self.assertEqual(self._fatal_ids(self._scan(monitor, wave, cfg)), [])
+
+        self._rebuild(
+            wave, CaseSpec("NDIO_1", "complete", artifacts="missing_netlist"))
+        self._record_rerun(wave)
+
+        self.assertTrue(self._fatal_ids(self._scan(monitor, wave, cfg)),
+                        "a rerun that broke the case still reported success")
+
+    def test_without_a_rerun_post_is_only_computed_once(self):
+        """The cache still has to work, or every tick re-reads the run dir."""
+        from arcx_auto.services.monitor import MonitorService
+
+        wave, cfg = build_wave(self.tmp.name, [
+            CaseSpec("NDIO_1", "complete", artifacts="missing_netlist")])
+        monitor = MonitorService(self.settings)
+        self._scan(monitor, wave, cfg)
+        keys_after_first = set(monitor.qa_runner._post_cache)
+        self._scan(monitor, wave, cfg)
+        self.assertEqual(set(monitor.qa_runner._post_cache), keys_after_first)
+        self.assertEqual(len(keys_after_first), 1)

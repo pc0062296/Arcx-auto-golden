@@ -11,6 +11,7 @@ can be tested without a CLI at all.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -27,6 +28,7 @@ from arcx_auto.domain.models import (
 )
 from arcx_auto.domain.qa import Issue
 from arcx_auto.services.collector import Collector
+from arcx_auto.services.launcher import read_launch
 from arcx_auto.services.qa import QaRunner
 from arcx_auto.services.qa.runner import IndexQaReport
 from arcx_auto.services.state_engine import TransitionContext, transition_index_run
@@ -120,6 +122,7 @@ class MonitorService:
         reports: List[IndexQaReport] = []
         events: List[StateEvent] = []
         updated: Dict[str, IndexRunSnapshot] = dict(self.previous)
+        attempt_cache: Dict[str, int] = {}
 
         for observation in observations:
             key = observation.run_folder
@@ -128,8 +131,11 @@ class MonitorService:
             events.extend(new_events)
 
             if self.qa_runner is not None:
+                attempt = self._attempt_for(key, attempt_cache)
                 report = self.qa_runner.run_index(
-                    snapshot, observation, arcx_config, now=now)
+                    snapshot, observation, arcx_config, now=now,
+                    attempts={cid: attempt for cid in snapshot.cases},
+                )
                 reports.append(report)
                 snapshot = _apply_qa(snapshot, report)
 
@@ -147,6 +153,34 @@ class MonitorService:
             lsf_note=lsf_note,
             lsf_job_count=len(lsf_jobs),
         )
+
+
+    @staticmethod
+    def _attempt_for(run_folder: str, cache: Dict[str, int]) -> int:
+        """Which attempt the cases in this run folder belong to.
+
+        POST checks are expensive and their answer cannot change -- except
+        through a rerun, which rebuilds the run dir from scratch. So QaRunner
+        caches POST results per (run_folder, case, attempt), and the attempt
+        number is what makes a rerun invalidate them.
+
+        Passing a constant 1 here, which is what this used to do, meant a
+        long-lived daemon kept serving the POST verdict computed *before* the
+        rerun, against files that had since been moved into
+        .arcx_auto/attempts/. A case that failed and was successfully rerun
+        would show as failed forever, and a case that passed, was rerun and
+        then broke would show as passing. Both are the false-success failure
+        this whole system exists to prevent.
+
+        The wave's launch.json counts the submissions, so it is the authority:
+        run folders live one level below the wave dir, and every index run
+        folder in a wave shares its attempt number.
+        """
+        wave_dir = os.path.dirname(os.path.abspath(run_folder))
+        if wave_dir not in cache:
+            launch = read_launch(wave_dir)
+            cache[wave_dir] = max(1, len(launch.get("attempts") or []))
+        return cache[wave_dir]
 
 
 def _apply_qa(snapshot: IndexRunSnapshot, report: IndexQaReport) -> IndexRunSnapshot:

@@ -78,8 +78,19 @@ class LayoutSettings:
 class MonitorSettings:
     """Monitoring and state thresholds."""
 
-    # How long a log may stay the same size before the case counts as stalled
-    stall_threshold_sec: float = 3600.0
+    # How long a log may stay the same size before the case counts as stalled.
+    #
+    # This is the **fallback** path, used when QA is switched off. Normally
+    # QuietSettings does the grading (4h warn, 8h stalled) and StateResolver
+    # promotes RUNNING to STALLED from the resulting issue, which is where the
+    # architecture wants that judgement to live.
+    #
+    # It must therefore agree with QuietSettings.stalled_after_sec. It used to
+    # be one hour, and because StateEngine runs first and sets base_state, that
+    # shorter clock silently won: a case quiet for seventy minutes -- routine
+    # for this workload -- was already displayed as STALLED, and the graded
+    # 4h/8h escalation never got the chance to apply.
+    stall_threshold_sec: float = 28800.0
     # How long a PEND is worth noticing (informational only)
     long_pend_warn_sec: float = 7200.0
     # How long to wait after an LSF job disappears before declaring it LOST.

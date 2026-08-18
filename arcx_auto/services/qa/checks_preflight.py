@@ -196,3 +196,48 @@ def index_in_use(ctx: PreflightContext) -> Optional[Issue]:
         "%d index/indices were submitted in another wave" % len(conflicts),
         evidence={"conflicts": conflicts},
     )
+
+
+@qa_check(id="PREFLIGHT_SLOTS_ESTIMATED", title="wave size is based on a guess",
+          severity=Severity.WARN, scope=WAVE, stage=PRE)
+def slots_estimated(ctx: PreflightContext) -> Optional[Issue]:
+    """Some index was sized with the default CPU count, not with its own
+    special.cfg.
+
+    The slot cap is the one thing standing between this system and a flooded
+    queue, and O_QCAP_LSF_NUM is its only real input. When special.cfg cannot
+    be read the planner falls back to a configured default, and if that default
+    is smaller than the real value every wave containing that index is bigger
+    than the cap was meant to allow -- silently, because the arithmetic still
+    adds up.
+
+    This can only happen when plan.default_cpu_per_case is configured to a
+    non-zero value. The shipped default is 0, which means "do not guess": the
+    index is excluded from the plan instead, and PREFLIGHT_INDEX_EXCLUDED
+    reports it. This check is what covers the setting once someone turns it on.
+
+    A warning rather than a block: choosing a fallback is a deliberate act, and
+    refusing to honour it would be the system overruling a decision that was
+    made on purpose. The number and the reason go to a human instead.
+    """
+    plan = ctx.plan
+    if plan is None:
+        return None
+    guessed = [
+        spec for wave in plan.waves for spec in wave.indices
+        if getattr(spec, "cpu_estimated", False)
+    ]
+    if not guessed:
+        return None
+    return ctx.warn(
+        "%d index/indices were sized with the default of %d CPU per case "
+        "because %s could not be read; the wave may be larger than the cap "
+        "of %d slots suggests"
+        % (len(guessed), ctx.settings.plan.default_cpu_per_case,
+           ctx.settings.layout.special_cfg_name, plan.max_slots_per_wave),
+        evidence={
+            "indices": [s.index_key for s in guessed],
+            "assumed_cpu_per_case": ctx.settings.plan.default_cpu_per_case,
+            "slots_assumed": sum(s.slots for s in guessed),
+        },
+    )

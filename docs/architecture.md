@@ -499,7 +499,42 @@ conditions under which the rerun is simply not executable:
 A plan with blockers is refused by the executor, not attempted and aborted
 halfway. `plan.executable` is checked before `STOPPING_PARENT`.
 
-### 6.3 First version is manual trigger only
+### 6.3 One wave directory, one writer
+
+The rerun takes an exclusive `flock` on `<wave>/.arcx_auto/lock` for the whole
+destructive sequence, and refuses rather than queues if it is held.
+
+Without it two reruns started a minute apart both pass the quiescent gate --
+each genuinely sees zero jobs, because the other has not resubmitted yet --
+both move the same run dirs aside, and both resubmit, leaving two Arcx parents
+writing into one wave. The lock file lives in the wave directory itself, so it
+covers every machine that mounts the share rather than only one host.
+
+A dry run takes no lock: it reads and prints, and blocking a preview because
+someone else is mid-rerun would be worse than useless.
+
+### 6.4 What the safety gate is allowed to call "movement"
+
+The gate restarts its confirmation count whenever the marker set changes, so
+the definition of "marker" decides whether the gate ever settles. It reads one
+level down, in the index run folders, and matches only names shaped like a
+marker.
+
+Neither restriction is cosmetic:
+
+  * NFS renames a file deleted while still open to `.nfs0000...`, and those
+    appear **exactly** when jobs are being killed -- the moment this gate runs.
+    A fingerprint counting every dot-file would churn on every reading, never
+    reach K confirmations, and abort every rerun for a reason that has nothing
+    to do with safety.
+  * Recursing would stat every netlist and every `QC_*` report on NFS, three
+    times, inside a 15 minute deadline.
+
+An index directory that cannot be listed is not evidence of quiet: it feeds a
+value that differs from any real reading, so the gate keeps waiting instead of
+concluding that nothing moved.
+
+### 6.5 First version is manual trigger only
 
 Phase 3 ships the mechanism, not the autonomy: a rerun happens only when a
 person runs `arcx-auto rerun <run> --yes`. Without `--yes` the command prints
@@ -530,6 +565,19 @@ every observation made while the job was running.
 
 All three emit the same `Issue` (id, severity, evidence) into the same policy
 engine. That is why they are one registry rather than two systems.
+
+`POST` is expensive and its answer cannot change, so it is cached per
+`(run_folder, case, attempt)`. The attempt number is the whole point of that
+key: a rerun rebuilds the run dir from nothing, and the previous verdict then
+describes files that have been moved into `.arcx_auto/attempts/`. The monitor
+reads the attempt from the wave's `launch.json`, which counts submissions, so
+every index run folder in a wave advances together and a rerun invalidates the
+cache by construction.
+
+Getting that wrong is not a stale-display problem, it is the exact failure this
+system exists to prevent: a long-lived daemon would keep serving the pre-rerun
+verdict, so a case that failed and was successfully rerun reads as failed
+forever -- and a case that passed, was rerun and then broke reads as a success.
 
 ### 7.2 State and Issue are different things
 

@@ -279,6 +279,11 @@ class IndexSpec:
     priority: int = 0
     warnings: Tuple[str, ...] = ()
     error: Optional[str] = None
+    #: True when cpu_per_case is a configured default rather than a value read
+    #: from special.cfg. The slot cap exists to keep the queue from flooding,
+    #: so a guessed input to it has to be visible rather than merely warned
+    #: about in passing.
+    cpu_estimated: bool = False
 
     @property
     def slots(self) -> int:
