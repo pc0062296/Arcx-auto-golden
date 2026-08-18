@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.eggs/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 本地執行產物
+arcx_runs/
+*.state.json

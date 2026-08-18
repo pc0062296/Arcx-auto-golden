@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arcx-auto-golden"
+version = "0.1.0"
+description = "Arcx RC extraction 自動化提交、監控、判定與重跑系統"
+requires-python = ">=3.9"
+# 核心零第三方相依。PyYAML 只在讀 .yaml 設定檔時 lazy import,
+# 沒有它就改用 .json 設定檔。
+dependencies = []
+
+[project.optional-dependencies]
+yaml = ["PyYAML>=5.1"]
+
+[project.scripts]
+arcx-auto = "arcx_auto.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["arcx_auto*"]

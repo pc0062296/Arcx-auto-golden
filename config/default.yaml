@@ -1,0 +1,91 @@
+# Arcx Auto Golden 預設設定
+#
+# 這個檔案是可選的 —— 所有欄位都有內建預設值, 沒有設定檔也能跑。
+# 只需要寫下你要覆寫的欄位。
+#
+# 尋找順序: ./arcx_auto.yaml  ->  ~/.arcx-auto/config/default.yaml
+# 也可以用 -c/--config 明確指定 (支援 .yaml 或 .json)。
+# 內網若沒有 PyYAML, 改用 .json 格式即可, 內容結構完全相同。
+
+state_root: "~/.arcx-auto"     # 個人狀態目錄 (state.json / events.jsonl / audit.jsonl)
+run_root: "./arcx_runs"        # wave 隔離目錄的根
+
+# ---------------------------------------------------------------------------
+# 檔案慣例 (architecture §9.3)
+# 對外部世界的所有假設都集中在這裡, 不寫死在程式邏輯中。
+# ---------------------------------------------------------------------------
+layout:
+  # .queue.case1 / .run.case1 / .complete.case1
+  marker_regex: '^\.(?P<kind>queue|run|complete)\.(?P<case>.+)$'
+  # case1/ case2/ ...  <- rerun 時要刪的就是這些目錄
+  case_dir_regex: '^(?P<case>case\d+)$'
+  # submit_bjob_cmd_file_1.log  ->  case1
+  log_regex: '^submit_bjob_cmd_file_(?P<num>\d+)\.log$'
+  log_case_template: "case{num}"
+  # QC_Cc/ QC_Ct/ QC_Spice/  <- Arcx 整理的 report, 不是 case dir
+  report_dir_regex: '^QC_.+$'
+
+  gds_globs: ["*.gds", "*.gds.gz", "*.GDS", "*.gds.bz2"]
+  special_cfg_name: "special.cfg"
+  special_cfg_cpu_key: "O_QCAP_LSF_NUM"
+  dir_map_reserved_keys: ["min", "max"]
+
+# ---------------------------------------------------------------------------
+# 監控門檻
+# ---------------------------------------------------------------------------
+monitor:
+  stall_threshold_sec: 3600      # log 連續多久沒成長算 STALLED
+  long_pend_warn_sec: 7200
+  lost_grace_sec: 300            # LSF job 消失後等多久才敢判 LOST
+  log_head_bytes: 8192
+  poll_active_sec: 30
+  poll_idle_sec: 300
+
+# ---------------------------------------------------------------------------
+# 分波 (architecture §5)
+#   slots = O_QCAP_LSF_NUM x GDS 數
+# ---------------------------------------------------------------------------
+plan:
+  max_slots_per_wave: 200
+  priority_keywords: ["sram", "ro"]   # path 命中者優先排入前面的 wave
+  keyword_ignore_case: true
+  default_cpu_per_case: 0             # 0 = 讀不到 special.cfg 就排除, 不猜
+
+# ---------------------------------------------------------------------------
+# 提交閘門 (architecture §5.4)
+#   放行 = 已過 min_interval AND ( NJOBS < quota_threshold OR 已過 max_wait )
+# ---------------------------------------------------------------------------
+gate:
+  min_interval_sec: 600
+  quota_threshold: 100
+  max_wait_sec: 7200
+
+# ---------------------------------------------------------------------------
+# LSF (architecture §9.4)
+# ---------------------------------------------------------------------------
+lsf:
+  bjobs_cmd: "bjobs"
+  busers_cmd: "busers"
+  bkill_cmd: "bkill"
+  bsub_cmd: "bsub"
+  bjobs_manage_cmd: "bjobs_manage.py"
+  bjobs_manage_list_flag: "-jp"
+  bjobs_manage_delete_flag: "-djp"
+  command_timeout_sec: 60
+
+  arcx_cmd: "Arcx"
+  arcx_fixed_args: ["-lsf0", "-nt", "50"]
+  arcx_rerun_args: ["-keep_dir"]
+
+  # drain 安全門: 連續幾次確認 0 job 才算靜止
+  quiescent_confirm_times: 3
+  quiescent_interval_sec: 30
+  quiescent_timeout_sec: 900
+
+# ---------------------------------------------------------------------------
+# 公用碟匯出 (architecture §9.5)
+# 只放衍生資料 —— 真相永遠在 state_root 與 run folder, 這裡可隨時整個重建。
+# ---------------------------------------------------------------------------
+export:
+  shared_root: "/tmp1/.auto_golden"
+  interval_sec: 60
