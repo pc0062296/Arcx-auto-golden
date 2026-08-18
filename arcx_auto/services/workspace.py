@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from arcx_auto.config.settings import LayoutSettings, Settings
 from arcx_auto.domain.models import Wave, WavePlan
-from arcx_auto.util.atomic import atomic_write_json
+from arcx_auto.util.atomic import atomic_write_json, read_json
 
 META_DIR = ".arcx_auto"
 
@@ -186,6 +186,28 @@ class WorkspaceBuilder:
             result[spec.index_key] = {
                 "path": dest, "sha256": sha256(dest), "source": source}
         return result
+
+
+def load_workspace(wave_dir: str) -> Optional[WaveWorkspace]:
+    """Rebuild a WaveWorkspace from a wave directory that already exists.
+
+    A rerun needs the same handle the original submission had, and the manifest
+    written at submission time is the record of what that was.
+    """
+    wave_dir = os.path.abspath(os.path.expanduser(wave_dir))
+    meta_dir = os.path.join(wave_dir, META_DIR)
+    manifest = read_json(os.path.join(meta_dir, "manifest.json"), default=None)
+    if not manifest:
+        return None
+    snapshots = manifest.get("snapshots") or {}
+    return WaveWorkspace(
+        wave_name=manifest.get("wave") or os.path.basename(wave_dir),
+        path=wave_dir,
+        arcx_cfg=snapshots.get("arcx_cfg") or os.path.join(wave_dir, "arcx.cfg"),
+        dir_map=snapshots.get("dir_map") or os.path.join(wave_dir, "dir_map"),
+        meta_dir=meta_dir,
+        index_keys=tuple(manifest.get("index_keys") or ()),
+    )
 
 
 def sha256(path: str) -> str:

@@ -94,6 +94,12 @@ lsf:
   arcx_fixed_args: ["-lsf0", "-nt", "50"]
   arcx_rerun_args: ["-keep_dir"]
 
+  # Draining a run folder before a rerun. Deletion can lag behind the request,
+  # so the delete is reissued and rechecked this many times before giving up.
+  # A job count that cannot be read is never treated as zero: it aborts.
+  drain_attempts: 3
+  drain_retry_delay_sec: 10
+
   # Drain safety gate: how many consecutive zero readings mean quiescent
   quiescent_confirm_times: 3
   quiescent_interval_sec: 30

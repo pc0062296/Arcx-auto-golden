@@ -440,6 +440,132 @@ def render_submit(outcome, dry_run: bool = False) -> str:
     return "\n".join(lines)
 
 
+def render_rerun_plan(plan, dry_run: bool = True) -> str:
+    """What a rerun would do, before anything is touched."""
+    lines: List[str] = []
+    lines.append("== rerun plan ==")
+    lines.append("  wave      : %s" % plan.wave_name)
+    lines.append("  directory : %s" % plan.wave_dir)
+    lines.append("  indices   : %s" % (", ".join(plan.index_keys) or "-"))
+    lines.append("  parent job: %s" % (plan.arcx_job_id or "-"))
+    lines.append("  attempt   : %d" % plan.attempt)
+    lines.append("")
+
+    counts = {
+        "delete and rerun": len(plan.to_delete),
+        "keep": len(plan.to_keep),
+        "uncertain (will be deleted)": len(plan.uncertain),
+    }
+    lines.append(render_table(
+        ["outcome", "cases"],
+        [[k, str(v)] for k, v in counts.items()],
+        aligns=["left", "right"]))
+
+    if plan.to_delete:
+        lines.append("")
+        lines.append("== would be deleted and rerun (%d) ==" % len(plan.to_delete))
+        rows = []
+        for decision in plan.to_delete:
+            mark = "?? " if decision.uncertain else "   "
+            rows.append([
+                mark + decision.index_key,
+                decision.case_id,
+                decision.state.value,
+                decision.reason,
+                decision.case_dir or "(no run dir)",
+            ])
+        lines.append(render_table(
+            ["index", "case", "state", "reason", "run dir"],
+            rows, max_col_width=48))
+
+    if plan.to_keep:
+        lines.append("")
+        lines.append("== would be kept (%d) ==" % len(plan.to_keep))
+        lines.append(render_table(
+            ["index", "case", "state", "reason"],
+            [[d.index_key, d.case_id, d.state.value, d.reason]
+             for d in plan.to_keep],
+            max_col_width=48))
+
+    if plan.warnings:
+        lines.append("")
+        lines.append("== warnings (%d) ==" % len(plan.warnings))
+        for warning in plan.warnings:
+            lines.append("  ! %s" % warning)
+
+    if plan.blockers:
+        lines.append("")
+        lines.append("== blocked (%d) ==" % len(plan.blockers))
+        for blocker in plan.blockers:
+            lines.append("  BLOCKED  %s" % blocker)
+        lines.append("")
+        lines.append("  Nothing will be stopped, moved or submitted.")
+        return "\n".join(lines)
+
+    if dry_run:
+        lines.append("")
+        lines.append("  This is a dry run. Add --yes to stop the jobs, move the")
+        lines.append("  listed run dirs into .arcx_auto/attempts/%d/ and resubmit."
+                     % plan.attempt)
+    return "\n".join(lines)
+
+
+def render_rerun_outcome(outcome) -> str:
+    """The result of executing a rerun."""
+    lines: List[str] = []
+    lines.append("")
+    lines.append("== rerun result ==")
+    lines.append("  phase : %s" % outcome.phase.value)
+
+    if outcome.drain_attempts:
+        rows = []
+        for attempt in outcome.drain_attempts:
+            rows.append([
+                str(attempt.attempt),
+                "ok" if attempt.deleted_ok else "failed",
+                "unknown" if attempt.remaining is None else str(attempt.remaining),
+                attempt.error or "",
+            ])
+        lines.append("")
+        lines.append("== drain attempts ==")
+        lines.append(render_table(
+            ["attempt", "delete", "jobs left", "error"], rows,
+            aligns=["right", "left", "right", "left"], max_col_width=60))
+
+    if outcome.quiescent_checks:
+        rows = []
+        for check in outcome.quiescent_checks:
+            rows.append([
+                str(check.index),
+                "unknown" if check.jobs is None else str(check.jobs),
+                "yes" if check.markers_changed else "no",
+                check.error or "",
+            ])
+        lines.append("")
+        lines.append("== quiet confirmations ==")
+        lines.append(render_table(
+            ["check", "jobs", "markers changed", "error"], rows,
+            aligns=["right", "right", "left", "left"], max_col_width=60))
+
+    if outcome.backed_up:
+        lines.append("")
+        lines.append("  moved aside: %d run dir(s) into .arcx_auto/attempts/%d/"
+                     % (len(outcome.backed_up), outcome.plan.attempt))
+
+    if outcome.resubmit_job_id:
+        lines.append("  resubmitted: job id %s" % outcome.resubmit_job_id)
+
+    if outcome.aborted:
+        lines.append("")
+        lines.append("  ABORTED  %s" % (outcome.error or "unknown reason"))
+        lines.append("  Nothing was deleted beyond what is listed above.")
+    elif outcome.error:
+        lines.append("")
+        lines.append("  ERROR  %s" % outcome.error)
+
+    return "\n".join(lines)
+
+
 def render_cfg_check(config, result) -> str:
     """The arcx.cfg PRE check report."""
     lines: List[str] = []

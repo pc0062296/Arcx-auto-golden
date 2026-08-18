@@ -25,14 +25,18 @@ from arcx_auto.adapters.arcx import ArcxAdapter
 from arcx_auto.adapters.arcx_cfg import ArcxConfig, parse_arcx_cfg
 from arcx_auto.adapters.fs import FsAdapter
 from arcx_auto.adapters.lsf import LsfAdapter
-from arcx_auto.adapters.store import SnapshotStore
+from arcx_auto.adapters.store import RunStore, SnapshotStore
 from arcx_auto.cli import render
 from arcx_auto.config.settings import Settings, load_settings
 from arcx_auto.daemon import Daemon, DaemonOptions
 from arcx_auto.domain.enums import PlanMode
 from arcx_auto.domain.models import IndexRunSnapshot, IndexSpec, as_json_dict
+from arcx_auto.util.atomic import read_json
 from arcx_auto.services.collector import Collector
+from arcx_auto.services.launcher import read_launch
 from arcx_auto.services.monitor import MonitorService
+from arcx_auto.services.remediator import Remediator
+from arcx_auto.services.rerun_planner import build_rerun_plan
 from arcx_auto.services.submitter import Submitter
 from arcx_auto.services.qa import QaRunner
 from arcx_auto.services.qa.runner import IndexQaReport
@@ -124,6 +128,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually do it. **Without this flag it is a dry run** that only "
              "checks and prints the commands, creating nothing and "
              "submitting nothing")
+
+    # -- rerun ---------------------------------------------------------
+    rerun = sub.add_parser(
+        "rerun",
+        help="stop, drain, clean and resubmit one wave (dry run by default)")
+    rerun.add_argument("--wave-dir", required=True,
+                       help="the wave directory to rerun")
+    rerun.add_argument("--run-id", default="",
+                       help="run id, used for the audit trail")
+    rerun.add_argument("--arcx-cfg",
+                       help="arcx.cfg for QA (the wave snapshot by default)")
+    rerun.add_argument("--no-lsf", action="store_true",
+                       help="do not query LSF while judging (offline preview)")
+    rerun.add_argument(
+        "--yes", action="store_true",
+        help="actually do it. **Without this flag it is a dry run** that only "
+             "shows which run dirs would be moved aside and rerun")
 
     # -- daemon --------------------------------------------------------
     daemon = sub.add_parser(
@@ -407,6 +428,70 @@ def cmd_submit(args: argparse.Namespace, settings: Settings) -> int:
 
 
 # --------------------------------------------------------------------------
+# rerun
+# --------------------------------------------------------------------------
+
+def cmd_rerun(args: argparse.Namespace, settings: Settings) -> int:
+    """Rerun one wave.
+
+    **A dry run by default.** This is the only command that deletes anything,
+    so it takes an explicit --yes, and even then the "deletion" is a move into
+    .arcx_auto/attempts/N/ so the failed state survives.
+    """
+    wave_dir = os.path.abspath(os.path.expanduser(args.wave_dir))
+    if not os.path.isdir(wave_dir):
+        print("error: no such wave directory: %s" % wave_dir, file=sys.stderr)
+        return 2
+
+    # Observe the wave exactly as the monitor does, so the rerun decision and
+    # the status display can never disagree.
+    monitor = MonitorService(settings)
+    result = monitor.scan(
+        wave_dirs=[wave_dir],
+        arcx_config=_load_arcx_cfg(args, settings),
+        use_lsf=not args.no_lsf,
+    )
+    if not result.snapshots:
+        print("error: no index run folder found under %s" % wave_dir,
+              file=sys.stderr)
+        return 2
+
+    launch = read_launch(wave_dir)
+    manifest = read_json(
+        os.path.join(wave_dir, ".arcx_auto", "manifest.json"), default={}) or {}
+
+    plan = build_rerun_plan(
+        wave_dir=wave_dir,
+        wave_name=manifest.get("wave") or os.path.basename(wave_dir),
+        snapshots=result.snapshots,
+        qa_reports=result.qa_reports,
+        launch=launch,
+        manifest=manifest,
+    )
+
+    dry_run = not args.yes
+    print(render.render_rerun_plan(plan, dry_run=dry_run))
+
+    if plan.blockers:
+        return 1
+    if not plan.to_delete:
+        return 0
+    if dry_run:
+        return 0
+
+    store = RunStore(settings.expanded_state_root(),
+                     args.run_id or plan.wave_name)
+    store.ensure()
+    remediator = Remediator(settings, store=store)
+    outcome = remediator.run(
+        plan, run_id=args.run_id or plan.wave_name,
+        on_progress=lambda msg: print("  %s" % msg))
+
+    print(render.render_rerun_outcome(outcome))
+    return 0 if outcome.ok else 1
+
+
+# --------------------------------------------------------------------------
 # daemon / web
 # --------------------------------------------------------------------------
 
@@ -537,6 +622,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     handlers = {
         "status": cmd_status,
         "submit": cmd_submit,
+        "rerun": cmd_rerun,
         "daemon": cmd_daemon,
         "web": cmd_web,
         "plan": cmd_plan,

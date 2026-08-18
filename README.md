@@ -20,7 +20,7 @@ Full design: **[docs/architecture.md](docs/architecture.md)**.
 | **1a** | arcx.cfg parser + QA registry + StateResolver + PRE checks | done |
 | **1b** | Store + LockManager + Daemon + read-only web UI | done |
 | **2b** | Preflight + WorkspaceBuilder + Launcher + gate + `submit` | done |
-| 3 | Rerun drain state machine + triage queue | to do |
+| **3** | Rerun planner + drain state machine + `rerun` (manual trigger) | done |
 | 4 | Policy engine and automatic remediation | to do |
 | 5 | Shared-disk export and history | to do |
 
@@ -143,6 +143,7 @@ manufacture false alarms. Exits 1 on a FATAL, so it chains into a submit script.
 | `status --wave-dir PATH` | Scan every index run folder under a wave dir |
 | `plan --dir-map FILE --index ...` | Produce a wave plan (**never submits**) |
 | `submit --dir-map X --arcx-cfg Y` | Check, create wave dirs, submit (**dry run by default**) |
+| `rerun --wave-dir PATH` | Stop, drain, back up, clean and resubmit (**dry run by default**) |
 | `daemon --wave-dir PATH` | Keep monitoring, writing state for the web UI |
 | `web` | Serve the local read-only dashboard |
 | `check-cfg FILE` | Validate arcx.cfg (exit 1 on FATAL) |

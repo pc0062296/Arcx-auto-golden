@@ -406,12 +406,17 @@ RERUN_REQUESTED
 STOPPING_PARENT       bkill <arcx_job_id>     kill the parent first, or it
     |                                          simply submits replacements
     v
-DRAINING_CHILDREN     bjobs_manage.py -djp <wave_dir>/
-    |
+DRAINING_CHILDREN     bjobs_manage.py -djp <wave_dir>/, wait, recount;
+    |                 repeated up to drain_attempts (default 3 x 10s) because
+    |                 the deletion can lag several seconds behind the request
+    |  count still > 0 after the last attempt, or unreadable
+    |       +--------> ABORT and escalate.
     v
 VERIFY_QUIESCENT <-- [SAFETY GATE] K consecutive confirmations (default 3 x 30s):
     |                 (a) bjobs_manage.py -jp <wave_dir>/ reports 0 jobs
     |                 (b) the marker set has not changed meanwhile
+    |                 A marker that moves means something is still writing:
+    |                 the confirmation count restarts from zero.
     |  on timeout (default 15 min) or any failed confirmation
     |       +--------> ABORT and escalate. Never force past it.
     v
@@ -460,12 +465,52 @@ In practice QA returns `COMPLETE`, `INCOMPLETE` or `UNKNOWN`. `UNKNOWN` enters
 the delete list by default, but is coloured differently in the UI and can be
 unticked, and `BACKUP` preserves the evidence either way.
 
-### 6.2 Every step is resumable
+**Two sources, and only the worse one wins.** Completeness has two independent
+witnesses, and they can disagree:
 
-Killing the daemon at any point leaves `state.json` with a `rerun_phase` to
-resume from. `VERIFY_QUIESCENT` can be passed but never skipped; the UI offers
-no force, and forcing from the CLI requires
-`--i-know-what-i-am-doing` and writes a loud audit entry.
+| Source | Sees | Blind to |
+|---|---|---|
+| State machine (markers) | `.complete` present, still `.run`, nothing at all | whether the artifacts behind `.complete` are real |
+| QA `POST` checks | missing netlists, empty reports, wrong case counts | anything on a case that never reached `POST` |
+
+A case that is still `RUNNING` never runs `POST` checks, so QA reports no issues
+at all -- which naively reads as "clean". So the two are combined by **rank, not
+by preference**:
+
+```
+COMPLETE (0)  <  UNKNOWN (1)  <  INCOMPLETE (2)          worse wins
+```
+
+QA can only ever **downgrade** the state machine's verdict, never upgrade it.
+That is what stops "no issues found" on an unfinished case from being mistaken
+for success.
+
+### 6.2 Blockers: refuse before touching anything
+
+The plan is built before a single job is killed, and it carries `blockers` --
+conditions under which the rerun is simply not executable:
+
+  * no `arcx_job_id` recorded, so the parent cannot be stopped (it would
+    resubmit the very cases we deleted)
+  * no index keys, so there is nothing to resubmit
+  * no `arcx.cfg` snapshot in the wave dir, so the rerun would use a different
+    config than the original run
+
+A plan with blockers is refused by the executor, not attempted and aborted
+halfway. `plan.executable` is checked before `STOPPING_PARENT`.
+
+### 6.3 First version is manual trigger only
+
+Phase 3 ships the mechanism, not the autonomy: a rerun happens only when a
+person runs `arcx-auto rerun <run> --yes`. Without `--yes` the command prints
+the plan (delete list, keep list, uncertain list, blockers) and exits, changing
+nothing. Automatic triggering is Phase 4, and it will run in shadow mode first.
+
+`VERIFY_QUIESCENT` can be passed but never skipped; there is no force flag.
+Every step -- `rerun_started`, `rerun_parent_stopped`, `rerun_drained`,
+`rerun_quiescent_confirmed`, `rerun_cleaned`, `rerun_resubmitted` -- writes to
+`audit.jsonl` before it happens, so an interrupted rerun leaves a readable
+trail of exactly how far it got.
 
 ---
 

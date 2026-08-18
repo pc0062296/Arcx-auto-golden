@@ -142,6 +142,11 @@ class LsfSettings:
     arcx_fixed_args: List[str] = field(default_factory=lambda: ["-lsf0", "-nt", "50"])
     arcx_rerun_args: List[str] = field(default_factory=lambda: ["-keep_dir"])
 
+    # Draining: deletion can lag behind the request, so the delete is reissued
+    # and rechecked a few times before giving up.
+    drain_attempts: int = 3
+    drain_retry_delay_sec: float = 10.0
+
     # Drain safety gate: how many consecutive zero readings mean "quiescent"
     quiescent_confirm_times: int = 3
     quiescent_interval_sec: float = 30.0

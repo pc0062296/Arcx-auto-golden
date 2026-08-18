@@ -84,12 +84,18 @@ class QaResult:
         return not any(i.blocks_success for i in self.issues)
 
     def completeness(self) -> Tuple[Completeness, str]:
-        """Whether a rerun should delete this case's run dir.
+        """The **issue-based** view of whether a rerun should delete this case.
 
         Asymmetric on purpose (architecture 6.1): deleting something complete
         wastes one run and the result stays correct, while keeping something
         incomplete ships a truncated result as a success. So "could not check"
         leans towards deleting, not towards keeping.
+
+        This is only half the answer. A case that never reached a POST state
+        has had only the LIVE checks run, so a clean result here means "nothing
+        looks wrong right now", not "it finished". The rerun planner combines
+        this with the state machine's verdict and takes whichever argues harder
+        for deleting -- see services/rerun_planner.py.
         """
         if self.unknown:
             return (Completeness.UNKNOWN,
