@@ -140,6 +140,10 @@ class IndexRunObservation:
     # 有 log 但無法從 cmd_file 判定屬於哪個 case。
     # 這代表有一個 case 我們**監控不到**, 必須讓人看到而不是靜默忽略。
     unresolved_logs: Tuple[str, ...] = ()
+    # 已知三種 (.queue/.run/.complete) 以外的 marker。
+    # 使用者確認這不正常, 所以不歸進 unmatched_entries 當雜訊, 而是獨立呈現。
+    # 每筆是 (marker 檔名, 推斷出的 case id)。
+    unknown_markers: Tuple[Tuple[str, str], ...] = ()
     error: Optional[str] = None           # 掃描失敗時的原因 (例如路徑不存在)
 
     @property

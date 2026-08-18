@@ -33,6 +33,9 @@ class LayoutSettings:
     # .queue.NDIO_1 / .run.PDIO_1 / .complete.NTN_1
     # case id 是 cell 名稱, 不是流水號, 所以這裡必須用寬鬆的 .+
     marker_regex: str = r"^\.(?P<kind>queue|run|complete)\.(?P<case>.+)$"
+    # 比 marker_regex 更寬鬆: 任何 .<word>.<something> 都算「看起來像 marker」。
+    # 用來抓出已知三種以外的 marker —— 那不正常, 必須明確顯示而不是當成雜訊。
+    marker_any_regex: str = r"^\.(?P<kind>[A-Za-z_][A-Za-z0-9_]*)\.(?P<case>.+)$"
 
     # submit_bjob_cmd_file_1.log
     #   -> 依編號配對 cmd_folder/cmd_file_1

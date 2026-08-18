@@ -138,6 +138,11 @@ def _render_scan_issues(observations: Sequence["IndexRunObservation"]) -> str:
     """
     rows = []
     for obs in observations:
+        for name, case_id in obs.unknown_markers:
+            rows.append([
+                obs.index_key, "!! 未知 marker", name,
+                "已知只有 queue/run/complete; case=%s 需人工確認" % case_id,
+            ])
         for name in obs.unresolved_logs:
             rows.append([
                 obs.index_key, "log 無法對應到 case", name,

@@ -44,6 +44,7 @@ class FsAdapter:
     def __init__(self, layout: Optional[LayoutSettings] = None) -> None:
         self.layout = layout or LayoutSettings()
         self._marker_re = re.compile(self.layout.marker_regex)
+        self._marker_any_re = re.compile(self.layout.marker_any_regex)
         self._log_re = re.compile(self.layout.log_regex)
         self._report_re = re.compile(self.layout.report_dir_regex)
         self._cd_re = re.compile(self.layout.cmd_cd_regex)
@@ -96,6 +97,7 @@ class FsAdapter:
             )
 
         markers: Dict[str, Set[MarkerKind]] = {}
+        unknown_markers: List[Tuple[str, str]] = []
         case_dirs: Dict[str, str] = {}
         logs_by_num: Dict[str, str] = {}
         report_dirs: List[str] = []
@@ -108,10 +110,18 @@ class FsAdapter:
             if marker_match:
                 try:
                     kind = MarkerKind(marker_match.group("kind"))
-                except ValueError:
-                    unmatched.append(name)
+                except ValueError:  # pragma: no cover - regex 已限定三種
+                    unknown_markers.append((name, marker_match.group("case")))
                     continue
                 markers.setdefault(marker_match.group("case"), set()).add(kind)
+                continue
+
+            # 已知三種以外、但長得像 marker 的檔案。使用者確認這不正常,
+            # 所以獨立記錄並在 UI 特別顯示 —— 而且它仍然證明「這個 case 存在」,
+            # 因此下面會把它的 case id 併入 case 清單。
+            any_marker = self._marker_any_re.match(name)
+            if any_marker:
+                unknown_markers.append((name, any_marker.group("case")))
                 continue
 
             try:
@@ -141,7 +151,11 @@ class FsAdapter:
         )
 
         all_case_ids = sorted(
-            set(markers) | set(case_dirs) | set(logs_by_case), key=natural_key
+            set(markers)
+            | set(case_dirs)
+            | set(logs_by_case)
+            | {case_id for _name, case_id in unknown_markers},
+            key=natural_key,
         )
 
         cases: Dict[str, CaseObservation] = {}
@@ -169,6 +183,7 @@ class FsAdapter:
             report_dirs=tuple(sorted(report_dirs)),
             unmatched_entries=tuple(sorted(unmatched)),
             unresolved_logs=tuple(sorted(unresolved)),
+            unknown_markers=tuple(sorted(unknown_markers)),
         )
 
     def _is_case_dir_name(self, name: str) -> bool:

@@ -126,11 +126,15 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
                 "scan_issues": [
                     {
                         "index_key": o.index_key,
+                        "unknown_markers": [
+                            {"file": n, "case_id": c}
+                            for n, c in o.unknown_markers
+                        ],
                         "unresolved_logs": list(o.unresolved_logs),
                         "unmatched_entries": list(o.unmatched_entries),
                     }
                     for o in observations
-                    if o.unresolved_logs or o.unmatched_entries
+                    if o.unknown_markers or o.unresolved_logs or o.unmatched_entries
                 ],
             }
             print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))

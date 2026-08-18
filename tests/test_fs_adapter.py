@@ -218,6 +218,33 @@ class DiscoveryUnionTest(unittest.TestCase):
         self.assertEqual(list(obs.cases),
                          ["NDIO_1", "NDIO_2", "NDIO_10", "NDIO_11"])
 
+    def test_unknown_marker_is_flagged_separately(self):
+        """.fail.X 這類未知 marker 不正常, 必須獨立標出而不是混進雜訊。"""
+        folder = make_index_run_folder(self.tmp.name, "1001",
+                                       [CaseSpec("NDIO_1", "running")])
+        open(os.path.join(folder, ".fail.NDIO_9"), "w").close()
+        obs = self.fs.scan_index_run_folder(folder, "1001")
+        self.assertEqual(obs.unknown_markers, ((".fail.NDIO_9", "NDIO_9"),))
+        self.assertNotIn(".fail.NDIO_9", obs.unmatched_entries)
+
+    def test_unknown_marker_still_reveals_the_case(self):
+        """未知 marker 仍然證明這個 case 存在 —— 不能讓它從 case 清單裡消失。"""
+        folder = make_index_run_folder(self.tmp.name, "1001",
+                                       [CaseSpec("NDIO_1", "running")])
+        open(os.path.join(folder, ".fail.NDIO_9"), "w").close()
+        obs = self.fs.scan_index_run_folder(folder, "1001")
+        self.assertIn("NDIO_9", obs.cases)
+        self.assertEqual(obs.cases["NDIO_9"].markers, frozenset())
+
+    def test_known_markers_not_reported_as_unknown(self):
+        folder = make_index_run_folder(self.tmp.name, "1001", [
+            CaseSpec("NDIO_1", "queued"),
+            CaseSpec("PDIO_1", "running"),
+            CaseSpec("NTN_1", "complete"),
+        ])
+        self.assertEqual(
+            self.fs.scan_index_run_folder(folder, "1001").unknown_markers, ())
+
     def test_unknown_files_are_reported(self):
         """慣例之外的檔案要浮出來 —— 發現 Arcx 行為變動的早期訊號。"""
         folder = make_index_run_folder(self.tmp.name, "1001",
