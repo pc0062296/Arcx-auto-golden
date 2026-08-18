@@ -40,13 +40,15 @@ def report_dir_missing(index: IndexContext) -> Optional[Issue]:
     )
 
 
-@qa_check(id="REPORT_FILE_MISSING", title="QC report 檔案缺失",
+@qa_check(id="REPORT_FILE_MISSING", title="QC report 檔案異常",
           severity=Severity.FATAL, scope=INDEX, stage=POST)
 def report_file_missing(index: IndexContext) -> Optional[Issue]:
-    """report 目錄在, 但裡面的主報告或摘要不見了。
+    """report 目錄在, 但裡面的主報告或摘要不對。
 
     只檢查存在的目錄 —— 目錄本身缺失由 REPORT_DIR_MISSING 負責, 不重複報。
-    Summary 的後綴 (例如 _SCCB3) 會變, 所以用 glob 比對而不是完整檔名。
+
+    Summary 的後綴 (例如 _SCCB3) 只是命名, 所以用 glob 比對; 但每個 QC_*
+    底下**恰好**只會有一個 Summary, 因此多於一個也算異常 (通常是前一輪殘留)。
     """
     reports = index.qa.reports
     problems: List[dict] = []
@@ -57,14 +59,25 @@ def report_file_missing(index: IndexContext) -> Optional[Issue]:
         main = reports.main_file_template.format(dir=name)
         if not index.exists("%s/%s" % (name, main)):
             problems.append({"dir": name, "missing": main})
+
+        # 每個 QC_* 底下**恰好**一個 Summary。
+        # 多於一個通常是前一輪殘留沒清乾淨, 那會讓下游拿到錯的報告 ——
+        # 所以「太多」跟「缺少」一樣要報。
         summary_glob = reports.summary_glob_template.format(dir=name)
-        if not index.glob(summary_glob, rel_dir=name):
+        found = index.glob(summary_glob, rel_dir=name)
+        if not found:
             problems.append({"dir": name, "missing_glob": summary_glob})
+        elif len(found) > 1:
+            problems.append({
+                "dir": name,
+                "expected_one_summary": summary_glob,
+                "found": found,
+            })
 
     if not problems:
         return None
     return index.fail(
-        "%d 個 report 檔案缺失" % len(problems), evidence={"problems": problems})
+        "%d 個 report 檔案有問題" % len(problems), evidence={"problems": problems})
 
 
 @qa_check(id="INDEX_HAS_UNKNOWN_MARKER", title="出現未知的 marker",

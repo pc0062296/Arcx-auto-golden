@@ -202,9 +202,19 @@ class QaSettings:
     min_netlist_bytes: int = 1
     reports: ReportSettings = field(default_factory=ReportSettings)
     quiet: QuietSettings = field(default_factory=QuietSettings)
-    # arcx.cfg 中值看起來像絕對路徑的設定, 提交前要檢查檔案是否存在
+    # arcx.cfg 中要在提交前驗證「檔案/目錄存在」的設定 key。
+    # 只列出明確的 key 而不是「看起來像路徑就檢查」—— 後者會對輸出路徑、
+    # 樣板字串等等產生大量假警報, 假警報多了就沒人看了。
     verify_cfg_paths: bool = True
-    # 這些 key 即使長得像路徑也不檢查 (輸出路徑等執行後才會產生)
+    cfg_path_keys: List[str] = field(default_factory=lambda: [
+        "RCX_TECH_QTF",
+        "RCX_LAYER_NAME_MAP",
+        "LVS_DFM_DIR",
+        "LVS_DECK",
+        "LVS_QUERY_CMD",
+        "RCX_STAR_CMD",
+    ])
+    # 這些 key 即使在上面清單裡也跳過 (臨時排除用)
     cfg_path_check_skip_keys: List[str] = field(default_factory=list)
     # 要停用的檢查 id。放在設定裡, 這樣不需要刪程式就能關掉一條規則。
     disabled_checks: List[str] = field(default_factory=list)

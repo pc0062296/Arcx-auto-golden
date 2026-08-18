@@ -22,9 +22,9 @@ block 決定 (見 services/qa/expectations.py):
 
 因此提交時必須把 cfg 快照下來 —— 三天後回頭做 QA, 用的必須是當時那份 cfg。
 
-TODO(待確認): 行首的整數 (`1 QC_FLOW = ...`) 目前解讀為 enable/disable
-旗標 (0 = 停用)。若它其實是 group id 之類的東西, 現在的解讀也是安全的
-(非 0 一律視為啟用), 但語意需要跟使用者確認。
+行首的整數是 enable/disable 旗標: 1 = 啟用, 0 = 停用。
+被停用的行 (旗標 0) 與註解行 (#) 一律不生效, 因此 PRE 檢查**不會**去驗證
+它們引用的檔案是否存在 —— 那些路徑根本不會被用到, 檢查它們只會製造假警報。
 """
 
 from __future__ import annotations
@@ -36,11 +36,16 @@ from typing import Dict, List, Optional, Tuple
 
 # 行首可選的整數旗標, 其餘為內容
 _LINE_RE = re.compile(r"^\s*(?:(?P<flag>-?\d+)\s+)?(?P<body>.*?)\s*$")
-# BEGIN_SETTINGS: <name>   (容忍 BEGIN_SETTIMGS 這個拼法, 見 TODO)
+# BEGIN_SETTINGS: <name>
+# 正式拼法是 BEGIN_SETTINGS。仍然接受 BEGIN_SETTIMGS 這種筆誤,
+# 但會發出警告 —— 拼錯的關鍵字若被 Arcx 當成無效行, 整個 block 會被忽略,
+# 那是很難查的失敗。
 _BEGIN_RE = re.compile(
-    r"^BEGIN_SETT(?:INGS|IMGS)\s*:\s*(?P<name>\S+)\s*$", re.IGNORECASE
+    r"^(?P<kw>BEGIN_SETT(?:INGS|IMGS))\s*:\s*(?P<name>\S+)\s*$", re.IGNORECASE
 )
-_END_RE = re.compile(r"^END_SETT(?:INGS|IMGS)\s*$", re.IGNORECASE)
+_END_RE = re.compile(r"^(?P<kw>END_SETT(?:INGS|IMGS))\s*$", re.IGNORECASE)
+_CANONICAL_BEGIN = "BEGIN_SETTINGS"
+_CANONICAL_END = "END_SETTINGS"
 _KV_RE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(?P<value>.*)$")
 
 
@@ -52,7 +57,8 @@ class CfgBlock:
     enabled: bool = True
     line_no: int = 0
     settings: Dict[str, str] = field(default_factory=dict)
-    disabled_keys: Tuple[str, ...] = ()   # 行首旗標為 0 的設定
+    # 行首旗標為 0 的設定。這些行不生效, 所以 PRE 檢查不會驗證它們的路徑。
+    disabled_keys: Tuple[str, ...] = ()
     warnings: Tuple[str, ...] = ()
 
     @property
@@ -136,6 +142,11 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
 
         begin = _BEGIN_RE.match(body)
         if begin:
+            if begin.group("kw").upper() != _CANONICAL_BEGIN:
+                warnings.append(
+                    "第 %d 行的關鍵字拼成 %s, 正式拼法是 %s"
+                    % (index, begin.group("kw"), _CANONICAL_BEGIN)
+                )
             if current_name is not None:
                 current_warnings.append(
                     "第 %d 行出現新的 BEGIN_SETTINGS, 但前一個 block 沒有 END_SETTINGS"
@@ -150,7 +161,13 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
             current_warnings = []
             continue
 
-        if _END_RE.match(body):
+        end_match = _END_RE.match(body)
+        if end_match:
+            if end_match.group("kw").upper() != _CANONICAL_END:
+                warnings.append(
+                    "第 %d 行的關鍵字拼成 %s, 正式拼法是 %s"
+                    % (index, end_match.group("kw"), _CANONICAL_END)
+                )
             if current_name is None:
                 warnings.append("第 %d 行有 END_SETTINGS 但沒有對應的 BEGIN" % index)
             else:

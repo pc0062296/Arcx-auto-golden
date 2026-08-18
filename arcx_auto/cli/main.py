@@ -92,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="顯示每個 wave 會執行的 Arcx 指令")
     plan.add_argument("--json", action="store_true", help="輸出 JSON")
 
+    # -- check-cfg -----------------------------------------------------
+    check = sub.add_parser("check-cfg",
+                           help="提交前檢查 arcx.cfg (PRE 檢查, 不需要 run folder)")
+    check.add_argument("path", help="arcx.cfg 路徑")
+    check.add_argument("--json", action="store_true")
+
     # -- inspect -------------------------------------------------------
     inspect = sub.add_parser("inspect", help="解析輸入檔案 (驗證格式理解是否正確)")
     inspect_sub = inspect.add_subparsers(dest="subject", required=True)
@@ -316,6 +322,39 @@ def cmd_plan(args: argparse.Namespace, settings: Settings) -> int:
 
 
 # --------------------------------------------------------------------------
+# check-cfg
+# --------------------------------------------------------------------------
+
+def cmd_check_cfg(args: argparse.Namespace, settings: Settings) -> int:
+    """提交前的 arcx.cfg 檢查。
+
+    有 FATAL 時回傳 exit code 1 —— 這樣可以直接串進提交前的 script。
+    """
+    config = parse_arcx_cfg(args.path)
+    result = QaRunner(settings).run_config(config)
+
+    if args.json:
+        print(json.dumps({
+            "path": args.path,
+            "passed": result.passed,
+            "issues": [as_json_dict(i) for i in result.issues],
+            "blocks": [
+                {
+                    "name": b.name,
+                    "enabled": b.enabled,
+                    "flow": b.flow,
+                    "output_dir": b.output_dir_name,
+                }
+                for b in (config.blocks if config else ())
+            ],
+        }, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(render.render_cfg_check(config, result))
+
+    return 0 if not result.fatal else 1
+
+
+# --------------------------------------------------------------------------
 # inspect
 # --------------------------------------------------------------------------
 
@@ -363,6 +402,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     handlers = {
         "status": cmd_status,
         "plan": cmd_plan,
+        "check-cfg": cmd_check_cfg,
         "inspect": cmd_inspect,
     }
     handler = handlers[args.command]

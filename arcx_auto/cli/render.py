@@ -344,6 +344,74 @@ def render_plan(plan: WavePlan, show_command: bool = False,
 # inspect
 # --------------------------------------------------------------------------
 
+def render_cfg_check(config, result) -> str:
+    """arcx.cfg 的 PRE 檢查報告。"""
+    lines: List[str] = []
+    lines.append("== arcx.cfg 檢查 ==")
+    lines.append("  來源: %s" % (config.source_path if config else "-"))
+
+    if config and config.blocks:
+        lines.append("")
+        rows = []
+        for block in config.blocks:
+            rows.append([
+                block.name,
+                "啟用" if block.enabled else "停用",
+                block.flow or "(缺 QC_FLOW)",
+                block.output_dir_name or "-",
+                str(len(block.settings)),
+                ",".join(block.disabled_keys) or "-",
+            ])
+        lines.append(render_table(
+            ["block", "狀態", "QC_FLOW", "產出目錄", "設定數", "已停用的設定"],
+            rows, max_col_width=44,
+        ))
+
+    lines.append("")
+    if result.passed and not result.issues:
+        lines.append("  ✓ 全部通過")
+        return "\n".join(lines)
+
+    rows = []
+    for issue in sorted(
+        result.issues,
+        key=lambda i: (_SEVERITY_ORDER.index(i.severity)
+                       if i.severity in _SEVERITY_ORDER else 99, i.id),
+    ):
+        rows.append([
+            _SEVERITY_MARK.get(issue.severity, "  ") + " " + issue.severity.value,
+            issue.id,
+            issue.message,
+        ])
+    lines.append("== 問題 (%d) ==" % len(result.issues))
+    lines.append(render_table(["嚴重度", "issue id", "說明"], rows,
+                              max_col_width=60))
+
+    for issue in result.issues:
+        if not issue.evidence:
+            continue
+        lines.append("")
+        lines.append("  [%s] 證據:" % issue.id)
+        for key, value in sorted(issue.evidence.items()):
+            if isinstance(value, list):
+                if not value:
+                    continue
+                lines.append("    %s:" % key)
+                for item in value[:20]:
+                    lines.append("      - %s" % item)
+                if len(value) > 20:
+                    lines.append("      ... (+%d)" % (len(value) - 20))
+            elif isinstance(value, dict):
+                lines.append("    %s: %s" % (key, value))
+            else:
+                lines.append("    %s: %s" % (key, value))
+
+    if result.fatal:
+        lines.append("")
+        lines.append("  ✗ 有 %d 項 FATAL, 不建議提交" % len(result.fatal))
+    return "\n".join(lines)
+
+
 def render_dir_map(dir_map: DirMap, verify: bool = False) -> str:
     import os
 

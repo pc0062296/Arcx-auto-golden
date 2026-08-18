@@ -10,8 +10,17 @@
 """
 
 # 匯入即註冊 —— 順序不重要, id 重複會直接報錯
-from arcx_auto.services.qa import checks_case, checks_index  # noqa: F401
-from arcx_auto.services.qa.context import CaseContext, IndexContext, _FsCache
+from arcx_auto.services.qa import (  # noqa: F401
+    checks_case,
+    checks_config,
+    checks_index,
+)
+from arcx_auto.services.qa.context import (
+    CaseContext,
+    ConfigContext,
+    IndexContext,
+    _FsCache,
+)
 from arcx_auto.services.qa.expectations import (
     expected_artifacts,
     expected_flow_dirs,
@@ -27,6 +36,7 @@ from arcx_auto.services.qa.runner import QaRunner
 
 __all__ = [
     "CaseContext",
+    "ConfigContext",
     "IndexContext",
     "CheckSpec",
     "QaRegistry",

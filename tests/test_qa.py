@@ -418,3 +418,170 @@ class ResolverTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# PRE —— arcx.cfg 檢查
+# ---------------------------------------------------------------------------
+
+class ConfigCheckTest(unittest.TestCase):
+    """提交前的 cfg 驗證。投資報酬率最高的一層 ——
+    設定錯誤造成的失敗大多在提交前就看得出來, 而送出去要等好幾小時才會發現。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.runner = QaRunner(Settings())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _check(self, text):
+        path = os.path.join(self.tmp.name, "arcx.cfg")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        result = self.runner.run_config(parse_arcx_cfg(path))
+        return result, {i.id for i in result.issues}
+
+    def _existing_file(self, name="real.qtf"):
+        path = os.path.join(self.tmp.name, name)
+        open(path, "w").close()
+        return path
+
+    def test_good_config_passes(self):
+        qtf = self._existing_file()
+        result, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
+            "1 RCX_TECH_QTF = %s\nEND_SETTINGS\n" % qtf)
+        self.assertEqual(ids, set())
+        self.assertTrue(result.passed)
+
+    def test_missing_path_detected(self):
+        _r, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
+            "1 RCX_TECH_QTF = /definitely/not/here\nEND_SETTINGS\n")
+        self.assertIn("CFG_PATH_NOT_FOUND", ids)
+
+    def test_disabled_line_path_not_checked(self):
+        """行首 0 的設定不生效 —— 檢查它的路徑只會製造假警報。"""
+        _r, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
+            "0 RCX_TECH_QTF = /definitely/not/here\nEND_SETTINGS\n")
+        self.assertNotIn("CFG_PATH_NOT_FOUND", ids)
+
+    def test_commented_line_path_not_checked(self):
+        _r, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
+            "# 1 RCX_TECH_QTF = /definitely/not/here\nEND_SETTINGS\n")
+        self.assertNotIn("CFG_PATH_NOT_FOUND", ids)
+
+    def test_disabled_block_paths_not_checked(self):
+        _r, ids = self._check(
+            "0 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
+            "1 RCX_TECH_QTF = /definitely/not/here\nEND_SETTINGS\n")
+        self.assertNotIn("CFG_PATH_NOT_FOUND", ids)
+
+    def test_only_listed_keys_are_path_checked(self):
+        """未列在 cfg_path_keys 的設定即使長得像路徑也不檢查。
+
+        「看起來像路徑就檢查」會對輸出路徑、樣板字串產生大量假警報,
+        假警報多了就沒人看了。
+        """
+        _r, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
+            "1 SOME_OUTPUT_DIR = /will/be/created/later\nEND_SETTINGS\n")
+        self.assertNotIn("CFG_PATH_NOT_FOUND", ids)
+
+    def test_all_six_path_keys_are_checked(self):
+        keys = ["RCX_TECH_QTF", "RCX_LAYER_NAME_MAP", "LVS_DFM_DIR",
+                "LVS_DECK", "LVS_QUERY_CMD", "RCX_STAR_CMD"]
+        for key in keys:
+            _r, ids = self._check(
+                "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
+                "1 %s = /definitely/not/here\nEND_SETTINGS\n" % key)
+            self.assertIn("CFG_PATH_NOT_FOUND", ids, key)
+
+    def test_env_var_paths_skipped_not_reported_missing(self):
+        """含 $ 的值無法在這裡解析, 列為 skipped 而不是誤報成缺失。"""
+        result, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\n"
+            "1 RCX_TECH_QTF = $TECH_ROOT/a.qtf\nEND_SETTINGS\n")
+        self.assertNotIn("CFG_PATH_NOT_FOUND", ids)
+
+    def test_duplicate_block_name_detected(self):
+        """同名 block 的產出目錄會互相覆蓋, 而且不會有任何錯誤訊息。"""
+        _r, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n"
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQRCFS\nEND_SETTINGS\n")
+        self.assertIn("CFG_DUPLICATE_BLOCK", ids)
+
+    def test_missing_qc_flow_detected(self):
+        _r, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 RCX_TECH_QTF = /x\nEND_SETTINGS\n")
+        self.assertIn("CFG_BLOCK_NO_FLOW", ids)
+
+    def test_unknown_flow_detected(self):
+        _r, ids = self._check(
+            "1 BEGIN_SETTINGS: blk\n1 QC_FLOW = calMYSTERY\nEND_SETTINGS\n")
+        self.assertIn("CFG_UNKNOWN_FLOW", ids)
+
+    def test_all_blocks_disabled_detected(self):
+        """會安靜地跑完卻什麼都不產出 —— 最浪費 TAT 的錯誤。"""
+        _r, ids = self._check(
+            "0 BEGIN_SETTINGS: blk\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n")
+        self.assertIn("CFG_ALL_BLOCKS_DISABLED", ids)
+
+    def test_empty_config_detected(self):
+        _r, ids = self._check("# nothing here\n")
+        self.assertIn("CFG_NO_BLOCKS", ids)
+
+    def test_missing_file_detected(self):
+        result = self.runner.run_config(
+            parse_arcx_cfg(os.path.join(self.tmp.name, "nope.cfg")))
+        self.assertIn("CFG_UNREADABLE", {i.id for i in result.issues})
+
+    def test_no_config_at_all_is_fatal(self):
+        result = self.runner.run_config(None)
+        self.assertIn("CFG_UNREADABLE", {i.id for i in result.issues})
+
+    def test_typo_keyword_warns(self):
+        _r, ids = self._check(
+            "1 BEGIN_SETTIMGS: blk\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n")
+        self.assertIn("CFG_PARSE_WARNING", ids)
+
+
+class ReportSummaryCountTest(unittest.TestCase):
+    """每個 QC_* 底下恰好一個 Summary —— 多於一個通常是前一輪殘留。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, extra_summaries=()):
+        from tests.fixtures.fake_run import make_report_dirs
+
+        wave = os.path.join(self.tmp.name, "wave_001")
+        folder = make_index_run_folder(
+            wave, "1000", [CaseSpec("NTN_1", "complete")], report_dirs=())
+        make_report_dirs(folder, ("QC_Cc", "QC_Ct"))
+        for name in extra_summaries:
+            open(os.path.join(folder, "QC_Cc", name), "w").close()
+
+        fs = FsAdapter()
+        observation = fs.scan_index_run_folder(folder, "1000")
+        ctx = TransitionContext(now=observation.observed_at)
+        snapshot, _ = transition_index_run(None, observation, ctx)
+        report = QaRunner(Settings()).run_index(snapshot, observation, None)
+        ids = set()
+        for result in report.index_results:
+            ids.update(i.id for i in result.issues)
+        return ids
+
+    def test_exactly_one_summary_passes(self):
+        self.assertNotIn("REPORT_FILE_MISSING", self._run())
+
+    def test_two_summaries_flagged(self):
+        ids = self._run(extra_summaries=("Report_QC_Cc_Summary_OLD",))
+        self.assertIn("REPORT_FILE_MISSING", ids)

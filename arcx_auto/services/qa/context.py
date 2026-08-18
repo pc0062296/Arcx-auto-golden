@@ -240,6 +240,30 @@ class CaseContext(_BaseContext):
         return self._expected
 
 
+class ConfigContext(_BaseContext):
+    """PRE 檢查的環境。root = arcx.cfg 所在目錄。
+
+    不需要 run folder —— PRE 在提交前跑, 那時候什麼都還沒建立。
+    """
+
+    def __init__(
+        self,
+        config: Optional[ArcxConfig],
+        settings: Settings,
+        cache: _FsCache,
+        now: float,
+    ) -> None:
+        root = os.path.dirname(config.source_path) if config else ""
+        super().__init__(root, settings, cache, now)
+        self.config = config
+        self.index_key = None
+        self.case_id = None
+
+    @property
+    def source_path(self) -> Optional[str]:
+        return self.config.source_path if self.config else None
+
+
 class IndexContext(_BaseContext):
     """一個 index run folder 的檢查環境。root = run folder。"""
 

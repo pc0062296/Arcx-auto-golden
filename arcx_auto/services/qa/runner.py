@@ -20,7 +20,12 @@ from arcx_auto.config.settings import Settings
 from arcx_auto.domain.enums import CaseState, IssueScope, IssueStage
 from arcx_auto.domain.models import IndexRunObservation, IndexRunSnapshot
 from arcx_auto.domain.qa import Issue, QaResult
-from arcx_auto.services.qa.context import CaseContext, IndexContext, _FsCache
+from arcx_auto.services.qa.context import (
+    CaseContext,
+    ConfigContext,
+    IndexContext,
+    _FsCache,
+)
 from arcx_auto.services.qa.registry import REGISTRY, QaRegistry
 
 
@@ -88,6 +93,23 @@ class QaRunner:
         self.disabled = tuple(getattr(self.settings.qa, "disabled_checks", ()) or ())
         # (case_id, attempt) -> POST 結果。POST 不會變, 除非 rerun。
         self._post_cache: Dict[Tuple[str, str, int], QaResult] = {}
+
+    def run_config(
+        self,
+        arcx_config: Optional[ArcxConfig],
+        now: Optional[float] = None,
+    ) -> QaResult:
+        """PRE: 只檢查 arcx.cfg, 不需要任何 run folder。"""
+        now = now if now is not None else time.time()
+        context = ConfigContext(
+            config=arcx_config, settings=self.settings,
+            cache=_FsCache(), now=now,
+        )
+        target = arcx_config.source_path if arcx_config else "(無 arcx.cfg)"
+        return self.registry.run(
+            context, IssueScope.GLOBAL, IssueStage.PRE, target,
+            disabled=self.disabled,
+        )
 
     def run_index(
         self,

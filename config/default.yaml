@@ -121,6 +121,22 @@ qa:
   # 要停用的檢查 id。放在這裡就不用刪程式。
   disabled_checks: []
 
+  # --- PRE: 提交前的 arcx.cfg 檢查 -----------------------------------------
+  # 只驗證這些 key 引用的檔案/目錄是否存在。
+  # 刻意列出明確的 key, 而不是「看起來像路徑就檢查」—— 後者會對輸出路徑、
+  # 樣板字串產生大量假警報, 假警報多了就沒人看了。
+  #
+  # 行首旗標 0 或被 # 註解掉的行不生效, 因此不會被檢查。
+  verify_cfg_paths: true
+  cfg_path_keys:
+    - RCX_TECH_QTF
+    - RCX_LAYER_NAME_MAP
+    - LVS_DFM_DIR
+    - LVS_DECK
+    - LVS_QUERY_CMD
+    - RCX_STAR_CMD
+  cfg_path_check_skip_keys: []
+
   reports:
     required_dirs: ["QC_Cc", "QC_Ct"]     # 一定會存在, 缺了是 FATAL
     optional_dirs: ["QC_Spice"]           # 有才檢查內容
