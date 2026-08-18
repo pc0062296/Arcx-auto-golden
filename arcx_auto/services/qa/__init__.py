@@ -14,11 +14,13 @@ from arcx_auto.services.qa import (  # noqa: F401
     checks_case,
     checks_config,
     checks_index,
+    checks_preflight,
 )
 from arcx_auto.services.qa.context import (
     CaseContext,
     ConfigContext,
     IndexContext,
+    PreflightContext,
     _FsCache,
 )
 from arcx_auto.services.qa.expectations import (
@@ -38,6 +40,7 @@ __all__ = [
     "CaseContext",
     "ConfigContext",
     "IndexContext",
+    "PreflightContext",
     "CheckSpec",
     "QaRegistry",
     "QaRunner",

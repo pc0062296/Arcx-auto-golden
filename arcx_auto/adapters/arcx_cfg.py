@@ -2,18 +2,25 @@
 
 格式:
 
-    1 BEGIN_SETTINGS: blocking_naming_qcap
-    1 QC_FLOW = calQCAP
-    1 RCX_TECH_QTF = /path/to/file
-    1 RCX_LAYER_NAME_MAP = /path/to/file
-    END_SETTINGS
+    g:QCA = Yes
+    g:O_CAL_SET_ENV = setenv LICENSE 123@lic9
 
-    1 BEGIN_SETTINGS: blocking_naming_qrcfs
-    1 QC_FLOW = calQRCFS
+    1 BEGIN_SETTING : blocking_nameing_1
+    1 QC_FLOW = calQCAP
+    1 PROCESS = xx
+    1 TOOL_VERSION_LVS = /source.csh tool_build
+    1 RCX_TECH_QTF = /path/to/file
+    1 LVS_DFM_DIR = /path/to/dir
     END_SETTINGS
 
 一個 cfg 可以有多個 block, 每個 block 代表一組 EDA tool 設定,
 由 ``QC_FLOW`` 指定用哪個 flow (目前是 calQCAP / calQRCFS)。
+
+``g:`` 開頭的是所有 block 的共同變數, 放在檔案開頭、任何 block 之外。
+它們不屬於任何 block, 也不需要做路徑檢查。
+
+關鍵字的拼法在實際檔案中有出入 (BEGIN_SETTING 單數 vs END_SETTINGS 複數),
+因此比對時單複數一律等價 —— 只有把 N 打成 M 這種明顯筆誤才發警告。
 
 **這個檔案是 QA 的地圖。** case run dir 內該有哪些產出物, 完全由 cfg 的
 block 決定 (見 services/qa/expectations.py):
@@ -36,16 +43,19 @@ from typing import Dict, List, Optional, Tuple
 
 # 行首可選的整數旗標, 其餘為內容
 _LINE_RE = re.compile(r"^\s*(?:(?P<flag>-?\d+)\s+)?(?P<body>.*?)\s*$")
-# BEGIN_SETTINGS: <name>
-# 正式拼法是 BEGIN_SETTINGS。仍然接受 BEGIN_SETTIMGS 這種筆誤,
-# 但會發出警告 —— 拼錯的關鍵字若被 Arcx 當成無效行, 整個 block 會被忽略,
-# 那是很難查的失敗。
+# BEGIN_SETTING(S) : <name>   —— 單複數等價, 冒號前後可有空白
+# 實際檔案中 BEGIN 用單數、END 用複數, 所以不能要求兩者一致。
+# 只有 SETTIMG (N 打成 M) 這種明顯筆誤才發警告 —— 那種拼錯若被 Arcx
+# 當成無效行, 整個 block 會被靜默忽略, 是很難查的失敗。
 _BEGIN_RE = re.compile(
-    r"^(?P<kw>BEGIN_SETT(?:INGS|IMGS))\s*:\s*(?P<name>\S+)\s*$", re.IGNORECASE
+    r"^(?P<kw>BEGIN_SETT(?:ING|IMG)S?)\s*:\s*(?P<name>\S+)\s*$", re.IGNORECASE
 )
-_END_RE = re.compile(r"^(?P<kw>END_SETT(?:INGS|IMGS))\s*$", re.IGNORECASE)
-_CANONICAL_BEGIN = "BEGIN_SETTINGS"
-_CANONICAL_END = "END_SETTINGS"
+_END_RE = re.compile(r"^(?P<kw>END_SETT(?:ING|IMG)S?)\s*$", re.IGNORECASE)
+# 所有 block 共用的全域變數, 例如 g:QCA = Yes
+_GLOBAL_RE = re.compile(
+    r"^g\s*:\s*(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(?P<value>.*)$",
+    re.IGNORECASE,
+)
 _KV_RE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(?P<value>.*)$")
 
 
@@ -80,6 +90,8 @@ class ArcxConfig:
 
     source_path: str
     blocks: Tuple[CfgBlock, ...] = ()
+    # g: 開頭的共同變數 (所有 block 共用)。不需要路徑檢查。
+    globals: Dict[str, str] = field(default_factory=dict)
     warnings: Tuple[str, ...] = ()
     error: Optional[str] = None
 
@@ -108,6 +120,7 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
         return ArcxConfig(source_path=resolved, error="無法讀取 arcx.cfg: %s" % exc)
 
     blocks: List[CfgBlock] = []
+    globals_: Dict[str, str] = {}
     warnings: List[str] = []
 
     current_name: Optional[str] = None
@@ -140,12 +153,21 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
         if not body:
             continue
 
+        # g: 開頭的共同變數。它們不屬於任何 block, 也不做路徑檢查。
+        global_match = _GLOBAL_RE.match(body)
+        if global_match:
+            if flag_raw == "0":
+                continue
+            globals_[global_match.group("key")] = (
+                global_match.group("value").strip().strip(";").strip().strip("'\""))
+            continue
+
         begin = _BEGIN_RE.match(body)
         if begin:
-            if begin.group("kw").upper() != _CANONICAL_BEGIN:
+            if "IMG" in begin.group("kw").upper():
                 warnings.append(
-                    "第 %d 行的關鍵字拼成 %s, 正式拼法是 %s"
-                    % (index, begin.group("kw"), _CANONICAL_BEGIN)
+                    "第 %d 行的關鍵字拼成 %s (N 打成 M), Arcx 可能整個 block 都不讀"
+                    % (index, begin.group("kw"))
                 )
             if current_name is not None:
                 current_warnings.append(
@@ -163,10 +185,10 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
 
         end_match = _END_RE.match(body)
         if end_match:
-            if end_match.group("kw").upper() != _CANONICAL_END:
+            if "IMG" in end_match.group("kw").upper():
                 warnings.append(
-                    "第 %d 行的關鍵字拼成 %s, 正式拼法是 %s"
-                    % (index, end_match.group("kw"), _CANONICAL_END)
+                    "第 %d 行的關鍵字拼成 %s (N 打成 M)"
+                    % (index, end_match.group("kw"))
                 )
             if current_name is None:
                 warnings.append("第 %d 行有 END_SETTINGS 但沒有對應的 BEGIN" % index)
@@ -217,5 +239,6 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
     return ArcxConfig(
         source_path=resolved,
         blocks=tuple(blocks),
+        globals=dict(globals_),
         warnings=tuple(warnings),
     )

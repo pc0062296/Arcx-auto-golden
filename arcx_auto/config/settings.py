@@ -210,7 +210,10 @@ class QaSettings:
         "RCX_TECH_QTF",
         "RCX_LAYER_NAME_MAP",
         "LVS_DFM_DIR",
+        # 使用者的清單寫 LVS_DECK, 真實範例寫 LVS_DECL。兩個都留著 ——
+        # 不存在的 key 不會被檢查, 所以多列一個沒有成本, 少列一個會漏掉。
         "LVS_DECK",
+        "LVS_DECL",
         "LVS_QUERY_CMD",
         "RCX_STAR_CMD",
     ])
@@ -218,6 +221,35 @@ class QaSettings:
     cfg_path_check_skip_keys: List[str] = field(default_factory=list)
     # 要停用的檢查 id。放在設定裡, 這樣不需要刪程式就能關掉一條規則。
     disabled_checks: List[str] = field(default_factory=list)
+
+
+@dataclass
+class PreflightSettings:
+    """提交前檢查的門檻。"""
+
+    # 目標檔案系統剩餘空間低於這個比例就擋下來。
+    # 磁碟爆掉是 RC extraction 的頭號隱形殺手 —— job 會在跑到一半時死掉,
+    # 而且是以看不出原因的方式死。
+    min_disk_free_ratio: float = 0.05
+    warn_disk_free_ratio: float = 0.15
+    # 目前 NJOBS 已達 quota_threshold 的這個比例就警告 (送出去只會卡在 PEND)
+    quota_warn_ratio: float = 0.8
+
+
+@dataclass
+class LaunchSettings:
+    """提交 Arcx 時的 bsub 參數。
+
+    Arcx 本身也 bsub 出去 (架構 A1 的 (c) 方案), 這樣 daemon 隨時可以重啟,
+    不會影響正在跑的工作。這裡的參數是給**外層那個 Arcx 協調 job** 用的,
+    不是給它底下的 RC extraction 子 job。
+    """
+
+    # 外層 Arcx job 只做協調, 資源需求不高
+    bsub_args: List[str] = field(default_factory=list)
+    job_name_template: str = "arcx_{run_id}_{wave}"
+    # 相對 wave 目錄
+    output_file: str = ".arcx_auto/arcx_bsub.log"
 
 
 @dataclass
@@ -246,6 +278,8 @@ class Settings:
     gate: GateSettings = field(default_factory=GateSettings)
     lsf: LsfSettings = field(default_factory=LsfSettings)
     qa: QaSettings = field(default_factory=QaSettings)
+    preflight: PreflightSettings = field(default_factory=PreflightSettings)
+    launch: LaunchSettings = field(default_factory=LaunchSettings)
     export: ExportSettings = field(default_factory=ExportSettings)
     source_path: Optional[str] = None
 

@@ -344,6 +344,88 @@ def render_plan(plan: WavePlan, show_command: bool = False,
 # inspect
 # --------------------------------------------------------------------------
 
+def render_submit(outcome, dry_run: bool = False) -> str:
+    """提交結果報告。"""
+    lines: List[str] = []
+
+    for label, result in (("arcx.cfg 檢查", outcome.cfg_check),
+                          ("提交前檢查", outcome.preflight)):
+        if result is None:
+            continue
+        lines.append("== %s ==" % label)
+        if not result.issues:
+            lines.append("  ✓ 全部通過")
+        else:
+            rows = []
+            for issue in sorted(
+                result.issues,
+                key=lambda i: (_SEVERITY_ORDER.index(i.severity)
+                               if i.severity in _SEVERITY_ORDER else 99, i.id),
+            ):
+                rows.append([
+                    _SEVERITY_MARK.get(issue.severity, "  ") + " "
+                    + issue.severity.value,
+                    issue.id,
+                    issue.message,
+                ])
+            lines.append(render_table(["嚴重度", "issue id", "說明"], rows,
+                                      max_col_width=60))
+            for issue in result.issues:
+                if issue.severity != Severity.FATAL or not issue.evidence:
+                    continue
+                lines.append("")
+                lines.append("  [%s] 證據:" % issue.id)
+                for key, value in sorted(issue.evidence.items()):
+                    if isinstance(value, list):
+                        for item in value[:10]:
+                            lines.append("    - %s" % item)
+                    else:
+                        lines.append("    %s: %s" % (key, value))
+        lines.append("")
+
+    if outcome.blocked:
+        lines.append("  ✗ 有 FATAL 問題, 已中止 —— 沒有建立任何目錄, 也沒有提交任何 job")
+        return "\n".join(lines)
+
+    if outcome.error:
+        lines.append("  ✗ %s" % outcome.error)
+
+    lines.append("== 提交 ==")
+    lines.append("  run id : %s" % outcome.run_id)
+    lines.append("  目錄   : %s" % outcome.run_dir)
+    lines.append("  模式   : %s" % ("dry-run (未實際執行)" if dry_run else "正式提交"))
+
+    if outcome.launches:
+        rows = []
+        for launch in outcome.launches:
+            rows.append([
+                launch.wave_name,
+                "dry-run" if launch.dry_run else ("成功" if launch.ok else "失敗"),
+                launch.job_id or "-",
+                launch.error or " ".join(launch.command),
+            ])
+        lines.append("")
+        lines.append(render_table(["wave", "結果", "job id", "指令 / 錯誤"], rows,
+                                  max_col_width=90))
+
+    if outcome.pending_waves:
+        lines.append("")
+        lines.append("  尚未提交的 wave (%d): %s"
+                     % (len(outcome.pending_waves),
+                        ", ".join(outcome.pending_waves)))
+        lines.append("  閘門會在 quota 降低或達到等待上限後放行。")
+
+    if dry_run:
+        lines.append("")
+        lines.append("  這是 dry-run。確認無誤後加上 --yes 才會實際建立目錄並提交。")
+    elif outcome.submitted_count:
+        lines.append("")
+        lines.append("  接下來: arcx-auto daemon --run-id %s --wave-dir %s/wave_001"
+                     % (outcome.run_id, outcome.run_dir))
+
+    return "\n".join(lines)
+
+
 def render_cfg_check(config, result) -> str:
     """arcx.cfg 的 PRE 檢查報告。"""
     lines: List[str] = []

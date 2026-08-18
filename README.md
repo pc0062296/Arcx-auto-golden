@@ -16,6 +16,7 @@ RC extraction 自動化提交、監控、判定與重跑系統。
 | **2a** | ArcxAdapter (dir_map / special.cfg) + WavePlanner + `plan` CLI | ✅ 已完成 |
 | **1a** | arcx.cfg parser + QA Registry + StateResolver + PRE 檢查 | ✅ 已完成 |
 | **1b** | Store + LockManager + Daemon + 唯讀 Web UI | ✅ 已完成 |
+| **2b** | Preflight + WorkspaceBuilder + Launcher + SubmissionController + `submit` | ✅ 已完成 |
 | 2b | Preflight + WorkspaceBuilder + Launcher + SubmissionController | 待做 |
 | 3 | Rerun Drain 狀態機 + Triage Queue | 待做 |
 | 4 | PolicyEngine 自動 remediation | 待做 |
@@ -75,6 +76,27 @@ python3 -m arcx_auto plan --dir-map /path/to/dir_map \
 
 所有指令都支援 `--json`，方便接後續工具或存檔比對。
 
+## 提交
+
+```bash
+# 1. 先看會發生什麼（預設就是 dry-run，不碰磁碟）
+python3 -m arcx_auto submit --dir-map /path/dir_map --arcx-cfg /path/arcx.cfg \
+        --all --max-slots 200 --run-id nightly
+
+# 2. 確認無誤後才真的送
+python3 -m arcx_auto submit ... --run-id nightly --yes
+```
+
+流程是 **檢查 → 建 wave 目錄 → 逐波過閘門 → bsub**。任一 FATAL 就完全不動手，
+不會留下半成品目錄。
+
+每個 wave 目錄裡會有 `arcx.cfg` / `dir_map` / `special.cfg` 的**快照**，
+Arcx 用快照跑而不是原檔 —— 三天後做 QA 時，用的必須是提交當下那份設定。
+
+閘門條件：`已過 min_interval AND (NJOBS < 門檻 OR 已過 max_wait)`。
+純 OR 有漏洞（時間到了但 quota 還滿的，照送一樣塞爆），這個組合同時涵蓋
+「不會太密集」「不會塞爆」「不會無限期卡住」。
+
 ## 持續監控 + Web UI
 
 ```bash
@@ -113,6 +135,7 @@ python3 -m arcx_auto check-cfg /path/to/arcx.cfg
 | `inspect dir-map FILE` | 解析 dir_map，檢查 index 是否有缺漏 |
 | `inspect index PATH...` | 解析 special.cfg 與 GDS 數，算出 slot 需求 |
 | `check-cfg FILE` | 提交前檢查 arcx.cfg（有 FATAL 時 exit code 1） |
+| `submit --dir-map X --arcx-cfg Y` | 檢查 → 建 wave 目錄 → 逐波提交（**預設 dry-run**） |
 | `daemon --wave-dir PATH` | 持續監控，把狀態寫進 state root |
 | `web` | 啟動本機 Web UI（唯讀，只綁 127.0.0.1） |
 

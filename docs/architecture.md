@@ -313,6 +313,39 @@ gate:
 閘門狀態（`gate_entered_at` / `last_quota_sample` / `next_check_at`）存進 `state.json`，
 daemon 重啟後接續，不重新計時。
 
+### 5.4.1 提交流程（Phase 2b）
+
+```
+       plan_waves            純函數，產出 WavePlan
+            │
+            ▼
+   ┌──────────────────┐
+   │ QA PRE checks    │  arcx.cfg 檢查 + Preflight（磁碟／LSF／quota／目標目錄／衝突）
+   └────────┬─────────┘
+            │  任一 FATAL → **完全不動手**，不留半成品
+            ▼
+   ┌──────────────────┐
+   │ WorkspaceBuilder │  建 wave 目錄；快照 arcx.cfg / dir_map / special.cfg
+   └────────┬─────────┘
+            ▼
+   ┌──────────────────┐
+   │ SubmissionCtrl   │  逐波過閘門（純函數判定）
+   └────────┬─────────┘
+            ▼
+   ┌──────────────────┐
+   │ Launcher         │  bsub Arcx，job id 寫進 launch.json
+   └──────────────────┘
+```
+
+**用快照而不是原檔執行。** cfg 在 wave 目錄裡複製一份，Arcx 用那一份跑。
+三天後回頭做 QA 時，用的必須是提交當下那份設定 —— 原檔在這期間被改過是常態，
+而「當時到底用了什麼設定」是除錯的救命稻草。代價是 cfg 內的路徑必須是絕對的，
+Preflight 會擋下相對路徑。
+
+**dry-run 是預設。** `submit` 不加 `--yes` 就只做檢查與顯示指令，
+完全不碰磁碟。而且 dry-run **不會在閘門前真的等待** —— 預覽的目的就是
+一次看完所有 wave 會執行什麼。
+
 ### 5.5 Wave 失敗不阻塞後續 wave
 
 wave_001 有 case 失敗，wave_002 照常提交。只有觸發 `same_issue_burst_limit`
@@ -647,6 +680,37 @@ return 1 ;
 - 用寬鬆的 regex 抽取所有 `"KEY" => "VALUE"`（容忍缺漏逗號、單雙引號、行內註解）
 - `min` / `max` 是保留 meta key，不是真實 index
 
+### 9.1.1 `arcx.cfg`（多 block 格式）
+
+```
+g:QCA = Yes
+g:O_CAL_SET_ENV = setenv LICENSE 123@lic9
+
+1 BEGIN_SETTING : blocking_nameing_1
+1 QC_FLOW = calQCAP
+1 PROCESS = xx
+1 TOOL_VERSION_LVS = /source.csh tool_build
+1 RCX_TECH_QTF = /path/to/file
+1 LVS_DFM_DIR = /path/to/dir
+1 LVS_DECL = /path/to/file
+END_SETTINGS
+```
+
+| 元素 | 語意 |
+|---|---|
+| 行首 `1` / `0` | enable / disable。**`0` 或 `#` 開頭的行不生效，因此不做路徑檢查** |
+| `g:` 前綴 | 所有 block 共用的全域變數，位於任何 block 之外，不需檢查 |
+| `BEGIN_SETTING` / `END_SETTINGS` | 單複數在實際檔案中**不一致**，比對時視為等價 |
+| `QC_FLOW` | 決定用哪個 EDA tool flow，也決定產出目錄名 |
+
+只有把 `N` 打成 `M`（`BEGIN_SETTIMG`）才發警告 —— 那種拼錯若被 Arcx 當成無效行，
+整個 block 會被靜默忽略，是很難查的失敗。
+
+提交前檢查的路徑 key（可設定）：`RCX_TECH_QTF`、`RCX_LAYER_NAME_MAP`、
+`LVS_DFM_DIR`、`LVS_DECK`、`LVS_DECL`、`LVS_QUERY_CMD`、`RCX_STAR_CMD`。
+刻意列出明確的 key 而不是「看起來像路徑就檢查」—— 後者會對輸出路徑、
+`TOOL_VERSION_*` 這種「指令 + 參數」的值產生大量假警報，而假警報多了就沒人看了。
+
 ### 9.2 `special.cfg`（位於每個 index path 內）
 
 ```
@@ -746,7 +810,7 @@ Drain 順序固定為：**先 `bkill` parent，再 `-djp` 子 job**（反過來�
 | **2a** | ArcxAdapter(dir_map/special.cfg) + WavePlanner + `plan` CLI | ✅ 已完成 |
 | **1a** | arcx.cfg parser + QA Registry + StateResolver + PRE 檢查 | ✅ 已完成 |
 | **1b** | Store + LockManager + Daemon + 唯讀 Web UI | ✅ 已完成 |
-| 2b | WorkspaceBuilder + Launcher + SubmissionController + Launch Wizard | 待做 |
+| **2b** | Preflight + WorkspaceBuilder + Launcher + SubmissionController + `submit` | ✅ 已完成 |
 | 3 | Rerun Drain 狀態機 + 人工觸發一鍵重跑 + Triage Queue | 待做 |
 | 4 | PolicyEngine 自動 remediation（先 shadow mode 兩週） | 待做 |
 | 5 | Status Exporter + 公用碟總覽頁 + 歷史趨勢 | 待做 |

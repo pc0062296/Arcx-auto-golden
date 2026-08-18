@@ -33,6 +33,7 @@ from arcx_auto.domain.enums import PlanMode
 from arcx_auto.domain.models import IndexRunSnapshot, IndexSpec, as_json_dict
 from arcx_auto.services.collector import Collector
 from arcx_auto.services.monitor import MonitorService
+from arcx_auto.services.submitter import Submitter
 from arcx_auto.services.qa import QaRunner
 from arcx_auto.services.qa.runner import IndexQaReport
 from arcx_auto.services.state_engine import (
@@ -94,6 +95,28 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--show-command", action="store_true",
                       help="顯示每個 wave 會執行的 Arcx 指令")
     plan.add_argument("--json", action="store_true", help="輸出 JSON")
+
+    # -- submit --------------------------------------------------------
+    submit = sub.add_parser(
+        "submit", help="檢查 -> 建立 wave 目錄 -> 逐波提交 (預設為 dry-run)")
+    submit.add_argument("--dir-map", required=True)
+    submit.add_argument("--arcx-cfg", required=True)
+    submit.add_argument("--index", nargs="+", default=[],
+                        help="要執行的 index (可多選)")
+    submit.add_argument("--all", action="store_true",
+                        help="使用 dir_map 內全部 index")
+    submit.add_argument("--max-slots", type=int, help="單波 slot 上限")
+    submit.add_argument("--mode", choices=["auto", "off"], default="auto")
+    submit.add_argument("--run-id", help="這次提交的名稱 (預設由時間產生)")
+    submit.add_argument("--run-root", help="wave 目錄的根 (預設取自設定)")
+    submit.add_argument("--max-waves", type=int,
+                        help="最多送出幾個 wave (預設全部)")
+    submit.add_argument("--no-wait", action="store_true",
+                        help="閘門擋住時直接結束, 不等待")
+    submit.add_argument(
+        "--yes", action="store_true",
+        help="真的執行。**不加這個參數就是 dry-run** —— 只檢查與顯示指令, "
+             "不建立任何目錄、不提交任何 job")
 
     # -- daemon --------------------------------------------------------
     daemon = sub.add_parser(
@@ -303,6 +326,70 @@ def cmd_plan(args: argparse.Namespace, settings: Settings) -> int:
 
 
 # --------------------------------------------------------------------------
+# submit
+# --------------------------------------------------------------------------
+
+def cmd_submit(args: argparse.Namespace, settings: Settings) -> int:
+    """提交流程。**預設是 dry-run** —— 這是系統第一個會寫入磁碟的指令,
+    所以要求使用者明確加 --yes 才會動手。
+    """
+    arcx = ArcxAdapter(settings.layout, settings.plan)
+    dir_map = arcx.parse_dir_map(args.dir_map)
+    for warning in dir_map.warnings:
+        print("  ! dir_map: %s" % warning, file=sys.stderr)
+
+    index_keys = dir_map.keys_sorted() if args.all else list(args.index)
+    if not index_keys:
+        print("錯誤: 請用 --index 指定 index, 或用 --all 選取全部", file=sys.stderr)
+        return 2
+
+    specs = []
+    for key in index_keys:
+        path = dir_map.resolve(key)
+        if path is None:
+            specs.append(IndexSpec(index_key=key, path="", gds_count=0,
+                                   cpu_per_case=0,
+                                   error="dir_map 內找不到這個 index"))
+        else:
+            specs.append(arcx.build_index_spec(key, path))
+
+    plan = plan_waves(
+        specs,
+        max_slots_per_wave=args.max_slots or settings.plan.max_slots_per_wave,
+        mode=PlanMode.OFF if args.mode == "off" else PlanMode.AUTO,
+    )
+
+    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
+    run_root = os.path.abspath(os.path.expanduser(
+        args.run_root or settings.run_root))
+    dry_run = not args.yes
+
+    print(render.render_plan(plan))
+    print()
+
+    submitter = Submitter(settings)
+    outcome = submitter.submit(
+        plan=plan,
+        run_id=run_id,
+        run_root=run_root,
+        arcx_cfg=args.arcx_cfg,
+        dir_map=args.dir_map,
+        dry_run=dry_run,
+        max_waves=args.max_waves,
+        wait_for_gate=not args.no_wait,
+        on_progress=lambda msg: print("  %s" % msg),
+    )
+
+    print(render.render_submit(outcome, dry_run=dry_run))
+
+    if outcome.blocked:
+        return 1
+    if outcome.error:
+        return 1
+    return 0
+
+
+# --------------------------------------------------------------------------
 # daemon / web
 # --------------------------------------------------------------------------
 
@@ -430,6 +517,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     handlers = {
         "status": cmd_status,
+        "submit": cmd_submit,
         "daemon": cmd_daemon,
         "web": cmd_web,
         "plan": cmd_plan,

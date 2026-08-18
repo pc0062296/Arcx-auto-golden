@@ -19,7 +19,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from arcx_auto.adapters.arcx_cfg import ArcxConfig
 from arcx_auto.config.settings import QaSettings, Settings
 from arcx_auto.domain.enums import CaseState, IssueScope, IssueStage, Severity
-from arcx_auto.domain.models import CaseSnapshot, IndexRunObservation, IndexRunSnapshot
+from arcx_auto.domain.models import (
+    CaseSnapshot,
+    IndexRunObservation,
+    IndexRunSnapshot,
+    WavePlan,
+)
 from arcx_auto.domain.qa import ExpectedArtifact, Issue
 from arcx_auto.services.qa.expectations import expected_artifacts, expected_flow_dirs
 
@@ -262,6 +267,103 @@ class ConfigContext(_BaseContext):
     @property
     def source_path(self) -> Optional[str]:
         return self.config.source_path if self.config else None
+
+
+class PreflightContext(_BaseContext):
+    """提交前檢查的環境。root = 這次 run 的目標目錄 (尚未建立)。
+
+    它不看 run folder (那時候還沒有), 而是看「要建立的地方」與外部資源:
+    磁碟、LSF、既有的 wave。
+    """
+
+    def __init__(
+        self,
+        plan: "WavePlan",
+        run_dir: str,
+        settings: Settings,
+        arcx_config: Optional[ArcxConfig],
+        cache: _FsCache,
+        now: float,
+        lsf: Optional[object] = None,
+        run_root: Optional[str] = None,
+    ) -> None:
+        super().__init__(run_dir, settings, cache, now)
+        self.plan = plan
+        self.run_dir = os.path.abspath(run_dir)
+        self.run_root = os.path.abspath(run_root or os.path.dirname(self.run_dir))
+        self.arcx_config = arcx_config
+        self.lsf = lsf
+        self.index_key = None
+        self.case_id = None
+        self._njobs_cached = False
+        self._njobs: Optional[int] = None
+
+    # -- 外部資源 -----------------------------------------------------
+
+    def disk_free_ratio(self) -> Optional[float]:
+        """目標檔案系統的剩餘空間比例。
+
+        目錄還不存在時往上找第一個存在的祖先 —— statvfs 要的是掛載點,
+        不是最終路徑。
+        """
+        path = self.run_dir
+        while path and not os.path.exists(path):
+            parent = os.path.dirname(path)
+            if parent == path:
+                return None
+            path = parent
+        try:
+            st = os.statvfs(path)
+        except OSError:
+            return None
+        if st.f_blocks == 0:
+            return None
+        return float(st.f_bavail) / float(st.f_blocks)
+
+    def current_njobs(self) -> Optional[int]:
+        """帳號目前的 NJOBS。查一次就快取, 不重複打 LSF。"""
+        if self._njobs_cached:
+            return self._njobs
+        self._njobs_cached = True
+        if self.lsf is None:
+            return None
+        value, _error = self.lsf.current_njobs()
+        self._njobs = value
+        return value
+
+    def existing_index_usage(self) -> List[Dict[str, Any]]:
+        """掃既有的 wave manifest, 找出這次要用的 index 是否已被使用過。"""
+        wanted = {
+            spec.index_key
+            for wave in self.plan.waves
+            for spec in wave.indices
+        }
+        if not wanted or not os.path.isdir(self.run_root):
+            return []
+
+        import json
+
+        conflicts: List[Dict[str, Any]] = []
+        for run_name in sorted(os.listdir(self.run_root)):
+            run_path = os.path.join(self.run_root, run_name)
+            if not os.path.isdir(run_path) or run_path == self.run_dir:
+                continue
+            for wave_name in sorted(os.listdir(run_path)):
+                manifest = os.path.join(
+                    run_path, wave_name, ".arcx_auto", "manifest.json")
+                try:
+                    with open(manifest, "r", encoding="utf-8") as handle:
+                        data = json.load(handle)
+                except (OSError, ValueError):
+                    continue
+                shared = wanted & set(data.get("index_keys") or [])
+                for index_key in sorted(shared):
+                    conflicts.append({
+                        "index": index_key,
+                        "wave_dir": os.path.join(run_path, wave_name),
+                        "submitted_at": data.get("created_at"),
+                    })
+        return conflicts
 
 
 class IndexContext(_BaseContext):

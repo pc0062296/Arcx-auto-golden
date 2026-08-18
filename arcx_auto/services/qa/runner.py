@@ -24,6 +24,7 @@ from arcx_auto.services.qa.context import (
     CaseContext,
     ConfigContext,
     IndexContext,
+    PreflightContext,
     _FsCache,
 )
 from arcx_auto.services.qa.registry import REGISTRY, QaRegistry
@@ -108,6 +109,27 @@ class QaRunner:
         target = arcx_config.source_path if arcx_config else "(無 arcx.cfg)"
         return self.registry.run(
             context, IssueScope.GLOBAL, IssueStage.PRE, target,
+            disabled=self.disabled,
+        )
+
+    def run_preflight(
+        self,
+        plan,
+        run_dir: str,
+        arcx_config=None,
+        lsf=None,
+        run_root: Optional[str] = None,
+        now: Optional[float] = None,
+    ) -> QaResult:
+        """PRE: 這批工作現在送得出去嗎。"""
+        now = now if now is not None else time.time()
+        context = PreflightContext(
+            plan=plan, run_dir=run_dir, settings=self.settings,
+            arcx_config=arcx_config, cache=_FsCache(), now=now,
+            lsf=lsf, run_root=run_root,
+        )
+        return self.registry.run(
+            context, IssueScope.WAVE, IssueStage.PRE, run_dir,
             disabled=self.disabled,
         )
 

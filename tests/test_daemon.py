@@ -79,14 +79,16 @@ class DaemonRunTest(unittest.TestCase):
     def test_audit_records_start_and_stop(self):
         self._daemon().run()
         path = RunStore(self.state_root, "t").audit_path
-        actions = [json.loads(l)["action"] for l in open(path, encoding="utf-8")]
+        with open(path, encoding="utf-8") as handle:
+            actions = [json.loads(line)["action"] for line in handle]
         self.assertIn("daemon_start", actions)
         self.assertIn("daemon_stop", actions)
 
     def test_events_recorded_on_first_scan(self):
         self._daemon().run()
         path = RunStore(self.state_root, "t").events_path
-        events = [json.loads(l) for l in open(path, encoding="utf-8")]
+        with open(path, encoding="utf-8") as handle:
+            events = [json.loads(line) for line in handle]
         self.assertTrue(events)
         self.assertIn("to_state", events[0])
 
