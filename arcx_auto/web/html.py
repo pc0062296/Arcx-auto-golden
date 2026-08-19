@@ -79,15 +79,26 @@ def esc(value: Any) -> str:
 
 def page(title: str, body: str, refresh: int = 0,
          crumbs: Sequence[Tuple[str, str]] = (), meta: str = "") -> str:
+    """One page of the served UI.
+
+    Every page carries the same two links. The monitoring pages and the
+    submission pages were built at different times and were not connected at
+    all: somebody opening the dashboard had no way to reach the thing that
+    starts a run, short of typing the URL. A tool whose main action is
+    unreachable from its front page does not have that action.
+    """
     refresh_tag = ('<meta http-equiv="refresh" content="%d">' % refresh
                    if refresh > 0 else "")
     trail = " / ".join(
         '<a href="%s">%s</a>' % (esc(href), esc(text)) for href, text in crumbs)
     return (
-        "<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "%s<title>%s</title><style>%s</style></head><body>"
-        "<header><h1>%s</h1><span class='meta'>%s</span>"
+        "<header><h1>%s</h1>"
+        "<span class='meta'><a href='/submit'>new submission</a></span>"
+        "<span class='meta'><a href='/commands'>queue</a></span>"
+        "<span class='meta'>%s</span>"
         "<span class='meta'>%s</span></header><main>%s</main></body></html>"
         % (refresh_tag, esc(title), CSS, trail or esc(title), esc(meta),
            esc("updated " + time.strftime("%H:%M:%S")), body)

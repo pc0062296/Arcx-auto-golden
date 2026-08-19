@@ -178,6 +178,10 @@ too dense", "not flooding" and "never stuck forever".
 
 ## The normal way to use it
 
+> For the engineer running the extraction, there is a step-by-step guide in
+> **[docs/usage.md](docs/usage.md)** that needs no command line beyond the
+> first setup.
+
 ```bash
 # terminal 1: the daemon -- monitors, and runs whatever the UI asks for
 python3 -m arcx_auto daemon

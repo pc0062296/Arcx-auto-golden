@@ -248,3 +248,22 @@ def _tree(root):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NavigationTest(unittest.TestCase):
+    """The submission flow has to be reachable from the page people open.
+
+    The monitoring pages and the submission pages were built at different
+    times and were not linked at all, so the dashboard had no route to the
+    thing that starts a run.
+    """
+
+    def test_every_served_page_offers_the_submission_flow(self):
+        from arcx_auto.web import pages
+
+        state = {"run_id": "r", "updated_at": 0, "daemon": {},
+                 "totals": {}, "indexes": [], "issues": []}
+        for html in (pages.render_home([state], 0),
+                     pages.render_run(state, 0)):
+            self.assertIn('href=\'/submit\'', html)
+            self.assertIn('href=\'/commands\'', html)
