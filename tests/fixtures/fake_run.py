@@ -12,6 +12,7 @@ The structure it produces mirrors a real index run folder exactly:
     .complete.NTN_1
     NDIO_1/  PDIO_1/  NTN_1/       per-case run dirs
     QC_Cc/  QC_Ct/  QC_Spice/      reports Arcx assembles
+  (all of the above inside <index basename>_run/)
     submit_bjob_cmd_file_1.log     logs, named only by sequence number
     cmd_folder/cmd_file_1          the script, containing `cd <case run dir>`
 
@@ -115,7 +116,8 @@ def make_index_run_folder(
     (see build_demo) to prove that case identity is never guessed from the
     number: reading the cmd_file is the only reliable mapping.
     """
-    folder = os.path.join(root, index_key)
+    # Arcx names the run folder after the index path's basename plus _run.
+    folder = os.path.join(root, "%s_run" % index_key)
     os.makedirs(folder, exist_ok=True)
     cmd_dir = os.path.join(folder, "cmd_folder")
 

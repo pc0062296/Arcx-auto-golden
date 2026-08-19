@@ -44,6 +44,7 @@ class Py39CompatTest(unittest.TestCase):
             "math", "textwrap", "traceback", "logging",
             # used by the daemon and the web UI
             "socket", "fcntl", "signal", "http", "urllib", "html", "pwd",
+            "webbrowser",
         )
         offenders = []
         for path in sorted((ROOT / "arcx_auto").rglob("*.py")):

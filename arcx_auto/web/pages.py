@@ -60,6 +60,10 @@ def render_home(states: Sequence[Dict[str, Any]], refresh: int) -> str:
          "alert" if total_attention else ""),
         ("runs monitored", len(states), ""),
     ])
+    # The first question anybody opening this page has is "is anything wrong",
+    # and answering it with a table of runs makes them work it out from
+    # numbers. Name the cases instead, before anything else.
+    body += _attention_across_runs(states)
     body += "<h2>runs</h2>"
     body += table(
         ["run", "progress", "cases", "index", "attention", "issues",
@@ -70,19 +74,71 @@ def render_home(states: Sequence[Dict[str, Any]], refresh: int) -> str:
     return page("Arcx Auto Golden", body, refresh=refresh)
 
 
+ATTENTION_STATES = ("FAILED", "LOST", "STALLED", "SUSPENDED", "UNKNOWN")
+
+
+def _attention_across_runs(states: Sequence[Dict[str, Any]],
+                           limit: int = 25) -> str:
+    """Every case needing a person, across every run, named and linked.
+
+    Deliberately above the run table. Somebody opening this page is asking one
+    thing, and a row of counts makes them derive the answer instead of reading
+    it.
+    """
+    rows = []
+    for state in states:
+        run_id = state.get("run_id", "?")
+        for index in state.get("indexes") or []:
+            index_key = index.get("index_key", "?")
+            for case in index.get("cases") or []:
+                if case.get("state") not in ATTENTION_STATES:
+                    continue
+                rows.append([
+                    "<a href='%s'>%s</a>"
+                    % (esc(_q("run", run_id)), esc(run_id)),
+                    "<a href='%s'>%s</a>"
+                    % (esc(_q("run", run_id, "index", index_key)),
+                       esc(index_key)),
+                    "<a href='%s'>%s</a>"
+                    % (esc(_q("run", run_id, "index", index_key, "case",
+                              case.get("case_id", ""))),
+                       esc(case.get("case_id", "?"))),
+                    state_pill(case.get("state", "")),
+                    esc(duration(case.get("in_state_sec"))),
+                    "<span class='muted'>%s</span>" % esc(case.get("note") or ""),
+                ])
+
+    if not rows:
+        return ("<h2>needs attention</h2>"
+                "<div class='empty good'>nothing needs a person right now</div>")
+
+    more = ""
+    if len(rows) > limit:
+        more = ("<p class='doc'>and %d more, in the runs below.</p>"
+                % (len(rows) - limit))
+    return ("<h2>needs attention (%d)</h2>" % len(rows)) + table(
+        ["run", "index", "case", "state", "in state", "why"],
+        rows[:limit]) + more
+
+
 def _daemon_health(daemon: Dict[str, Any], updated_at: Optional[float]) -> str:
     """The daemon has to be monitored too: if it dies quietly the display
     freezes at the last moment and looks perfectly healthy, which is the most
     dangerous state of all.
     """
-    if daemon.get("last_error"):
-        return "<span class='bad'>error</span>"
     import time
 
-    if updated_at and time.time() - updated_at > 900:
-        return "<span class='warn'>no update for over 15 min</span>"
     if not daemon:
         return "<span class='muted'>-</span>"
+    # A daemon that stopped cleanly says so. Otherwise its last snapshot stays
+    # on the page looking live, and the moment it froze at is exactly the
+    # moment it was healthy.
+    if daemon.get("running") is False:
+        return "<span class='muted'>stopped</span>"
+    if daemon.get("last_error"):
+        return "<span class='bad'>error</span>"
+    if updated_at and time.time() - updated_at > 900:
+        return "<span class='warn'>no update for over 15 min</span>"
     return "<span class='good'>pid %s</span>" % esc(daemon.get("pid"))
 
 
@@ -104,6 +160,7 @@ def render_run(state: Dict[str, Any], refresh: int) -> str:
         ("WARN", severities.get("WARN", 0), ""),
     ])
 
+    body += _finished_banner(state)
     body += _lsf_banner(state)
     body += _daemon_banner(state)
 
@@ -134,6 +191,42 @@ def render_run(state: Dict[str, Any], refresh: int) -> str:
                 meta="updated %s" % timestamp(state.get("updated_at")))
 
 
+def _finished_banner(state: Dict[str, Any]) -> str:
+    """Say when a run is over, and whether it is over *well*.
+
+    Somebody watching a run needs to know it has stopped needing them, and the
+    case table does not say that -- it says a lot of numbers that they have to
+    add up. Finishing and succeeding are shown separately, because a run can do
+    the first without the second.
+    """
+    counts: Dict[str, int] = {}
+    for index in state.get("indexes") or []:
+        for name, number in (index.get("counts") or {}).items():
+            counts[name] = counts.get(name, 0) + number
+    if not counts:
+        return ""
+
+    in_flight = sum(counts.get(name, 0) for name in
+                    ("RUNNING", "QUEUED", "PENDING", "COMPLETED_MARKER"))
+    if in_flight:
+        return ""
+
+    total = sum(counts.values())
+    done = counts.get("DONE", 0)
+    if done == total:
+        return (
+            "<div class='card' style='border-color:var(--good);"
+            "margin-bottom:8px'><span class='good'>finished -- all %d case(s) "
+            "passed</span><div class='l'>Nothing here needs a person. The "
+            "results are ready to use.</div></div>" % total)
+    bad = total - done
+    return (
+        "<div class='card' style='border-color:var(--bad);margin-bottom:8px'>"
+        "<span class='bad'>finished, with %d of %d case(s) unresolved</span>"
+        "<div class='l'>Nothing is running any more, so these will not "
+        "improve on their own.</div></div>" % (bad, total))
+
+
 def _lsf_banner(state: Dict[str, Any]) -> str:
     lsf = state.get("lsf") or {}
     if lsf.get("available"):
@@ -148,7 +241,21 @@ def _lsf_banner(state: Dict[str, Any]) -> str:
 
 
 def _daemon_banner(state: Dict[str, Any]) -> str:
+    """Say plainly when nothing is watching this run any more.
+
+    Everything below the banner is a snapshot from whenever the daemon last
+    looked. Without saying so, a page from three hours ago is indistinguishable
+    from a page from ten seconds ago.
+    """
     daemon = state.get("daemon") or {}
+    if daemon.get("running") is False:
+        return (
+            "<div class='card' style='border-color:var(--warn);"
+            "margin-bottom:8px'><span class='warn'>the daemon has stopped"
+            "</span><div class='l'>Nothing is watching this run. Anything "
+            "below is from %s. Jobs already sent to LSF carry on regardless; "
+            "start the daemon again to resume monitoring.</div></div>"
+            % esc(timestamp(daemon.get("stopped_at"))))
     if not daemon.get("last_error"):
         return ""
     return (

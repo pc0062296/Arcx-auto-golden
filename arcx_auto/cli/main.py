@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 from typing import Dict, List, Optional, Sequence
@@ -172,6 +173,27 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument("--no-lsf", action="store_true", help="do not query LSF")
     daemon.add_argument("--no-export", action="store_true",
                         help="do not publish to the shared disk")
+
+    # -- start ---------------------------------------------------------
+    start = sub.add_parser(
+        "start",
+        help="start the daemon and the UI together and open a browser")
+    start.add_argument("--port", type=int, default=8765)
+    start.add_argument("--host", default="127.0.0.1")
+    start.add_argument("--run-id", help="name for this monitoring session")
+    start.add_argument("--no-browser", action="store_true",
+                       help="do not open a browser")
+    start.add_argument("--browser", default="google-chrome",
+                       help="browser command (default: google-chrome)")
+    start.add_argument("--no-lsf", action="store_true",
+                       help="do not query LSF")
+
+    # -- stop ----------------------------------------------------------
+    stop = sub.add_parser(
+        "stop", help="ask a running daemon to stop")
+    stop.add_argument("--run-id", help="which daemon (all of them by default)")
+    stop.add_argument("--force", action="store_true",
+                      help="SIGKILL instead of asking politely")
 
     # -- policy --------------------------------------------------------
     policy = sub.add_parser(
@@ -588,6 +610,137 @@ def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
     return daemon.run()
 
 
+def cmd_start(args: argparse.Namespace, settings: Settings) -> int:
+    """Everything needed to work, from one command in one terminal.
+
+    The daemon and the web server are separate processes for a reason -- the
+    daemon is the single writer and the UI is a display -- but that is an
+    implementation detail nobody should have to manage. Two terminals to start,
+    two to remember to stop, and a URL to paste is three chances to get it
+    wrong before any work happens.
+
+    The web server runs in a thread here rather than a second process: it only
+    reads state and posts intents, so there is nothing to isolate, and one
+    process means one Ctrl-C stops everything.
+    """
+    import threading
+
+    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
+    url = "http://%s:%d/" % (args.host, args.port)
+
+    web_options = WebOptions(
+        state_root=settings.expanded_state_root(),
+        host=args.host, port=args.port, refresh_sec=30,
+        settings=settings,
+    )
+    web_thread = threading.Thread(
+        target=serve, args=(web_options,), daemon=True)
+    web_thread.start()
+
+    print("UI       : %s" % url)
+    print("state    : %s" % settings.expanded_state_root())
+    print("runs     : %s" % settings.expanded_run_root())
+    print("run id   : %s" % run_id)
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print("  ! binding to %s publishes this to others." % args.host,
+              file=sys.stderr)
+    print("Ctrl-C to stop both.")
+
+    if not args.no_browser:
+        _open_browser(args.browser, url)
+
+    options = DaemonOptions(
+        run_id=run_id, use_lsf=not args.no_lsf,
+    )
+    try:
+        return Daemon(options, settings=settings).run()
+    except KeyboardInterrupt:
+        print("stopped.")
+        return 0
+
+
+def _open_browser(command: str, url: str) -> None:
+    """Open the UI, and never let failing to do so stop the tool.
+
+    A missing browser, no DISPLAY, a machine reached over ssh -- all normal,
+    and none of them a reason not to start. The URL is printed either way.
+    """
+    import shutil as _shutil
+    import subprocess
+
+    if command and _shutil.which(command):
+        try:
+            subprocess.Popen(
+                [command, url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except OSError:
+            pass
+    try:
+        import webbrowser
+
+        if webbrowser.open(url):
+            return
+    except Exception:  # noqa: BLE001 - opening a browser is never critical
+        pass
+    print("  (could not open a browser; go to %s yourself)" % url)
+
+
+def cmd_stop(args: argparse.Namespace, settings: Settings) -> int:
+    """Stop a daemon from another terminal.
+
+    Ctrl-C in the daemon's own window is the normal way. This exists for when
+    that window is gone, on another desktop, or the daemon was started from a
+    script -- hunting for a pid to kill is not something anybody should have to
+    do to stop a tool.
+
+    The pid comes from the lock file the daemon writes when it starts, so no
+    process list is searched and nothing else can be hit by mistake.
+    """
+    import json as _json
+    import signal as _signal
+
+    state_root = settings.expanded_state_root()
+    run_ids = ([args.run_id] if args.run_id
+               else RunStore.list_runs(state_root))
+    if not run_ids:
+        print("no runs found under %s" % state_root)
+        return 0
+
+    stopped = 0
+    for run_id in run_ids:
+        lock_path = os.path.join(RunStore(state_root, run_id).dir,
+                                 "daemon.lock")
+        try:
+            with open(lock_path, encoding="utf-8") as handle:
+                holder = _json.load(handle)
+        except (OSError, ValueError):
+            continue
+        pid = holder.get("pid")
+        if not pid:
+            continue
+        if holder.get("host") not in (None, socket.gethostname()):
+            print("%s: the daemon is on %s, stop it there"
+                  % (run_id, holder.get("host")), file=sys.stderr)
+            continue
+        try:
+            os.kill(int(pid),
+                    _signal.SIGKILL if args.force else _signal.SIGTERM)
+        except ProcessLookupError:
+            continue          # already gone; the lock file is just stale
+        except OSError as exc:
+            print("%s: could not signal pid %s: %s" % (run_id, pid, exc),
+                  file=sys.stderr)
+            continue
+        print("%s: asked pid %s to stop" % (run_id, pid))
+        stopped += 1
+
+    if not stopped:
+        print("no running daemon found"
+              + ("" if args.run_id else " (looked at %d run(s))" % len(run_ids)))
+    return 0
+
+
 def cmd_policy(args: argparse.Namespace, settings: Settings) -> int:
     """Show what automatic handling would do -- or what it already recorded.
 
@@ -780,6 +933,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "web": cmd_web,
         "export": cmd_export,
         "policy": cmd_policy,
+        "stop": cmd_stop,
+        "start": cmd_start,
         "plan": cmd_plan,
         "check-cfg": cmd_check_cfg,
         "inspect": cmd_inspect,

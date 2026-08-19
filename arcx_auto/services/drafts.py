@@ -51,6 +51,11 @@ class Draft:
     max_slots: Optional[int] = None
     mode: str = "auto"
     groups: List[DraftGroup] = field(default_factory=list)
+    #: The pair being chosen right now, one file at a time. Held here rather
+    #: than in the URL so picking the second file cannot lose the first.
+    pending: Dict[str, str] = field(default_factory=dict)
+    #: Where the picker last was, so it reopens there instead of at home
+    last_dir: str = ""
 
     @property
     def total_indices(self) -> int:
@@ -65,6 +70,8 @@ class Draft:
             "max_slots": self.max_slots,
             "mode": self.mode,
             "groups": [g.as_dict() for g in self.groups],
+            "pending": dict(self.pending),
+            "last_dir": self.last_dir,
         }
 
     @classmethod
@@ -86,6 +93,9 @@ class Draft:
                 for g in (data.get("groups") or [])
                 if isinstance(g, dict)
             ],
+            pending={str(k): str(v)
+                     for k, v in (data.get("pending") or {}).items()},
+            last_dir=str(data.get("last_dir") or ""),
         )
 
 

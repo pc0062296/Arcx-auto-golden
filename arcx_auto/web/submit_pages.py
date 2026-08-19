@@ -53,9 +53,14 @@ def render_new(drafts: Sequence[Any], error: str = "") -> str:
             str(len(draft.groups)),
             str(draft.total_indices),
             esc(_when(draft.updated_at)),
+            '<form method="post" action="/submit/discard" style="margin:0;'
+            'padding:0;border:0;background:none">'
+            '<input type="hidden" name="id" value="%s">'
+            '<button type="submit" class="link">discard</button></form>'
+            % esc(draft.id),
         ])
 
-    existing = (table(["draft", "groups", "indices", "updated"], rows)
+    existing = (table(["draft", "groups", "indices", "updated", ""], rows)
                 if rows else
                 "<div class='empty'>no drafts in progress</div>")
 
@@ -125,15 +130,94 @@ def render_draft(draft: Any, error: str = "", notice: str = "") -> str:
 <h2>groups</h2>
 %s
 <h2>add a group</h2>
-<form method="post" action="/submit/%s/browse">
-  <p><label>dir_map <input name="dir_map" size="70" placeholder="/path/to/dir_map" required></label></p>
-  <p><label>arcx.cfg <input name="arcx_cfg" size="70" placeholder="/path/to/arcx.cfg" required></label></p>
-  <button type="submit">read the dir_map</button>
-  <p class='doc'>Both files are read, not copied. You pick the indices on the
-  next page.</p>
+<form method="get" action="/pick/%s/dir_map">
+  <button type="submit">choose a dir_map and an arcx.cfg...</button>
+  <p class='doc'>Click through to the files; both are read, not copied. You
+  pick the indices on the next page.</p>
 </form>
 %s
 """ % (_error(error), _notice(notice), groups, esc(draft.id), ready))
+
+
+def render_file_picker(listing: Any, field: str, draft_id: str,
+                       suggestions: Sequence[str] = (),
+                       current: Optional[dict] = None) -> str:
+    """Click through the filesystem instead of typing a path.
+
+    Typing an absolute path is the worst part of the flow: long, easy to get
+    subtly wrong, and wrong only becomes visible several steps later. The
+    likely files are offered first, because most of the time the answer is
+    sitting in the directory already open.
+    """
+    label = {"dir_map": "dir_map", "arcx_cfg": "arcx.cfg"}.get(field, field)
+    kind = "dir_map" if field == "dir_map" else "arcx_cfg"
+
+    crumbs = " / ".join(
+        '<a href="/pick/%s/%s?path=%s">%s</a>'
+        % (esc(draft_id), esc(field), _q(path), esc(name))
+        for name, path in listing.crumbs)
+
+    picks = ""
+    if suggestions:
+        picks = "<h3>likely here</h3>" + "".join(
+            '<form method="post" action="/pick/%s/%s" style="display:inline-block;'
+            'margin:0 8px 8px 0;padding:6px 10px">'
+            '<input type="hidden" name="value" value="%s">'
+            '<button type="submit">%s</button></form>'
+            % (esc(draft_id), esc(field), esc(path), esc(os.path.basename(path)))
+            for path in suggestions)
+
+    rows = []
+    if listing.parent:
+        rows.append([
+            '<a href="/pick/%s/%s?path=%s">..</a>'
+            % (esc(draft_id), esc(field), _q(listing.parent)),
+            "<span class='muted'>up</span>", "", ""])
+    for entry in listing.entries:
+        if entry.is_dir:
+            name = ('<a href="/pick/%s/%s?path=%s">%s/</a>'
+                    % (esc(draft_id), esc(field), _q(entry.path),
+                       esc(entry.name)))
+            action = ""
+        else:
+            name = esc(entry.name)
+            action = (
+                '<form method="post" action="/pick/%s/%s" style="margin:0;'
+                'padding:0;border:0;background:none">'
+                '<input type="hidden" name="value" value="%s">'
+                '<button type="submit" class="link">use this</button></form>'
+                % (esc(draft_id), esc(field), esc(entry.path)))
+        rows.append([
+            name,
+            "<span class='muted'>%s</span>" % esc(entry.kind or ""),
+            "" if entry.is_dir else esc(_size(entry.size)),
+            action,
+        ])
+
+    error = ("<p class='doc bad'>%s</p>" % esc(listing.error)
+             if listing.error else "")
+
+    chosen = ""
+    if current:
+        chosen = "<p class='doc'>%s</p>" % " &middot; ".join(
+            "%s: %s" % (esc(k), esc(v)) for k, v in current.items() if v)
+
+    return _page("choose a %s" % label, """
+<h2>choose a %s</h2>
+%s
+<p class='doc'>%s</p>
+%s
+%s
+%s
+<h3>or type it</h3>
+<form method="post" action="/pick/%s/%s">
+  <input name="value" size="70" placeholder="/path/to/%s" required>
+  <button type="submit">use this</button>
+</form>
+<p><a href="/submit/%s">back to the submission</a></p>
+""" % (esc(label), chosen, crumbs, error, picks,
+       table(["name", "kind", "size", ""], rows),
+       esc(draft_id), esc(field), esc(label), esc(draft_id)))
 
 
 def render_browse(draft: Any, dir_map_path: str, arcx_cfg: str,
@@ -350,7 +434,7 @@ something your browser sits and waits for.</p>
 def render_commands(pending: Sequence[Any], running: Sequence[Any],
                     done: Sequence[Any], daemon_note: str = "") -> str:
     """The queue, so a request that went nowhere is visible."""
-    def rows_for(commands, show_result=False):
+    def rows_for(commands, show_result=False, cancellable=False):
         rows = []
         for command in commands:
             outcome = ""
@@ -360,6 +444,16 @@ def render_commands(pending: Sequence[Any], running: Sequence[Any],
                 elif command.ok is False:
                     outcome = "<span class='bad'>%s</span>" % esc(
                         (command.error or "failed").splitlines()[0][:120])
+            elif cancellable:
+                # Only while it is still waiting: once the daemon has claimed
+                # it, jobs may already be out and "cancel" would be a promise
+                # this cannot keep.
+                outcome = (
+                    '<form method="post" action="/commands/cancel" '
+                    'style="margin:0;padding:0;border:0;background:none">'
+                    '<input type="hidden" name="id" value="%s">'
+                    '<button type="submit" class="link">cancel</button></form>'
+                    % esc(command.id))
             rows.append([
                 esc(command.kind),
                 esc(command.id),
@@ -382,7 +476,8 @@ def render_commands(pending: Sequence[Any], running: Sequence[Any],
 """ % (
         note,
         len(pending),
-        table(["kind", "id", "by", "asked at", ""], rows_for(pending))
+        table(["kind", "id", "by", "asked at", ""],
+              rows_for(pending, cancellable=True))
         if pending else "<div class='empty'>nothing waiting</div>",
         len(running),
         table(["kind", "id", "by", "asked at", ""], rows_for(running))
@@ -440,6 +535,22 @@ def _notice(message: str) -> str:
     if not message:
         return ""
     return "<p class='doc good'>%s</p>" % esc(message)
+
+
+def _q(value: str) -> str:
+    import urllib.parse
+
+    return esc(urllib.parse.quote(value or ""))
+
+
+def _size(value: Optional[int]) -> str:
+    if value is None:
+        return ""
+    for unit in ("B", "K", "M", "G"):
+        if value < 1024 or unit == "G":
+            return "%d%s" % (value, unit)
+        value //= 1024
+    return ""
 
 
 def _rank(severity: str) -> int:

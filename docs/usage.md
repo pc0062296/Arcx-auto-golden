@@ -31,22 +31,33 @@ Everything else has a working default.
 
 ---
 
-## Every day: start the two processes
+## Every day: one command
 
 ```bash
-arcx-auto daemon      # terminal 1 -- leave it running
-arcx-auto web         # terminal 2 -- leave it running
+arcx-auto start
 ```
 
-Then open **http://127.0.0.1:8765/** in Chrome.
+That starts the monitor and the UI, and opens Chrome at
+**http://127.0.0.1:8765/**. Leave the terminal open; **Ctrl-C stops both**.
 
-| | What it does | If you close it |
-|---|---|---|
-| `daemon` | watches the runs, and does whatever you ask for in the browser | jobs keep running; nothing is monitored, and buttons queue up unanswered |
-| `web` | serves the pages | the daemon carries on; you just cannot see it |
+If it is busy at the submission gate the first Ctrl-C says so and stops after
+the current step; press it again to stop immediately. From another terminal:
 
-Neither one is needed for Arcx itself to keep going. They are how you see it and
-steer it.
+```bash
+arcx-auto stop
+```
+
+Neither process is needed for Arcx itself to keep going -- jobs already sent to
+LSF carry on regardless. They are how you see it and steer it, and a run with
+nothing watching it says so on its page.
+
+Running them apart still works, if you want the monitor on one machine and the
+UI on another:
+
+```bash
+arcx-auto daemon
+arcx-auto web
+```
 
 ---
 
@@ -57,8 +68,10 @@ tool reads them, it never edits them.
 
 ## 2. Pick what to run
 
-Click **new submission**, then type the path to a `dir_map` and an `arcx.cfg`
-and press **read the dir_map**.
+Click **new submission**, then **choose a dir_map and an arcx.cfg...** and
+click your way to them. The files that look like a `dir_map` or a cfg in the
+directory you are in are offered as buttons at the top, so it is usually one
+click. Picking one asks for the other; the picker reopens where you left it.
 
 You get a row per index, with what it will cost:
 
@@ -69,7 +82,9 @@ You get a row per index, with what it will cost:
 ```
 
 `slots = GDS count x O_QCAP_LSF_NUM`, which is what the batching uses. An index
-whose `special.cfg` cannot be read is greyed out with the reason.
+whose `special.cfg` cannot be read is still selectable -- it is sized with the
+default of 4 CPU per case, and the checks in step 4 say so. Only an index with
+no GDS at all cannot run.
 
 ## 3. Tick them, and add more groups if you need to
 
@@ -105,10 +120,17 @@ your request is queued, and the daemon does the work. That is deliberate: the
 submission gate can wait hours for the LSF quota to drop, which is not
 something a browser should sit through.
 
+Changed your mind before the daemon picks it up? **queue** (top right) has a
+**cancel** next to anything still waiting.
+
 ## 5. Watch it
 
 Go to **/** (the arcx-auto link, top left). The run appears there on its own --
 you do not have to tell the daemon about it.
+
+The front page names **every case needing a person, across every run**, before
+any of the run tables. If it says "nothing needs a person right now", that is
+the whole answer.
 
 The page refreshes itself every 30 seconds.
 
@@ -153,8 +175,17 @@ it, but every rerun is a button somebody pressed.
 
 ## 8. Know when it is done
 
-A run is finished when every case reads `DONE`. There is no separate sign-off
--- that is your judgement, and the case table is what you judge from.
+The run page says so itself once nothing is in flight:
+
+> **finished -- all 12 case(s) passed.** Nothing here needs a person. The
+> results are ready to use.
+
+or, if it finished badly:
+
+> **finished, with 2 of 12 case(s) unresolved.** Nothing is running any more,
+> so these will not improve on their own.
+
+There is no separate sign-off. The first banner is the green light.
 
 ---
 
@@ -177,8 +208,10 @@ first: every case needing a person, across every run.
 | Symptom | Look at |
 |---|---|
 | a button did nothing | **queue** (top right). If requests sit in "waiting", no daemon is running |
+| the page looks frozen | the run page says "the daemon has stopped" when nothing is watching |
+| Ctrl-C seems ignored | it is at the submission gate. Press it again, or `arcx-auto stop` |
 | the page is stale | the daemon terminal -- it prints errors and carries on |
-| an index is greyed out when selecting | its `special.cfg` could not be read; the reason is on the row |
+| an index cannot be selected | it has no GDS files; the reason is on the row |
 | everything says `LOST` | LSF is unreachable. Nothing is actually wrong with the jobs |
 
 To check a cfg without submitting anything:

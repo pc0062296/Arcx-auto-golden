@@ -68,9 +68,13 @@ class CommandExecutor:
         submitter: Optional[Submitter] = None,
         remediator: Optional[Remediator] = None,
         on_progress: Optional[Callable[[str], None]] = None,
+        stop=None,
     ) -> None:
         self.settings = settings or Settings()
-        self.submitter = submitter or Submitter(self.settings)
+        # A submission waits at the gate, and that wait has to end when the
+        # daemon is asked to stop, or Ctrl-C looks like it did nothing.
+        self.stop = stop
+        self.submitter = submitter or Submitter(self.settings, stop=stop)
         self.remediator = remediator
         self.queue = CommandQueue(self.settings.expanded_state_root())
         self.say = on_progress or (lambda _msg: None)

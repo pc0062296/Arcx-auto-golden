@@ -79,6 +79,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._commands_page()
             if parts[0] == "rerun":
                 return self._rerun_confirm()
+            if parts[0] == "pick" and len(parts) == 3:
+                return self._pick_page(parts[1], parts[2])
         except Exception as exc:  # noqa: BLE001 - a bad request must not take
             # the whole server down
             return self._error(500, "internal error: %s" % exc)
@@ -114,6 +116,14 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._submit_action(parts[1], parts[2], form)
             if parts == ["rerun"]:
                 return self._rerun_go(form)
+            if len(parts) == 3 and parts[0] == "pick":
+                return self._pick_set(parts[1], parts[2], form)
+            if parts == ["commands", "cancel"]:
+                self._queue().cancel(_first(form, "id"))
+                return self._redirect("/commands")
+            if parts == ["submit", "discard"]:
+                self._drafts().delete(_first(form, "id"))
+                return self._redirect("/submit")
         except Exception as exc:  # noqa: BLE001 - see do_GET
             import traceback
 
@@ -218,6 +228,8 @@ class _Handler(BaseHTTPRequestHandler):
         draft = store.load(parts[0])
         if draft is None:
             return self._error(404, "no such draft")
+        if len(parts) == 2 and parts[1] == "pending":
+            return self._submit_pending(draft)
         query = urllib.parse.parse_qs(
             urllib.parse.urlparse(self.path).query)
         return self._html(submit_pages.render_draft(
@@ -238,6 +250,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         if action == "browse":
             return self._submit_browse(draft, form)
+        if action == "pending":
+            return self._submit_pending(draft)
         if action == "add":
             return self._submit_add(store, draft, form)
         if action == "drop":
@@ -247,6 +261,72 @@ class _Handler(BaseHTTPRequestHandler):
         if action == "go":
             return self._submit_go(store, draft, form)
         self._error(404, "no such action")
+
+    def _pick_page(self, draft_id: str, field: str) -> None:
+        """Click through the filesystem for one of the two files."""
+        from arcx_auto.services.browse import list_dir, suggest
+        from arcx_auto.web import submit_pages as sp
+
+        store = self._drafts()
+        draft = store.load(draft_id)
+        if draft is None:
+            return self._error(404, "no such draft")
+        if field not in ("dir_map", "arcx_cfg"):
+            return self._error(404, "nothing to pick there")
+
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        path = (query.get("path") or [""])[0]
+        if not path:
+            # Reopen where they were. Starting at home every time makes the
+            # picker slower than the text box it replaced.
+            path = (draft.last_dir or self.options.resolved_settings()
+                    .expanded_run_root())
+            if not os.path.isdir(os.path.expanduser(path)):
+                path = os.path.expanduser("~")
+
+        listing = list_dir(path)
+        if not listing.error:
+            draft.last_dir = listing.path
+            store.save(draft)
+
+        kind = "dir_map" if field == "dir_map" else "arcx_cfg"
+        self._html(sp.render_file_picker(
+            listing, field, draft.id,
+            suggestions=suggest(listing.path, kind),
+            current=draft.pending))
+
+    def _pick_set(self, draft_id: str, field: str,
+                  form: Dict[str, List[str]]) -> None:
+        """Record one chosen file, then ask for the other or read the dir_map.
+
+        Held on the draft rather than passed through the URL, so choosing the
+        second file cannot lose the first.
+        """
+        store = self._drafts()
+        draft = store.load(draft_id)
+        if draft is None:
+            return self._error(404, "no such draft")
+        if field not in ("dir_map", "arcx_cfg"):
+            return self._error(404, "nothing to pick there")
+
+        value = os.path.expanduser(_first(form, "value"))
+        if not os.path.isfile(value):
+            return self._redirect("/pick/%s/%s?error=1" % (draft.id, field))
+
+        draft.pending[field] = value
+        draft.last_dir = os.path.dirname(value)
+        store.save(draft)
+
+        other = "arcx_cfg" if field == "dir_map" else "dir_map"
+        if not draft.pending.get(other):
+            return self._redirect("/pick/%s/%s" % (draft.id, other))
+        return self._redirect("/submit/%s/pending" % draft.id)
+
+    def _submit_pending(self, draft) -> None:
+        """Both files chosen: go straight on to ticking indices."""
+        form = {"dir_map": [draft.pending.get("dir_map", "")],
+                "arcx_cfg": [draft.pending.get("arcx_cfg", "")]}
+        return self._submit_browse(draft, form)
 
     def _submit_browse(self, draft, form: Dict[str, List[str]]) -> None:
         """Read a dir_map and show what each index would cost."""
@@ -296,6 +376,7 @@ class _Handler(BaseHTTPRequestHandler):
             arcx_cfg=os.path.expanduser(_first(form, "arcx_cfg")),
             index_keys=list(keys),
         ))
+        draft.pending = {}
         store.save(draft)
         self._redirect("/submit/%s?notice=%s" % (
             draft.id, urllib.parse.quote(

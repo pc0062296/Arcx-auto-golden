@@ -96,7 +96,7 @@ def observe(wave, cfg, settings=None):
     """Scan the wave the way the monitor does, and return (snapshots, reports)."""
     settings = settings or Settings()
     fs = FsAdapter(settings.layout)
-    folder = os.path.join(wave, "1000")
+    folder = os.path.join(wave, "1000_run")
     observation = fs.scan_index_run_folder(folder, "1000")
     ctx = TransitionContext(now=observation.observed_at)
     snapshot, _ = transition_index_run(None, observation, ctx)
@@ -240,7 +240,7 @@ class RemediatorTest(unittest.TestCase):
         return remediator.run(self.plan, run_id="demo", **kwargs)
 
     def _case_dirs(self):
-        return sorted(n for n in os.listdir(os.path.join(self.wave, "1000"))
+        return sorted(n for n in os.listdir(os.path.join(self.wave, "1000_run"))
                       if not n.startswith(("QC_", "cmd_", "submit_", ".")))
 
     # -- the happy path ------------------------------------------------
@@ -339,7 +339,7 @@ class RemediatorTest(unittest.TestCase):
             def count_jobs_under_path(self, path):
                 state["n"] += 1
                 if state["n"] == 2:
-                    open(os.path.join(wave, "1000", ".run.LATE_1"), "w").close()
+                    open(os.path.join(wave, "1000_run", ".run.LATE_1"), "w").close()
                 return super().count_jobs_under_path(path)
 
         outcome = self._run(Moving(counts=[0] * 12))
@@ -453,7 +453,7 @@ class WaveLockTest(unittest.TestCase):
         # Refused before anything was touched -- no bkill, no move.
         self.assertEqual(lsf.killed_jobs, [])
         self.assertEqual(outcome.backed_up, ())
-        self.assertTrue(os.path.isdir(os.path.join(self.wave, "1000", "NDIO_1")))
+        self.assertTrue(os.path.isdir(os.path.join(self.wave, "1000_run", "NDIO_1")))
 
     def test_the_lock_is_released_afterwards(self):
         from arcx_auto.adapters.lock import FileLock
@@ -515,7 +515,7 @@ class MarkerFingerprintTest(unittest.TestCase):
         reading and the confirmation count would never reach K.
         """
         before = self._fingerprint()
-        open(os.path.join(self.wave, "1000", ".nfs00000000000a1b2c3d"), "w").close()
+        open(os.path.join(self.wave, "1000_run", ".nfs00000000000a1b2c3d"), "w").close()
         self.assertEqual(self._fingerprint(), before)
 
     def test_artifacts_deep_in_the_tree_are_ignored(self):
@@ -523,14 +523,14 @@ class MarkerFingerprintTest(unittest.TestCase):
         netlist and QC_* report on NFS, three times, inside a 15 minute deadline.
         """
         before = self._fingerprint()
-        deep = os.path.join(self.wave, "1000", "NTN_1", "nested", "deeper")
+        deep = os.path.join(self.wave, "1000_run", "NTN_1", "nested", "deeper")
         os.makedirs(deep, exist_ok=True)
         open(os.path.join(deep, ".complete.SOMETHING"), "w").close()
         self.assertEqual(self._fingerprint(), before)
 
     def test_a_marker_appearing_changes_the_fingerprint(self):
         before = self._fingerprint()
-        open(os.path.join(self.wave, "1000", ".run.LATE_1"), "w").close()
+        open(os.path.join(self.wave, "1000_run", ".run.LATE_1"), "w").close()
         self.assertNotEqual(self._fingerprint(), before)
 
     def test_an_unreadable_index_dir_never_reads_as_quiet(self):
@@ -547,7 +547,7 @@ _REAL_SCANDIR = os.scandir
 
 
 def _scandir_failing_on_index(path):
-    if os.path.basename(str(path)) == "1000":
+    if os.path.basename(str(path)) == "1000_run":
         raise OSError("stale NFS file handle")
     return _REAL_SCANDIR(path)
 
@@ -570,7 +570,7 @@ class PostCacheAttemptTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def _scan(self, monitor, wave, cfg):
-        return monitor.scan(run_folders=[os.path.join(wave, "1000")],
+        return monitor.scan(run_folders=[os.path.join(wave, "1000_run")],
                             arcx_config=parse_arcx_cfg(cfg), use_lsf=False)
 
     @staticmethod
@@ -583,7 +583,7 @@ class PostCacheAttemptTest(unittest.TestCase):
         nothing, not the old one written over."""
         import shutil
 
-        shutil.rmtree(os.path.join(wave, "1000"))
+        shutil.rmtree(os.path.join(wave, "1000_run"))
         make_index_run_folder(wave, "1000", [spec])
 
     def _record_rerun(self, wave):

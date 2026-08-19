@@ -57,7 +57,10 @@ class LayoutSettings:
     report_dir_regex: str = r"^QC_.+$"
 
     # Index run folders Arcx creates under a wave directory
-    index_run_folder_regex: str = r"^(?P<index>[^./].*)$"
+    # Arcx names each index run folder after the index path's basename plus
+    # _run, so this is an *include* pattern. Listing every directory instead
+    # swept up unrelated folders and then reported QA failures against them.
+    index_run_folder_regex: str = r"^(?P<index>.+)_run$"
 
     # GDS files inside an index path, used to count cases
     gds_globs: List[str] = field(
@@ -109,9 +112,10 @@ class PlanSettings:
     # Indices whose path contains one of these are planned into earlier waves
     priority_keywords: List[str] = field(default_factory=lambda: ["sram", "ro"])
     keyword_ignore_case: bool = True
-    # Fallback when special.cfg is missing. 0 means "treat as an error, do not
-    # guess" -- a wrong guess here silently mis-sizes every wave.
-    default_cpu_per_case: int = 0
+    # Fallback when special.cfg has no O_QCAP_LSF_NUM. An index that cannot be
+    # sized is still perfectly runnable, so refusing to select it helps nobody;
+    # the estimate is used and PREFLIGHT_SLOTS_ESTIMATED says so.
+    default_cpu_per_case: int = 4
 
 
 @dataclass
@@ -127,7 +131,7 @@ class GateSettings:
     """
 
     min_interval_sec: float = 600.0
-    quota_threshold: int = 100
+    quota_threshold: int = 10000
     max_wait_sec: float = 7200.0
 
 

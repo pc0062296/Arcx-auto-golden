@@ -47,11 +47,13 @@ from __future__ import annotations
 
 import os
 import re
+from re import error
 from typing import Dict, List, Optional, Set, Tuple
 
 from arcx_auto.config.settings import LayoutSettings
 from arcx_auto.domain.enums import MarkerKind
 from arcx_auto.domain.models import CaseObservation, IndexRunObservation
+from arcx_auto.util.atomic import read_json
 
 
 class FsAdapter:
@@ -65,6 +67,7 @@ class FsAdapter:
         self._report_re = re.compile(self.layout.report_dir_regex)
         self._cd_re = re.compile(self.layout.cmd_cd_regex)
         self._cmd_file_re = re.compile(self.layout.cmd_file_regex)
+        self._index_run_re = re.compile(self.layout.index_run_folder_regex)
         # cmd_file path -> resolved execution path. Read once; scripts do not
         # change after submission.
         self._cmd_cache: Dict[str, Optional[str]] = {}
@@ -96,7 +99,8 @@ class FsAdapter:
 
         now = now if now is not None else time.time()
         run_folder = os.path.abspath(os.path.expanduser(run_folder))
-        key = index_key if index_key is not None else os.path.basename(run_folder)
+        key = (index_key if index_key is not None
+               else self.index_key_for(run_folder))
 
         if not os.path.isdir(run_folder):
             return IndexRunObservation(
@@ -368,8 +372,13 @@ class FsAdapter:
     def list_index_run_folders(self, wave_dir: str) -> List[Tuple[str, str]]:
         """List the index run folders Arcx created under a wave directory.
 
-        Returns [(index_key, abs_path), ...], skipping our own .arcx_auto/ and
-        any other hidden directory.
+        Arcx names them ``<basename of the index path>_run``, so this **matches
+        a pattern** rather than listing every directory. It used to list all of
+        them, which swept up whatever else lived in the wave directory and then
+        reported QA failures against folders that were never cases.
+
+        Returns [(index_key, abs_path), ...]; the key is the name with ``_run``
+        removed, which is what dir_map and the reports call it.
         """
         wave_dir = os.path.abspath(os.path.expanduser(wave_dir))
         result: List[Tuple[str, str]] = []
@@ -379,6 +388,7 @@ class FsAdapter:
             entries = list(os.scandir(wave_dir))
         except OSError:
             return result
+        by_folder = self._index_keys_by_folder(wave_dir)
         for entry in entries:
             if entry.name.startswith("."):
                 continue
@@ -387,8 +397,57 @@ class FsAdapter:
                     continue
             except OSError:
                 continue
-            result.append((entry.name, entry.path))
+            match = self._index_run_re.match(entry.name)
+            if not match:
+                continue
+            result.append((by_folder.get(entry.name) or _group_or(
+                match, "index", entry.name), entry.path))
         return sorted(result)
+
+    def index_key_for(self, run_folder: str) -> str:
+        """The dir_map key for a run folder, given only its path.
+
+        Scanning one folder directly -- `status --run-folder` -- has no wave to
+        list, so the key has to come from the folder itself. Stripping _run
+        gives the index path's basename; the wave manifest above it, if there
+        is one, maps that back to the actual dir_map key.
+        """
+        run_folder = os.path.abspath(os.path.expanduser(run_folder))
+        name = os.path.basename(run_folder)
+        mapping = self._index_keys_by_folder(os.path.dirname(run_folder))
+        if name in mapping:
+            return mapping[name]
+        match = self._index_run_re.match(name)
+        return _group_or(match, "index", name) if match else name
+
+    def _index_keys_by_folder(self, wave_dir: str) -> Dict[str, str]:
+        """Map each run folder name back to its dir_map key.
+
+        The folder is named after the **index path's basename**, which is not
+        the dir_map key: "1000" may point at /proj/foo/index1000, giving
+        index1000_run. Stripping _run recovers "index1000", not "1000" -- and
+        the key is what the special.cfg snapshot and the GDS cross-check are
+        stored under.
+
+        The wave manifest already records both for every index, so the mapping
+        is read from there. Without a manifest -- somebody pointing at a folder
+        this tool did not create -- the stripped name is the best available
+        answer and is used as-is.
+        """
+        manifest = read_json(
+            os.path.join(wave_dir, ".arcx_auto", "manifest.json"), default=None)
+        if not isinstance(manifest, dict):
+            return {}
+        mapping: Dict[str, str] = {}
+        for entry in manifest.get("indexes") or []:
+            if not isinstance(entry, dict):
+                continue
+            key = entry.get("index_key")
+            path = entry.get("path")
+            if key and path:
+                folder = "%s_run" % os.path.basename(str(path).rstrip("/"))
+                mapping[folder] = str(key)
+        return mapping
 
     # ------------------------------------------------------------------
     # Small helpers
@@ -474,3 +533,14 @@ def natural_key(name: str) -> Tuple:
         elif part:
             key.append((1, part))
     return tuple(key)
+
+
+def _group_or(match, name: str, fallback: str) -> str:
+    """A named group if the pattern has one, otherwise the whole name.
+
+    The pattern is configurable, so it may not define ``index`` at all.
+    """
+    try:
+        return match.group(name) or fallback
+    except (IndexError, error):
+        return fallback

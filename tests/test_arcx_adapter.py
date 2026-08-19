@@ -116,12 +116,28 @@ class SpecialCfgTest(unittest.TestCase):
         self.assertEqual(spec.cpu_per_case, 7)
         self.assertEqual(spec.slots, 35)
 
-    def test_missing_special_cfg_marks_index_unusable(self):
-        """A missing special.cfg must not be guessed at: exclude and explain."""
+    def test_a_missing_special_cfg_is_estimated_not_excluded(self):
+        """An index whose special.cfg cannot be read is still runnable.
+
+        Refusing to select it helps nobody -- the sizing is what is unknown,
+        not the work. The configured default is used, the spec says so, and
+        PREFLIGHT_SLOTS_ESTIMATED reports it before anything is submitted.
+        """
         path = os.path.join(self.tmp.name, "broken")
         os.makedirs(path)
         open(os.path.join(path, "a.gds"), "w").close()
         spec = self.adapter.build_index_spec("1004", path)
+        self.assertTrue(spec.usable)
+        self.assertIsNone(spec.error)
+        self.assertTrue(spec.cpu_estimated)
+        self.assertEqual(spec.cpu_per_case, self.adapter.plan.default_cpu_per_case)
+        self.assertTrue(any("special.cfg" in w for w in spec.warnings))
+
+    def test_no_gds_is_still_unusable(self):
+        """Sizing can be guessed; work that does not exist cannot."""
+        path = os.path.join(self.tmp.name, "empty")
+        os.makedirs(path)
+        spec = self.adapter.build_index_spec("1005", path)
         self.assertFalse(spec.usable)
         self.assertIsNotNone(spec.error)
 

@@ -65,13 +65,27 @@ class Submitter:
         qa: Optional[QaRunner] = None,
         builder: Optional[WorkspaceBuilder] = None,
         sleep: Optional[Callable[[float], None]] = None,
+        stop=None,
     ) -> None:
         self.settings = settings or Settings()
         self.lsf = lsf or LsfAdapter(self.settings.lsf)
         self.launcher = launcher or Launcher(self.settings, lsf=self.lsf)
         self.qa = qa or QaRunner(self.settings)
         self.builder = builder or WorkspaceBuilder(self.settings)
-        self.sleep = sleep or time.sleep
+        # A threading.Event that means "give up waiting". The gate can hold a
+        # submission for hours, and a plain time.sleep through that makes a
+        # stop request look ignored.
+        self.stop = stop
+        self.sleep = sleep or self._interruptible_sleep
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        if self.stop is not None:
+            self.stop.wait(seconds)
+            return
+        time.sleep(seconds)
+
+    def _stopping(self) -> bool:
+        return self.stop is not None and self.stop.is_set()
 
     # ------------------------------------------------------------------
 
@@ -176,6 +190,10 @@ class Submitter:
                     if not wait_for_gate:
                         break
                     self.sleep(max(1.0, decision.wait_hint_sec))
+                    if self._stopping():
+                        outcome.error = ("stopped while waiting at the gate; "
+                                         "nothing further was submitted")
+                        break
                     continue
 
             if decision.forced:

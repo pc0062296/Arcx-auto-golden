@@ -78,6 +78,24 @@ class IndexQaReport:
         )
 
 
+#: A case in one of these has stopped moving, whatever the outcome
+_FINISHED_STATES = (CaseState.COMPLETED_MARKER, CaseState.DONE,
+                    CaseState.FAILED)
+
+
+def _every_case_finished(snapshot: IndexRunSnapshot) -> bool:
+    """Whether Arcx has finished this index and would have written its reports.
+
+    An index with no cases at all has not finished -- it has not started, and
+    calling that "finished" would run the report checks against an empty
+    directory and fail every one of them.
+    """
+    cases = snapshot.cases
+    if not cases:
+        return False
+    return all(case.state in _FINISHED_STATES for case in cases.values())
+
+
 class QaRunner:
     """Runs the QA checks."""
 
@@ -178,12 +196,18 @@ class QaRunner:
             now=now,
             source=source,
         )
-        index_results = (
-            self.registry.run(index_context, IssueScope.INDEX, IssueStage.LIVE,
-                              snapshot.index_key, disabled=self.disabled),
-            self.registry.run(index_context, IssueScope.INDEX, IssueStage.POST,
-                              snapshot.index_key, disabled=self.disabled),
-        )
+        results = [self.registry.run(
+            index_context, IssueScope.INDEX, IssueStage.LIVE,
+            snapshot.index_key, disabled=self.disabled)]
+        # INDEX POST is about the reports, and **Arcx only writes those once
+        # every case in the index has finished**. Running them while cases are
+        # still going reports missing report directories and half-written
+        # summaries as failures, on a run that is doing nothing wrong.
+        if _every_case_finished(snapshot):
+            results.append(self.registry.run(
+                index_context, IssueScope.INDEX, IssueStage.POST,
+                snapshot.index_key, disabled=self.disabled))
+        index_results = tuple(results)
 
         return IndexQaReport(
             index_key=snapshot.index_key,

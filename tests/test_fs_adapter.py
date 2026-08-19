@@ -411,7 +411,7 @@ class ReportDirIsNotACaseTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.run = os.path.join(self.tmp.name, "1000")
+        self.run = os.path.join(self.tmp.name, "1000_run")
         cmd_dir = os.path.join(self.run, "cmd_folder")
         os.makedirs(cmd_dir)
         os.makedirs(os.path.join(self.run, "NTN_1"))

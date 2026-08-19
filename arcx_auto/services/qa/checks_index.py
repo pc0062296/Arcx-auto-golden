@@ -5,6 +5,12 @@ does not add up -- a case that never appeared at all, or a report short of a
 few entries. Those failures produce no error message, and looking only at cases
 cannot find them.
 
+**The POST checks here only run once every case in the index has finished**,
+because that is when Arcx writes the reports. Running them earlier reports
+missing report directories and half-written summaries as failures on a run that
+is doing nothing wrong. Anything that is true while cases are still going --
+"some are unfinished", an unknown marker, an unmappable log -- is LIVE instead.
+
 Report directory layout:
 
     QC_Cc/
@@ -121,7 +127,7 @@ def log_unresolved(index: IndexContext) -> Optional[Issue]:
 
 
 @qa_check(id="INDEX_INCOMPLETE", title="cases still unfinished",
-          severity=Severity.WARN, scope=INDEX, stage=POST)
+          severity=Severity.WARN, scope=INDEX, stage=LIVE)
 def index_incomplete(index: IndexContext) -> Optional[Issue]:
     """The index wrapped up but some cases never reached the end.
 

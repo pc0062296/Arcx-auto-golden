@@ -77,13 +77,16 @@ class Daemon:
         self.settings = settings or Settings()
         self.monitor = monitor or MonitorService(self.settings)
         self.exporter = exporter or Exporter(self.settings)
+        self._stop = threading.Event()
         self.executor = executor or CommandExecutor(
-            self.settings, on_progress=lambda msg: print("  %s" % msg))
+            self.settings, on_progress=lambda msg: print("  %s" % msg),
+            # A submission can sit at the gate for hours. Handing it the stop
+            # event is what makes Ctrl-C feel like it worked.
+            stop=self._stop)
         self.queue = CommandQueue(self.settings.expanded_state_root())
         self.store = RunStore(self.settings.expanded_state_root(), options.run_id)
         self.on_tick = on_tick
 
-        self._stop = threading.Event()
         self._started_at = 0.0
         self._tick = 0
         self._last_error: Optional[str] = None
@@ -139,6 +142,7 @@ class Daemon:
                 break
             self._stop.wait(self._next_interval(result))
 
+        self._mark_stopped()
         self.store.append_audit({
             "action": "daemon_stop",
             "run_id": self.options.run_id,
@@ -151,10 +155,38 @@ class Daemon:
     def stop(self) -> None:
         self._stop.set()
 
+    def _mark_stopped(self) -> None:
+        """Record in state.json that this daemon is gone.
+
+        Without it the last snapshot stays on the page looking live: the moment
+        it froze at is exactly the moment it was healthy. A stopped daemon has
+        to say so, or the display is a lie that gets more wrong by the minute.
+        """
+        try:
+            state = self.store.read_state()
+            daemon = dict(state.get("daemon") or {})
+            daemon["running"] = False
+            daemon["stopped_at"] = time.time()
+            state["daemon"] = daemon
+            self.store.write_state(state)
+        except Exception:  # noqa: BLE001 - shutting down must not fail
+            pass
+
     def _install_signal_handlers(self) -> None:
+        """First signal asks to stop; a second one gives up waiting.
+
+        Setting a flag and letting the tick finish is right -- interrupting it
+        mid-way would leave half-written state. But a tick can legitimately sit
+        at the submission gate for a long time, and during that the first
+        Ctrl-C looks like it did nothing at all. So the flag is passed down to
+        everything that waits, and pressing it again exits immediately.
+        """
         def handler(signum, _frame):
-            # Only set a flag so the current tick finishes: interrupting it
-            # mid-way would leave half-written state.
+            if self._stop.is_set():
+                print("\nstopping now, without finishing the current step.")
+                raise KeyboardInterrupt
+            print("\nstopping after the current step. Press Ctrl-C again to "
+                  "stop immediately.")
             self._stop.set()
 
         for sig in (signal.SIGTERM, signal.SIGINT):

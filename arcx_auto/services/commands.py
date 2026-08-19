@@ -176,6 +176,24 @@ class CommandQueue:
         command.error = error
         self._retire(command.path, command.as_dict())
 
+    def cancel(self, command_id: str, now: Optional[float] = None) -> bool:
+        """Withdraw a request that has not started yet.
+
+        Only from pending: once the daemon has claimed it, jobs may already
+        have been sent, and "cancel" would be a promise this cannot keep.
+        """
+        now = now if now is not None else time.time()
+        for name in self._sorted_names(PENDING):
+            path = os.path.join(self.dir_for(PENDING), name)
+            data = read_json(path, default=None)
+            if not isinstance(data, dict) or data.get("id") != command_id:
+                continue
+            data.update({"state": DONE, "ok": False, "finished_at": now,
+                         "error": "cancelled before it started"})
+            self._retire(path, data)
+            return True
+        return False
+
     def requeue_stale(self, older_than_sec: float = 3600.0,
                       now: Optional[float] = None) -> List[str]:
         """Retire commands left in running/ by a daemon that died.

@@ -183,11 +183,15 @@ too dense", "not flooding" and "never stuck forever".
 > first setup.
 
 ```bash
-# terminal 1: the daemon -- monitors, and runs whatever the UI asks for
-python3 -m arcx_auto daemon
+arcx-auto start        # monitor + UI + opens Chrome; Ctrl-C stops both
+```
 
-# terminal 2: the UI
-python3 -m arcx_auto web            # then open http://127.0.0.1:8765/
+or, to run them apart:
+
+```bash
+arcx-auto daemon       # monitors, and runs whatever the UI asks for
+arcx-auto web          # then open http://127.0.0.1:8765/
+arcx-auto stop         # from a third terminal, if Ctrl-C is not to hand
 ```
 
 Naming no directory is the point: the daemon watches every wave under
@@ -324,7 +328,9 @@ manufacture false alarms. Exits 1 on a FATAL, so it chains into a submit script.
 | `plan --dir-map FILE --index ...` | Produce a wave plan (**never submits**) |
 | `submit --dir-map X --arcx-cfg Y` | Check, create wave dirs, submit (**dry run by default**) |
 | `rerun --wave-dir PATH` | Stop, drain, back up, clean and resubmit (**dry run by default**) |
+| `start` | Daemon + UI + browser, in one terminal |
 | `daemon` | Monitor, and run what the UI asks for |
+| `stop` | Ask a running daemon to stop |
 | `web` | Serve the local UI (`--read-only` for display only) |
 | `export` | Publish this user's status to the shared disk, once |
 | `policy` | What automatic handling would do (**decides, never acts**) |
