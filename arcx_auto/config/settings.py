@@ -346,6 +346,123 @@ class LaunchSettings:
 
 
 @dataclass
+class PolicySettings:
+    """Automatic handling (architecture 7.9).
+
+    Ships as ``shadow``: the engine decides and records, and nothing acts.
+    That is the point rather than a cautious default -- it lets the rules run
+    against real failures for weeks, so turning automation on is a decision
+    made against a log rather than against an intention.
+
+    Each rule is ``<ISSUE_ID>: {action, class, max_auto, note}``. Anything with
+    no rule falls to ``default``, which escalates: an issue the system has
+    never seen is the last thing that should be handled automatically.
+    """
+
+    # off | shadow | active
+    mode: str = "shadow"
+
+    # Budgets. These are the safety mechanism, not a safety net: the risk of an
+    # automated action is never doing the wrong thing once, it is doing the
+    # right thing two hundred times.
+    max_auto_actions_per_run: int = 20
+    cooldown_sec: float = 900.0
+    same_issue_burst_limit: int = 5
+    global_kill_switch: bool = False
+
+    default_action: str = "escalate"
+    default_class: str = "unknown"
+
+    rules: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
+        # Verify failures always go to a person. They are the dangerous class:
+        # the run says it succeeded and the result is wrong, and deciding what
+        # that means needs judgement no rule has.
+        "NETLIST_NO_SIGNATURE": {
+            "action": "escalate", "class": "verify_fail",
+            "note": "a truncated netlist may mean the extraction died; "
+                    "a person should see it before it is redone"},
+        "SUMMARY_TABLE_BAD_VALUE": {
+            "action": "escalate", "class": "verify_fail"},
+        "SUMMARY_TABLE_UNREADABLE": {
+            "action": "escalate", "class": "unknown"},
+
+        # A missing or empty netlist is the clearest "it did not finish".
+        # Retrying is very likely to help, so these are the candidates for
+        # automation once the log says they behave.
+        "NETLIST_MISSING": {
+            "action": "escalate", "class": "tool", "max_auto": 1,
+            "note": "switch to rerun_wave once the shadow log shows it is safe"},
+        "NETLIST_EMPTY": {
+            "action": "escalate", "class": "tool", "max_auto": 1,
+            "note": "switch to rerun_wave once the shadow log shows it is safe"},
+
+        # Setup failures would fail identically a hundred times.
+        "FLOW_DIR_MISSING": {"action": "escalate", "class": "setup"},
+        "CFG_EXPECTATION_PROBLEM": {"action": "escalate", "class": "setup"},
+        "CFG_EXPECTATION_UNAVAILABLE": {"action": "escalate", "class": "unknown"},
+
+        # Something is wrong that nobody has classified yet.
+        "CASE_QUIET": {"action": "escalate", "class": "unknown"},
+        "CASE_NEVER_STARTED": {"action": "escalate", "class": "setup"},
+        "LSF_SUSPENDED": {"action": "escalate", "class": "infra"},
+        "QA_INTERNAL_ERROR": {
+            "action": "escalate", "class": "unknown",
+            "note": "a check has a bug; the case may well be fine"},
+    })
+
+    # ------------------------------------------------------------------
+
+    def resolved_mode(self):
+        from arcx_auto.domain.policy import PolicyMode
+
+        try:
+            return PolicyMode(str(self.mode).strip().lower())
+        except ValueError:
+            # An unreadable mode must not silently become "active".
+            return PolicyMode.SHADOW
+
+    def budgets(self):
+        from arcx_auto.domain.policy import Budgets
+
+        return Budgets(
+            max_auto_actions_per_run=self.max_auto_actions_per_run,
+            cooldown_sec=self.cooldown_sec,
+            same_issue_burst_limit=self.same_issue_burst_limit,
+            global_kill_switch=self.global_kill_switch,
+        )
+
+    def rule_for(self, issue_id: str):
+        from arcx_auto.domain.policy import ActionKind, IssueClass, PolicyRule
+
+        raw = self.rules.get(issue_id) or {}
+        return PolicyRule(
+            action=_enum_or(ActionKind, raw.get("action"),
+                            self.default_action, ActionKind.ESCALATE),
+            issue_class=_enum_or(IssueClass, raw.get("class"),
+                                 self.default_class, IssueClass.UNKNOWN),
+            max_auto=int(raw.get("max_auto") or 0),
+            note=str(raw.get("note") or ""),
+        )
+
+
+def _enum_or(enum_cls, value, fallback, final):
+    """Read an enum from settings, never failing into something permissive.
+
+    A typo in a rule must not turn into an action nobody wrote down, so an
+    unrecognised value falls back rather than raising -- and the fallback chain
+    ends at the most conservative member.
+    """
+    for candidate in (value, fallback):
+        if candidate is None:
+            continue
+        try:
+            return enum_cls(str(candidate).strip().lower())
+        except ValueError:
+            continue
+    return final
+
+
+@dataclass
 class ExportSettings:
     """Export to the shared disk (architecture 9.5).
 
@@ -383,6 +500,7 @@ class Settings:
     lsf: LsfSettings = field(default_factory=LsfSettings)
     qa: QaSettings = field(default_factory=QaSettings)
     preflight: PreflightSettings = field(default_factory=PreflightSettings)
+    policy: PolicySettings = field(default_factory=PolicySettings)
     launch: LaunchSettings = field(default_factory=LaunchSettings)
     export: ExportSettings = field(default_factory=ExportSettings)
     source_path: Optional[str] = None

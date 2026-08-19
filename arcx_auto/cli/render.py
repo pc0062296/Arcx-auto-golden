@@ -693,3 +693,123 @@ def render_index_specs(specs: Sequence[IndexSpec]) -> str:
         max_col_width=70,
     ))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# policy (Phase 4)
+# --------------------------------------------------------------------------
+
+def render_policy_outcome(outcome, verbose: bool = False) -> str:
+    """What the engine decided this moment, and why.
+
+    The reason column is the point of the whole display. "escalate" on its own
+    does not answer "why did nothing happen", so every row names the rule or
+    the budget that decided it.
+    """
+    lines = []
+    mode = outcome.mode.value
+    lines.append("== policy (%s) ==" % mode)
+    if mode == "shadow":
+        lines.append("  Recording decisions only. Nothing is acted on.")
+    elif mode == "off":
+        lines.append("  The engine is off; no decisions are being recorded.")
+
+    if not outcome.decisions:
+        lines.append("  (nothing is asking for a decision)")
+        return "\n".join(lines)
+
+    rows = []
+    for decision in outcome.decisions:
+        targets = ", ".join(decision.targets[:4])
+        if len(decision.targets) > 4:
+            targets += " +%d" % (len(decision.targets) - 4)
+        rows.append([
+            decision.issue_id,
+            decision.action.value,
+            decision.issue_class.value,
+            str(len(decision.targets)),
+            targets,
+            decision.reason if verbose else _short(decision),
+        ])
+    lines.append(render_table(
+        ["issue", "action", "class", "n", "where", "why"], rows,
+        max_col_width=60))
+
+    blocked = outcome.blocked
+    if blocked:
+        lines.append("")
+        lines.append("  %d decision(s) wanted to act and a budget stopped them:"
+                     % len(blocked))
+        for decision in blocked:
+            lines.append("    %s: %s" % (decision.issue_id, decision.reason))
+    return "\n".join(lines)
+
+
+def _short(decision) -> str:
+    if decision.blocked_by_budget:
+        return "wanted %s; %s" % (decision.intended_action.value,
+                                  decision.reason)
+    return decision.reason
+
+
+def render_policy_review(records, mode: str = "") -> str:
+    """The accumulated shadow log: what automation would have done.
+
+    This is the evidence for the only question that matters before turning
+    automation on -- how often would it have fired, on what, and does that
+    match what a person would have chosen.
+    """
+    lines = ["== policy review =="]
+    if not records:
+        lines.append("  (nothing recorded yet)")
+        if mode == "off":
+            lines.append("  The engine is off. Set policy.mode to shadow to "
+                         "start collecting.")
+        return "\n".join(lines)
+
+    by_issue = {}
+    acted = shadowed = 0
+    for record in records:
+        entry = by_issue.setdefault(record.get("issue_id", "?"), {
+            "would_act": 0, "escalate": 0, "ignore": 0, "blocked": 0,
+            "targets": set(), "class": record.get("issue_class", "?"),
+        })
+        action = record.get("action", "escalate")
+        intended = record.get("intended_action")
+        if action == "rerun_wave":
+            entry["would_act"] += 1
+        elif action == "ignore":
+            entry["ignore"] += 1
+        else:
+            entry["escalate"] += 1
+        if intended and intended != action:
+            entry["blocked"] += 1
+        entry["targets"].update(record.get("targets") or [])
+        if record.get("shadowed"):
+            shadowed += 1
+        else:
+            acted += 1
+
+    rows = []
+    for issue_id in sorted(by_issue, key=lambda k: -by_issue[k]["would_act"]):
+        entry = by_issue[issue_id]
+        rows.append([
+            issue_id,
+            entry["class"],
+            str(entry["would_act"]),
+            str(entry["escalate"]),
+            str(entry["blocked"]),
+            str(len(entry["targets"])),
+        ])
+    lines.append(render_table(
+        ["issue", "class", "would rerun", "escalated", "budget-stopped",
+         "cases"],
+        rows, aligns=["left", "left", "right", "right", "right", "right"]))
+
+    lines.append("")
+    lines.append("  %d decision(s) recorded: %d in shadow, %d acted on."
+                 % (len(records), shadowed, acted))
+    if shadowed and not acted:
+        lines.append("  Nothing has been done automatically. Read the "
+                     "'would rerun' column as the proposal to judge.")
+    return "\n".join(lines)

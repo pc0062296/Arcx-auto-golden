@@ -15,7 +15,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from arcx_auto.domain.enums import CaseState, LsfState
 from arcx_auto.domain.models import CaseSnapshot, IndexRunSnapshot
-from arcx_auto.util.atomic import append_jsonl, atomic_write_json, read_json
+from arcx_auto.util.atomic import (
+    append_jsonl,
+    atomic_write_json,
+    iter_jsonl,
+    read_json,
+)
 
 SCHEMA_VERSION = 1
 
@@ -161,6 +166,11 @@ class RunStore:
         self.state_path = os.path.join(self.dir, "state.json")
         self.events_path = os.path.join(self.dir, "events.jsonl")
         self.audit_path = os.path.join(self.dir, "audit.jsonl")
+        # Every policy decision, acted on or not. Separate from audit.jsonl on
+        # purpose: audit records what was *done*, and in shadow mode the whole
+        # point is that nothing was. Mixing them would make "what has this
+        # system actually changed" unanswerable.
+        self.policy_path = os.path.join(self.dir, "policy.jsonl")
         self.commands_dir = os.path.join(self.dir, "commands")
 
     def ensure(self) -> None:
@@ -193,6 +203,22 @@ class RunStore:
     def append_events(self, records: Iterable[Dict[str, Any]]) -> None:
         for record in records:
             append_jsonl(self.events_path, record)
+
+    def append_policy(self, records: Iterable[Dict[str, Any]]) -> None:
+        """Record policy decisions, whether or not they were acted on."""
+        for record in records:
+            enriched = dict(record)
+            enriched.setdefault("ts", time.time())
+            append_jsonl(self.policy_path, enriched)
+
+    def read_policy(self) -> List[Dict[str, Any]]:
+        """Every decision this run has recorded, oldest first.
+
+        Budget history is rebuilt from here rather than held in memory: a
+        daemon restart must not hand the engine a fresh budget, which is the
+        failure that turns a budget into a suggestion.
+        """
+        return list(iter_jsonl(self.policy_path))
 
     def append_audit(self, record: Dict[str, Any]) -> None:
         """Every write action records who, when, on what, and why."""

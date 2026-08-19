@@ -241,6 +241,69 @@ launch:
 # Derived data only. The truth lives in state_root and the run folders, so this
 # can be deleted and rebuilt at any time.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Automatic handling (architecture 7.9)
+#
+# Ships as **shadow**: the engine decides and records, and nothing acts. That is
+# the point rather than a cautious default -- it lets the rules run against real
+# failures for weeks, so turning automation on is a decision made against a log
+# rather than against an intention.
+#
+#   python3 -m arcx_auto policy --wave-dir ...     what it would do right now
+#   python3 -m arcx_auto policy --review RUN_ID    what it has recorded so far
+#
+# Only switch a rule to rerun_wave once the review says it would have fired on
+# the cases you would have chosen yourself.
+# ---------------------------------------------------------------------------
+policy:
+  mode: shadow                  # off | shadow | active
+
+  # Budgets. These are the safety mechanism, not a safety net: the risk of an
+  # automated action is never doing the wrong thing once, it is doing the right
+  # thing two hundred times.
+  max_auto_actions_per_run: 20
+  cooldown_sec: 900
+  # One issue id hitting more cases than this at once is a shared cause, and a
+  # shared cause is not fixed by rerunning. This is what stops one broken cfg
+  # from becoming two hundred reruns.
+  same_issue_burst_limit: 5
+  # Set by a person to stop everything without editing any rule below.
+  global_kill_switch: false
+
+  # Anything with no rule lands here. An issue the system has never seen is the
+  # last thing that should be handled automatically.
+  default_action: escalate
+  default_class: unknown
+
+  # action: rerun_wave | escalate | ignore
+  # class:  transient | infra | setup | tool | verify_fail | unknown
+  #         -- why it happens, which decides whether retrying can ever help.
+  #            A setup failure retried a hundred times fails a hundred times.
+  rules:
+    # Verify failures always go to a person: the run says it succeeded and the
+    # result is wrong, and deciding what that means needs judgement.
+    NETLIST_NO_SIGNATURE:   {action: escalate, class: verify_fail}
+    SUMMARY_TABLE_BAD_VALUE: {action: escalate, class: verify_fail}
+    SUMMARY_TABLE_UNREADABLE: {action: escalate, class: unknown}
+
+    # The clearest "it did not finish", and so the first candidates for
+    # automation once the shadow log says they behave.
+    NETLIST_MISSING: {action: escalate, class: tool, max_auto: 1}
+    NETLIST_EMPTY:   {action: escalate, class: tool, max_auto: 1}
+
+    # Setup failures would fail identically every time.
+    FLOW_DIR_MISSING:            {action: escalate, class: setup}
+    CFG_EXPECTATION_PROBLEM:     {action: escalate, class: setup}
+    CFG_EXPECTATION_UNAVAILABLE: {action: escalate, class: unknown}
+    CASE_NEVER_STARTED:          {action: escalate, class: setup}
+
+    CASE_QUIET:        {action: escalate, class: unknown}
+    LSF_SUSPENDED:     {action: escalate, class: infra}
+    QA_INTERNAL_ERROR: {action: escalate, class: unknown}
+
+# ---------------------------------------------------------------------------
+# Shared-disk export (architecture 9.6)
+# ---------------------------------------------------------------------------
 export:
   shared_root: "/tmp1/.auto_golden"
   # Independent of the daemon tick on purpose: the daemon polls every 30s while

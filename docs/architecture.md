@@ -1161,12 +1161,16 @@ because nothing is going to change on its own.
 | **3** | Rerun planner + drain state machine + `rerun` (manual trigger) | done |
 | **3.5** | False success: netlist signature + QC_* summary values | done |
 | **5** | Shared-disk export, overview page, history | done |
-| 4 | Policy engine, automatic remediation (shadow mode first) | to do |
+| **4** | Policy engine + shadow mode + `policy` | done (shadow) |
 
 Phase 4 was deliberately moved **after** 3.5 and 5. Automating a decision is
 only worth doing once the decision is trusted, and the false-success checks
 that Phase 4 would act on had not run against real data yet. The first version
 of the rerun is manual for the same reason.
+
+What remains of Phase 4 is not code: every rule ships as `escalate`, and
+switching one to `rerun_wave` is a decision to make against the shadow log
+after it has seen real failures.
 
 Phases 0 and 2a were deliberately built first and kept **read only**: neither
 writes anything to a run folder, and their purpose was to verify that the system

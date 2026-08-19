@@ -22,7 +22,7 @@ Full design: **[docs/architecture.md](docs/architecture.md)**.
 | **2b** | Preflight + WorkspaceBuilder + Launcher + gate + `submit` | done |
 | **3** | Rerun planner + drain state machine + `rerun` (manual trigger) | done |
 | **3.5** | False-success detection: netlist signature + QC_* summary values | done |
-| 4 | Policy engine and automatic remediation | to do |
+| **4** | Policy engine + shadow mode + `policy` | done (shadow) |
 | **5** | Shared-disk export, overview page and history | done |
 
 ---
@@ -151,6 +151,46 @@ it; the truth stays in the run folders and `~/.arcx-auto/`. Publishing failures
 never stop monitoring -- they surface as `export_error` in daemon health, not as
 a dead daemon.
 
+## Automatic handling, and why it is off
+
+The policy engine ships in **shadow mode**: it decides what should happen to
+every problem and records it, and it acts on none of them.
+
+```bash
+python3 -m arcx_auto policy --wave-dir /path/to/wave_001   # what it would do now
+python3 -m arcx_auto policy --review nightly               # what it has recorded
+```
+
+```
+== policy review ==
+  issue                 class        would rerun  escalated  budget-stopped  cases
+  NETLIST_EMPTY         tool                   1          0               0      1
+  NETLIST_NO_SIGNATURE  verify_fail            0          1               0      1
+
+  5 decision(s) recorded: 5 in shadow, 0 acted on.
+```
+
+That table is the point. **Every shipped rule is `escalate`**; switching one to
+`rerun_wave` is a decision to make once the review says it would have fired on
+the cases you would have chosen yourself.
+
+Budgets are the safety mechanism, not a safety net -- the risk of an automated
+action is never doing the wrong thing once, it is doing the right thing two
+hundred times:
+
+| Guard | Stops |
+|---|---|
+| `global_kill_switch` | everything, without editing rules |
+| `same_issue_burst_limit` | one broken cfg becoming N reruns |
+| `max_auto` per rule | the same problem retried forever on one wave |
+| `max_auto_actions_per_run` | a run spending its budget on automation |
+| `cooldown_sec` | a tight loop of actions |
+
+The engine is a pure function with no access to LSF or the filesystem, so
+"decides but does not act" is the absence of a capability rather than a flag.
+Budget history is rebuilt from `policy.jsonl` on every evaluation, so restarting
+the daemon does not hand it a fresh budget.
+
 ## Validating arcx.cfg before submitting
 
 ```bash
@@ -177,6 +217,8 @@ manufacture false alarms. Exits 1 on a FATAL, so it chains into a submit script.
 | `daemon --wave-dir PATH` | Keep monitoring, writing state for the web UI |
 | `web` | Serve the local read-only dashboard |
 | `export` | Publish this user's status to the shared disk, once |
+| `policy` | What automatic handling would do (**decides, never acts**) |
+| `policy --review RUN_ID` | What it has recorded so far |
 | `check-cfg FILE` | Validate arcx.cfg (exit 1 on FATAL) |
 | `inspect dir-map FILE` | Parse dir_map and report gaps |
 | `inspect index PATH...` | Parse special.cfg and count GDS, giving the slot demand |

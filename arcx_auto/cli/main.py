@@ -37,6 +37,7 @@ from arcx_auto.services.launcher import read_launch
 from arcx_auto.services.monitor import MonitorService
 from arcx_auto.services.remediator import Remediator
 from arcx_auto.services.exporter import Exporter
+from arcx_auto.services.policy import evaluate_policy
 from arcx_auto.services.rerun_planner import build_rerun_plan
 from arcx_auto.services.submitter import Submitter
 from arcx_auto.services.qa import QaRunner
@@ -171,6 +172,25 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument("--no-lsf", action="store_true", help="do not query LSF")
     daemon.add_argument("--no-export", action="store_true",
                         help="do not publish to the shared disk")
+
+    # -- policy --------------------------------------------------------
+    policy = sub.add_parser(
+        "policy",
+        help="what automatic handling would do (shadow by default: it "
+             "decides and records, it does not act)")
+    policy.add_argument("--run-folder", action="append", default=[],
+                        help="index run folder to evaluate (repeatable)")
+    policy.add_argument("--wave-dir", help="wave directory to evaluate")
+    policy.add_argument("--arcx-cfg", help="path to arcx.cfg")
+    policy.add_argument("--dir-map", help="cross-check the case count")
+    policy.add_argument("--review", metavar="RUN_ID",
+                        help="summarise what has been recorded for a run "
+                             "instead of evaluating now")
+    policy.add_argument("--no-lsf", action="store_true",
+                        help="do not query LSF")
+    policy.add_argument("--verbose", action="store_true",
+                        help="show the full reason for every decision")
+    policy.add_argument("--json", action="store_true", help="output JSON")
 
     # -- export --------------------------------------------------------
     export = sub.add_parser(
@@ -563,6 +583,54 @@ def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
     return daemon.run()
 
 
+def cmd_policy(args: argparse.Namespace, settings: Settings) -> int:
+    """Show what automatic handling would do -- or what it already recorded.
+
+    Evaluating never acts, whatever the mode: this command builds the decision
+    and prints it. Acting is `rerun`, which is a separate deliberate step.
+    """
+    if args.review:
+        store = RunStore(settings.expanded_state_root(), args.review)
+        records = store.read_policy()
+        if args.json:
+            print(json.dumps(records, indent=2, sort_keys=True))
+            return 0
+        print(render.render_policy_review(
+            records, mode=settings.policy.mode))
+        return 0
+
+    if not args.run_folder and not args.wave_dir:
+        print("error: give --run-folder or --wave-dir, or --review RUN_ID",
+              file=sys.stderr)
+        return 2
+
+    fs = FsAdapter(settings.layout)
+    monitor = MonitorService(settings=settings)
+    result = monitor.scan(
+        wave_dirs=[args.wave_dir] if args.wave_dir else [],
+        run_folders=list(args.run_folder or []),
+        arcx_config=_load_arcx_cfg(args, settings),
+        use_lsf=not args.no_lsf,
+        index_sources=_index_sources(args, settings, fs),
+    )
+
+    wave = (os.path.basename(args.wave_dir.rstrip("/"))
+            if args.wave_dir else "")
+    outcome = evaluate_policy(
+        result.all_issues(), settings.policy, wave=wave,
+        now=result.scanned_at)
+
+    if args.json:
+        print(json.dumps(
+            {"mode": outcome.mode.value,
+             "decisions": [d.as_dict() for d in outcome.decisions]},
+            indent=2, sort_keys=True))
+        return 0
+
+    print(render.render_policy_outcome(outcome, verbose=args.verbose))
+    return 0
+
+
 def cmd_export(args: argparse.Namespace, settings: Settings) -> int:
     """Publish to the shared disk once.
 
@@ -704,6 +772,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "daemon": cmd_daemon,
         "web": cmd_web,
         "export": cmd_export,
+        "policy": cmd_policy,
         "plan": cmd_plan,
         "check-cfg": cmd_check_cfg,
         "inspect": cmd_inspect,

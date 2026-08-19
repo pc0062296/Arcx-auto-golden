@@ -23,6 +23,7 @@ needs no concurrency at all.
 
 from __future__ import annotations
 
+import os
 import signal
 import threading
 import time
@@ -36,7 +37,9 @@ from arcx_auto.adapters.store import RunStore, _deserialize_index_run
 from arcx_auto.config.settings import Settings
 from arcx_auto.daemon.state import build_state_payload, daemon_info
 from arcx_auto.domain.models import as_json_dict
+from arcx_auto.domain.policy import PolicyOutcome
 from arcx_auto.services.exporter import Exporter
+from arcx_auto.services.policy import evaluate_policy, history_from_records
 from arcx_auto.services.monitor import MonitorService, ScanResult
 
 
@@ -76,6 +79,8 @@ class Daemon:
         self._tick = 0
         self._last_error: Optional[str] = None
         self._export_error: Optional[str] = None
+        self._policy: Optional[PolicyOutcome] = None
+        self._policy_seen: set = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -169,11 +174,63 @@ class Daemon:
             return None
 
         self._last_error = None
+        self._decide(result)
         self._persist(result)
         self._publish()
         if self.on_tick is not None:
             self.on_tick(result)
         return result
+
+    def _decide(self, result: ScanResult) -> None:
+        """Run the policy engine over this tick's issues and record the result.
+
+        In shadow mode -- the default -- this only writes to the journal. The
+        engine is a pure function with no way to reach LSF or the filesystem,
+        so "decides but does not act" is the absence of a capability rather
+        than a flag something might forget to check.
+
+        Only *new* decisions are journalled. The same broken case is present on
+        every tick, and writing a line each time would bury the log it exists
+        to produce under thousands of identical rows.
+        """
+        settings = self.settings.policy
+        if not settings.resolved_mode().evaluates:
+            return
+
+        history = history_from_records(self.store.read_policy())
+        outcome = evaluate_policy(
+            result.all_issues(),
+            settings,
+            history=history,
+            run_id=self.options.run_id,
+            wave=self._wave_name(),
+            now=result.scanned_at,
+        )
+        self._policy = outcome
+
+        fresh = [d for d in outcome.decisions
+                 if self._policy_key(d) not in self._policy_seen]
+        if not fresh:
+            return
+        for decision in fresh:
+            self._policy_seen.add(self._policy_key(decision))
+        self.store.append_policy(d.as_dict() for d in fresh)
+
+    @staticmethod
+    def _policy_key(decision) -> str:
+        return "%s|%s|%s|%s" % (decision.wave, decision.issue_id,
+                                decision.action.value,
+                                ",".join(decision.targets))
+
+    def _wave_name(self) -> str:
+        """Which wave the budgets are counted against.
+
+        Budgets are per wave because a rerun is per wave: that is the unit an
+        automatic action would actually operate on.
+        """
+        if self.options.wave_dirs:
+            return os.path.basename(self.options.wave_dirs[0].rstrip("/"))
+        return self.options.run_id
 
     def _publish(self) -> None:
         """Push the shared-disk view, on its own slower schedule.
@@ -259,8 +316,6 @@ class Daemon:
     def _load_cfg(self) -> Optional[ArcxConfig]:
         path = self.options.arcx_cfg
         if not path:
-            import os
-
             for wave_dir in self.options.wave_dirs:
                 candidate = os.path.join(wave_dir, "arcx.cfg")
                 if os.path.isfile(candidate):
