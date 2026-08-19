@@ -979,9 +979,25 @@ appear. That is exactly when it is most worth seeing.
 ```
 submit_bjob_cmd_file_1.log
     +--(number)--> cmd_folder/cmd_file_1
-                       +-- `cd /path/to/index/NDIO_1`
+                       +-- `cd /path/to/index/NDIO_1`   <- the FIRST cd
                               +-- basename --> case = NDIO_1
 ```
+
+**The first `cd` is the case.** A script enters the case run dir, works, and
+then cds elsewhere to assemble reports:
+
+```
+cd /path/to/index/NTN_1      <- the case
+...
+cd /path/to/index/QC_Cc      <- report assembly
+```
+
+Taking the last one made `QC_Cc` the case id, so a report directory was
+reported as a case -- and because the roster is built from the cmd_files, the
+roster itself was inventing it. Precisely: the **first** absolute `cd` under
+the run folder wins, and if none is under the run folder, the first absolute
+`cd` wins. The run folder preference is kept so a leading `cd` into a tools or
+setup directory elsewhere cannot claim the case.
 
 The numbering matches **no** ordering, so "the Nth log belongs to the Nth case"
 is never valid. A test with `cmd_file_1 -> ZZZ_LAST` and

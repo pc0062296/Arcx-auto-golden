@@ -211,7 +211,9 @@ warns (`INDEX_CASE_COUNT_MISMATCH`), nothing more.
 
 **2. Log filenames say nothing about their case.**
 `submit_bjob_cmd_file_1.log` pairs by number with `cmd_folder/cmd_file_1`, and
-that script's `cd <path>` names the case. The numbering matches no ordering, and
+that script's **first** `cd <path>` names the case -- the script enters the case
+run dir first and cds on to `QC_*` later to assemble reports, so taking the last
+one reported a report directory as a case. The numbering matches no ordering, and
 a test with `cmd_file_1 -> ZZZ_LAST` and `cmd_file_2 -> AAA_FIRST` blocks any
 shortcut that guesses from the number.
 

@@ -316,12 +316,21 @@ class FsAdapter:
 
             #!/bin/csh -f
             source xxxx
-            cd /path/to/index/NDIO_1
+            cd /path/to/index/NDIO_1     <- the case; the first cd that counts
             ...
+            cd /path/to/index/QC_Cc      <- report assembly, later in the script
 
-        A script may contain several cd lines. Prefer the one **under the run
-        folder** (that is the case run dir); otherwise fall back to the last
-        absolute cd. Cached, since the script never changes after submission.
+        A script may contain several cd lines, and **the first one is the
+        case**. The script starts by entering the case run dir and may cd
+        elsewhere afterwards to assemble reports; taking the last one made
+        QC_Cc the answer, so a report directory was reported as a case.
+
+        The rule is therefore: the **first** absolute cd under the run folder
+        wins; if none is under the run folder, the first absolute cd wins. The
+        run folder preference is kept so a leading `cd` into a tools or setup
+        directory elsewhere cannot claim the case.
+
+        Cached, since the script never changes after submission.
         """
         cmd_path = os.path.abspath(cmd_path)
         cache_key = "%s|%s" % (cmd_path, run_folder or "")
@@ -330,7 +339,7 @@ class FsAdapter:
 
         text = self.read_head(cmd_path, self.layout.cmd_file_head_bytes)
         best: Optional[str] = None
-        last_absolute: Optional[str] = None
+        first_absolute: Optional[str] = None
 
         prefix = None
         if run_folder:
@@ -343,11 +352,12 @@ class FsAdapter:
             path = match.group("path").rstrip("/")
             if not path.startswith("/"):
                 continue
-            last_absolute = path
-            if prefix and (path + "/").startswith(prefix):
+            if first_absolute is None:
+                first_absolute = path
+            if best is None and prefix and (path + "/").startswith(prefix):
                 best = path
 
-        result = best or last_absolute
+        result = best or first_absolute
         self._cmd_cache[cache_key] = result
         return result
 

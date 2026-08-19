@@ -149,8 +149,14 @@ class CmdFileMappingTest(unittest.TestCase):
             handle.write("#!/bin/csh -f\ncd ../somewhere\n")
         self.assertIsNone(self.fs.read_cmd_exec_path(path))
 
-    def test_cd_inside_run_folder_preferred(self):
-        """With several cd lines, take the one under the run folder."""
+    def test_the_first_cd_under_the_run_folder_wins(self):
+        """The script enters the case run dir first, then moves on.
+
+        Taking the last cd made the report assembly directory the answer, so
+        QC_Cc was reported as a case. A leading cd into a tools directory
+        somewhere else still cannot claim the case, which is why the run folder
+        preference is kept alongside "first".
+        """
         run_folder = os.path.join(self.tmp.name, "run")
         os.makedirs(run_folder)
         path = os.path.join(self.tmp.name, "cmd_multi")
@@ -159,12 +165,19 @@ class CmdFileMappingTest(unittest.TestCase):
                 "#!/bin/csh -f\n"
                 "cd /opt/tools/setup\n"
                 "cd %s/CELL_A\n"
-                "cd /var/tmp/scratch\n" % run_folder
+                "cd %s/QC_Cc\n"
+                "cd /var/tmp/scratch\n" % (run_folder, run_folder)
             )
         self.assertEqual(
             self.fs.read_cmd_exec_path(path, run_folder),
             os.path.join(run_folder, "CELL_A"),
         )
+
+    def test_the_first_absolute_cd_wins_with_no_run_folder(self):
+        path = os.path.join(self.tmp.name, "cmd_nofolder")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/csh -f\ncd /a/b/CELL_A\ncd /a/b/QC_Cc\n")
+        self.assertEqual(self.fs.read_cmd_exec_path(path), "/a/b/CELL_A")
 
     def test_missing_cmd_file_returns_none(self):
         self.assertIsNone(
@@ -385,6 +398,45 @@ class RealRunFolderTest(unittest.TestCase):
         obs = FsAdapter().scan_index_run_folder(self.folder, "1000")
         self.assertIn("zmwu.cfg", obs.cfg_files)
         self.assertNotIn("zmwu.cfg", obs.unmatched_entries)
+
+
+class ReportDirIsNotACaseTest(unittest.TestCase):
+    """QC_Cc kept being reported as a case even after the roster change.
+
+    The roster was right to trust the cmd_files; the cmd_file parse was wrong.
+    A script cds into the case run dir, works, then cds into QC_Cc to assemble
+    reports -- and taking the *last* cd made QC_Cc the case id, so the roster
+    itself was inventing it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.run = os.path.join(self.tmp.name, "1000")
+        cmd_dir = os.path.join(self.run, "cmd_folder")
+        os.makedirs(cmd_dir)
+        os.makedirs(os.path.join(self.run, "NTN_1"))
+        os.makedirs(os.path.join(self.run, "QC_Cc"))
+        open(os.path.join(self.run, ".complete.NTN_1"), "w").close()
+        with open(os.path.join(cmd_dir, "cmd_file_1"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(
+                "#!/bin/csh -f\nsource setup\n"
+                "cd %s/NTN_1\nArcx work ...\n"
+                "cd %s/QC_Cc\nassemble report\n" % (self.run, self.run))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_qc_dir_never_becomes_a_case(self):
+        obs = FsAdapter().scan_index_run_folder(self.run, "1000")
+        self.assertEqual(sorted(obs.cases), ["NTN_1"])
+        self.assertIn("QC_Cc", obs.report_dirs)
+        self.assertNotIn("QC_Cc", obs.unexpected_dirs)
+
+    def test_the_case_dir_is_the_one_the_job_worked_in(self):
+        obs = FsAdapter().scan_index_run_folder(self.run, "1000")
+        self.assertEqual(obs.cases["NTN_1"].exec_path,
+                         os.path.join(self.run, "NTN_1"))
 
 
 class CmdFileRosterTest(unittest.TestCase):
