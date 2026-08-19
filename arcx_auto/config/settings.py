@@ -101,6 +101,12 @@ class MonitorSettings:
     # Tiered polling
     poll_active_sec: float = 30.0
     poll_idle_sec: float = 300.0
+    # How often the daemon looks at the command queue, independently of the
+    # scan above. Checking the queue is one listdir on a local directory;
+    # scanning is NFS work across every run folder, so tying them together
+    # meant a button press waited up to a full idle interval -- five minutes
+    # of nothing happening after pressing submit.
+    command_poll_sec: float = 2.0
 
 
 @dataclass

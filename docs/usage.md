@@ -116,9 +116,10 @@ waves 2   cases 7   slots 28   fatal 0
 Warnings do not block, but read them.
 
 If it is clear, press **submit N wave(s)**. The page comes straight back --
-your request is queued, and the daemon does the work. That is deliberate: the
-submission gate can wait hours for the LSF quota to drop, which is not
-something a browser should sit through.
+your request is queued, and the daemon picks it up **within about two seconds**.
+It returns rather than waiting because the submission gate can hold a wave for
+hours until the LSF quota drops, which is not something a browser should sit
+through; the queueing is not a delay, it is what lets you carry on.
 
 Changed your mind before the daemon picks it up? **queue** (top right) has a
 **cancel** next to anything still waiting.
@@ -226,3 +227,8 @@ a while:
 ```bash
 arcx-auto policy --review <run_id>
 ```
+
+---
+
+For how the pieces fit together -- what writes what, and why the UI never acts
+-- see **[flow.md](flow.md)**.

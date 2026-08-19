@@ -180,7 +180,8 @@ too dense", "not flooding" and "never stuck forever".
 
 > For the engineer running the extraction, there is a step-by-step guide in
 > **[docs/usage.md](docs/usage.md)** that needs no command line beyond the
-> first setup.
+> first setup, and **[docs/flow.md](docs/flow.md)** draws how the pieces fit
+> together.
 
 ```bash
 arcx-auto start        # monitor + UI + opens Chrome; Ctrl-C stops both

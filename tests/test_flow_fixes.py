@@ -439,3 +439,66 @@ class FlowPolishTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubmitLatencyTest(unittest.TestCase):
+    """Pressing submit must not wait for the next scan.
+
+    Scanning is expensive -- every run folder over NFS -- so it is paced by the
+    poll interval, five minutes when nothing is running. Serving the queue is
+    one listdir on a local directory. Tying them together meant pressing submit
+    and watching nothing happen for up to five minutes.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.settings = Settings()
+        self.settings.state_root = os.path.join(self.tmp.name, "state")
+        self.settings.run_root = os.path.join(self.tmp.name, "runs")
+        self.settings.export.shared_root = os.path.join(self.tmp.name, "shared")
+        self.settings.export.enabled = False
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_queued_request_is_picked_up_between_scans(self):
+        import time
+
+        from arcx_auto.daemon.loop import Daemon, DaemonOptions
+
+        # The idle scan interval is long on purpose; the queue must not be
+        # behind it.
+        self.settings.monitor.poll_idle_sec = 300.0
+        self.settings.monitor.poll_active_sec = 300.0
+        self.settings.monitor.command_poll_sec = 0.05
+
+        daemon = Daemon(DaemonOptions(run_id="lat", use_lsf=False),
+                        settings=self.settings)
+        thread = threading.Thread(target=daemon.run, daemon=True)
+        thread.start()
+        try:
+            queue = CommandQueue(self.settings.expanded_state_root())
+            deadline = time.time() + 5.0
+            while time.time() < deadline and daemon._tick < 1:
+                time.sleep(0.02)
+
+            queue.submit("submit", {"run_id": "x", "groups": [
+                {"name": "g", "dir_map": "/nope", "arcx_cfg": "/nope",
+                 "index_keys": ["1"]}]})
+
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not queue.list(DONE):
+                time.sleep(0.02)
+        finally:
+            daemon.stop()
+            thread.join(timeout=5)
+
+        self.assertTrue(
+            queue.list(DONE),
+            "the request was still waiting; it is tied to the scan interval "
+            "again")
+
+    def test_the_poll_interval_is_far_below_the_scan_interval(self):
+        monitor = Settings().monitor
+        self.assertLess(monitor.command_poll_sec, monitor.poll_active_sec)
+        self.assertLessEqual(monitor.command_poll_sec, 5.0)

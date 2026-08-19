@@ -92,6 +92,7 @@ class Daemon:
         self._last_error: Optional[str] = None
         self._export_error: Optional[str] = None
         self._command_error: Optional[str] = None
+        self._served = 0
         self._policy: Optional[PolicyOutcome] = None
         self._policy_seen: set = set()
 
@@ -140,7 +141,7 @@ class Daemon:
                 break
             if self.options.max_ticks and self._tick >= self.options.max_ticks:
                 break
-            self._stop.wait(self._next_interval(result))
+            self._wait_between_ticks(self._next_interval(result))
 
         self._mark_stopped()
         self.store.append_audit({
@@ -154,6 +155,31 @@ class Daemon:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _wait_between_ticks(self, seconds: float) -> None:
+        """Wait for the next scan, but keep answering the UI while waiting.
+
+        Scanning is expensive -- every run folder over NFS -- so it is paced by
+        the poll interval, which is five minutes when nothing is running.
+        Serving the queue is one listdir on a local directory, so it costs
+        almost nothing and can happen constantly.
+
+        Tying the two together meant pressing submit and then watching nothing
+        happen for up to five minutes. They are separate now: the wait is slept
+        in short slices, and each slice looks at the queue.
+        """
+        slice_sec = max(0.1, self.settings.monitor.command_poll_sec)
+        waited = 0.0
+        while waited < seconds:
+            if self._stop.wait(min(slice_sec, seconds - waited)):
+                return
+            waited += slice_sec
+            before = self._served
+            self._serve_commands()
+            if self._served != before:
+                # Something was executed, so the world has changed: scan now
+                # rather than finishing out a wait based on the old state.
+                return
 
     def _mark_stopped(self) -> None:
         """Record in state.json that this daemon is gone.
@@ -281,6 +307,7 @@ class Daemon:
         try:
             self.queue.requeue_stale()
             for command in self.executor.drain(limit=1):
+                self._served += 1
                 self.store.append_audit({
                     "action": "command_%s" % command.kind,
                     "run_id": self.options.run_id,
