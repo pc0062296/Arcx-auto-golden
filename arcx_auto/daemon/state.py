@@ -192,7 +192,8 @@ def _worst(issues: Sequence[Issue]) -> Optional[str]:
 
 
 def daemon_info(started_at: float, tick: int,
-                last_error: Optional[str] = None) -> Dict[str, Any]:
+                last_error: Optional[str] = None,
+                export_error: Optional[str] = None) -> Dict[str, Any]:
     return {
         "pid": os.getpid(),
         "host": socket.gethostname(),
@@ -201,4 +202,8 @@ def daemon_info(started_at: float, tick: int,
         "uptime_sec": max(0.0, time.time() - started_at),
         "tick": tick,
         "last_error": last_error,
+        # Publishing to the share failing is not a monitoring failure, so it is
+        # reported separately -- otherwise an unmounted share would look like
+        # the daemon had stopped working.
+        "export_error": export_error,
     }

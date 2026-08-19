@@ -1120,11 +1120,32 @@ other way round, the parent simply submits replacements.
     updated_at                  a plain-text timestamp for quick shell checks
 ```
 
-- writes are always `tmp -> os.replace`, since somebody may be reading
+- writes are always `tmp -> os.replace`, since somebody may be reading. Half an
+  HTML file renders as a blank page rather than as an error, which is the worst
+  way to fail
 - permissions: directories `0755`, files `0644`
-- the update interval is independent of the daemon tick (default 60s)
+- the update interval is independent of the daemon tick (default 60s): the tick
+  is 30s while cases run, and rewriting files on a shared NFS mount that often
+  is rude to everybody who has it mounted
 - **derived data only.** The truth lives in `~/.arcx-auto/` and the run folders,
   so the shared disk can be deleted and rebuilt at any time
+- **an export failure is never fatal.** The share can be unmounted, full or
+  read-only, and none of that is a reason to stop monitoring. Errors surface as
+  `daemon.export_error`, separately from `last_error`, so an unreachable share
+  does not read as a broken daemon
+- a failed export does not count as done, or a share that is briefly unwritable
+  would silently push the next attempt a whole interval into the future
+
+`index.html` is the one file users overlap on -- each writes only their own
+directory, and whoever exported last rebuilds the root from every
+`<user>/status.json`. Since it is derived, losing that race costs nothing.
+
+**The page puts problems first.** Somebody reading it off a share is asking one
+question -- is anything wrong -- so every case needing a person comes before any
+healthy detail, and the thousands of healthy cases are counted rather than
+listed. Attention is scanned across **every** run, finished ones included: a run
+that ended with failures is still something a person has to look at, more so
+because nothing is going to change on its own.
 
 ---
 
@@ -1137,9 +1158,15 @@ other way round, the parent simply submits replacements.
 | **1a** | arcx.cfg parser + QA registry + StateResolver + PRE checks | done |
 | **1b** | Store + LockManager + Daemon + read-only web UI | done |
 | **2b** | Preflight + WorkspaceBuilder + Launcher + gate + `submit` | done |
-| 3 | Rerun drain state machine + triage queue | to do |
+| **3** | Rerun planner + drain state machine + `rerun` (manual trigger) | done |
+| **3.5** | False success: netlist signature + QC_* summary values | done |
+| **5** | Shared-disk export, overview page, history | done |
 | 4 | Policy engine, automatic remediation (shadow mode first) | to do |
-| 5 | Shared-disk export, overview page, history | to do |
+
+Phase 4 was deliberately moved **after** 3.5 and 5. Automating a decision is
+only worth doing once the decision is trusted, and the false-success checks
+that Phase 4 would act on had not run against real data yet. The first version
+of the rerun is manual for the same reason.
 
 Phases 0 and 2a were deliberately built first and kept **read only**: neither
 writes anything to a run folder, and their purpose was to verify that the system

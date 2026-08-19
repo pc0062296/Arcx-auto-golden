@@ -43,7 +43,7 @@ class Py39CompatTest(unittest.TestCase):
             "ast", "unittest", "threading", "hashlib", "uuid", "errno",
             "math", "textwrap", "traceback", "logging",
             # used by the daemon and the web UI
-            "socket", "fcntl", "signal", "http", "urllib", "html",
+            "socket", "fcntl", "signal", "http", "urllib", "html", "pwd",
         )
         offenders = []
         for path in sorted((ROOT / "arcx_auto").rglob("*.py")):
@@ -69,3 +69,26 @@ class Py39CompatTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoRealSharedDiskInTestsTest(unittest.TestCase):
+    """The suite must never write to the configured shared disk.
+
+    export.shared_root is a real path outside the test tree, and the daemon
+    publishes to it on a timer. A test that forgets to redirect it writes into
+    whatever is mounted there on the machine running the suite -- which on a
+    developer's box is somebody else's status page.
+    """
+
+    def test_the_default_share_is_untouched(self):
+        import os
+
+        from arcx_auto.config.settings import Settings
+
+        shared = os.path.abspath(
+            os.path.expanduser(Settings().export.shared_root))
+        self.assertFalse(
+            os.path.exists(shared),
+            "the test suite wrote to the real shared disk at %s; a test built "
+            "a daemon or an Exporter without redirecting export.shared_root"
+            % shared)

@@ -39,6 +39,33 @@ def atomic_write_json(path: str, data: Any, file_mode: int = 0o644) -> None:
         raise
 
 
+def atomic_write_text(path: str, text: str, file_mode: int = 0o644) -> None:
+    """Write text atomically.
+
+    The shared disk export uses this: somebody may be refreshing the page in a
+    browser at the exact moment it is rewritten, and half an HTML file renders
+    as a blank screen rather than as an error, which is the worst way to fail.
+    """
+    path = os.path.abspath(os.path.expanduser(path))
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, file_mode)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def read_json(path: str, default: Optional[Any] = None) -> Any:
     """Read JSON, returning default on a missing or corrupt file.
 

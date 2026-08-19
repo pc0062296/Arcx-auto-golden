@@ -23,7 +23,7 @@ Full design: **[docs/architecture.md](docs/architecture.md)**.
 | **3** | Rerun planner + drain state machine + `rerun` (manual trigger) | done |
 | **3.5** | False-success detection: netlist signature + QC_* summary values | done |
 | 4 | Policy engine and automatic remediation | to do |
-| 5 | Shared-disk export and history | to do |
+| **5** | Shared-disk export, overview page and history | done |
 
 ---
 
@@ -123,6 +123,34 @@ index list and issue summary -> case table -> the evidence for one case.
 The daemon can be stopped and restarted at any time: it resumes the previous
 verdicts from `state.json`, and rebuilds from the run folders even without it.
 
+## Letting other people see it
+
+Only one person runs the daemon. Everybody else opens a file off a mounted
+share -- no server, no accounts, nothing to install:
+
+```
+<shared_root>/                  default /tmp1/.auto_golden
+  index.html                    every user, one row each
+  <user>/
+    status.html                 one self-contained page
+    status.json                 the same data, for scripts
+    updated_at                  a plain timestamp for `cat`
+```
+
+The daemon publishes on its own slower timer (`export.interval_sec`, 60s) --
+the tick is every 30s while cases run, and rewriting files on an NFS mount that
+often is rude to everybody who has it mounted. `python3 -m arcx_auto export`
+does it once by hand, and reports in full why a share is refusing writes.
+
+The page puts **problems first**: every case needing a person, across every run
+including finished ones, before any healthy detail. A run that ended with
+failures is still something somebody has to look at.
+
+Everything there is derived. Delete the whole tree and the next export rebuilds
+it; the truth stays in the run folders and `~/.arcx-auto/`. Publishing failures
+never stop monitoring -- they surface as `export_error` in daemon health, not as
+a dead daemon.
+
 ## Validating arcx.cfg before submitting
 
 ```bash
@@ -148,6 +176,7 @@ manufacture false alarms. Exits 1 on a FATAL, so it chains into a submit script.
 | `rerun --wave-dir PATH` | Stop, drain, back up, clean and resubmit (**dry run by default**) |
 | `daemon --wave-dir PATH` | Keep monitoring, writing state for the web UI |
 | `web` | Serve the local read-only dashboard |
+| `export` | Publish this user's status to the shared disk, once |
 | `check-cfg FILE` | Validate arcx.cfg (exit 1 on FATAL) |
 | `inspect dir-map FILE` | Parse dir_map and report gaps |
 | `inspect index PATH...` | Parse special.cfg and count GDS, giving the slot demand |

@@ -30,6 +30,7 @@ class WebTest(unittest.TestCase):
 
         settings = Settings()
         settings.state_root = cls.state_root
+        settings.export.shared_root = os.path.join(cls.tmp.name, "shared")
         Daemon(
             DaemonOptions(run_id="demo", wave_dirs=[demo["wave_dir"]],
                           use_lsf=False, once=True),

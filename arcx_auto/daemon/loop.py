@@ -36,6 +36,7 @@ from arcx_auto.adapters.store import RunStore, _deserialize_index_run
 from arcx_auto.config.settings import Settings
 from arcx_auto.daemon.state import build_state_payload, daemon_info
 from arcx_auto.domain.models import as_json_dict
+from arcx_auto.services.exporter import Exporter
 from arcx_auto.services.monitor import MonitorService, ScanResult
 
 
@@ -49,6 +50,7 @@ class DaemonOptions:
     use_lsf: bool = True
     once: bool = False
     max_ticks: Optional[int] = None           # for tests
+    export: Optional[bool] = None             # None -> follow settings
 
 
 class Daemon:
@@ -60,10 +62,12 @@ class Daemon:
         settings: Optional[Settings] = None,
         monitor: Optional[MonitorService] = None,
         on_tick: Optional[Callable[[ScanResult], None]] = None,
+        exporter: Optional[Exporter] = None,
     ) -> None:
         self.options = options
         self.settings = settings or Settings()
         self.monitor = monitor or MonitorService(self.settings)
+        self.exporter = exporter or Exporter(self.settings)
         self.store = RunStore(self.settings.expanded_state_root(), options.run_id)
         self.on_tick = on_tick
 
@@ -71,6 +75,7 @@ class Daemon:
         self._started_at = 0.0
         self._tick = 0
         self._last_error: Optional[str] = None
+        self._export_error: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -165,14 +170,35 @@ class Daemon:
 
         self._last_error = None
         self._persist(result)
+        self._publish()
         if self.on_tick is not None:
             self.on_tick(result)
         return result
 
+    def _publish(self) -> None:
+        """Push the shared-disk view, on its own slower schedule.
+
+        Everything here is best effort. The share can be unmounted, full or
+        read only, and none of that is a reason to stop monitoring -- so a
+        failure is recorded where people can see it and the loop carries on.
+        """
+        if self.options.export is False:
+            return
+        if self.options.export is None and not self.settings.export.enabled:
+            return
+        try:
+            result = self.exporter.export_now()
+        except Exception:  # noqa: BLE001 - publishing must never kill the loop
+            self._export_error = traceback.format_exc(limit=4)
+            return
+        self._export_error = (
+            "; ".join(result.errors) if result.errors else None)
+
     def _persist(self, result: ScanResult) -> None:
         payload = build_state_payload(
             self.options.run_id, result,
-            daemon_info(self._started_at, self._tick, self._last_error),
+            daemon_info(self._started_at, self._tick, self._last_error,
+                        self._export_error),
         )
         self.store.write_state(payload)
         if result.events:
@@ -184,7 +210,8 @@ class Daemon:
         """
         state = self.store.read_state()
         state.setdefault("run_id", self.options.run_id)
-        state["daemon"] = daemon_info(self._started_at, self._tick, self._last_error)
+        state["daemon"] = daemon_info(
+            self._started_at, self._tick, self._last_error, self._export_error)
         state["updated_at"] = time.time()
         self.store.write_state(state)
 

@@ -19,6 +19,10 @@ from tests.fixtures.fake_run import build_demo
 def settings_with_root(root):
     settings = Settings()
     settings.state_root = root
+    # The share is a real path outside the test tree, and a daemon publishes to
+    # it every tick. Left alone, running the suite would write into whatever is
+    # mounted at export.shared_root on the machine running it.
+    settings.export.shared_root = os.path.join(root, "shared")
     return settings
 
 

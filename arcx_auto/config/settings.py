@@ -355,9 +355,19 @@ class ExportSettings:
     """
 
     shared_root: str = "/tmp1/.auto_golden"
+    # Independent of the daemon tick on purpose: the daemon polls every 30s
+    # while cases run, and rewriting files on a shared NFS mount that often is
+    # rude to everybody who has it mounted.
     interval_sec: float = 60.0
     dir_mode: int = 0o755
     file_mode: int = 0o644
+    # How many runs the exported page carries, newest first. This is the
+    # history: enough to answer "did this ever work" without keeping every run
+    # a user has ever done on one page.
+    history_limit: int = 50
+    # Publish automatically from the daemon. Turning it off leaves `export`
+    # as a manual command.
+    enabled: bool = True
 
 
 @dataclass

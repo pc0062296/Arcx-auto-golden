@@ -36,6 +36,7 @@ from arcx_auto.services.collector import Collector
 from arcx_auto.services.launcher import read_launch
 from arcx_auto.services.monitor import MonitorService
 from arcx_auto.services.remediator import Remediator
+from arcx_auto.services.exporter import Exporter
 from arcx_auto.services.rerun_planner import build_rerun_plan
 from arcx_auto.services.submitter import Submitter
 from arcx_auto.services.qa import QaRunner
@@ -168,6 +169,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "adapts to whether cases are running")
     daemon.add_argument("--once", action="store_true", help="scan once and exit")
     daemon.add_argument("--no-lsf", action="store_true", help="do not query LSF")
+    daemon.add_argument("--no-export", action="store_true",
+                        help="do not publish to the shared disk")
+
+    # -- export --------------------------------------------------------
+    export = sub.add_parser(
+        "export",
+        help="publish this user's status to the shared disk, once")
+    export.add_argument("--shared-root",
+                        help="where to publish (overrides the settings)")
+    export.add_argument("--json", action="store_true", help="output JSON")
 
     # -- web -----------------------------------------------------------
     web = sub.add_parser("web",
@@ -543,12 +554,47 @@ def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
         interval_sec=args.interval,
         use_lsf=not args.no_lsf,
         once=args.once,
+        export=False if args.no_export else None,
     )
     daemon = Daemon(options, settings=settings)
     print("monitoring run_id=%s  state=%s" % (run_id, daemon.store.dir))
     if not args.once:
         print("web UI: arcx-auto web    (Ctrl-C stops the daemon)")
     return daemon.run()
+
+
+def cmd_export(args: argparse.Namespace, settings: Settings) -> int:
+    """Publish to the shared disk once.
+
+    The daemon does this on a timer; this is for publishing without one, and
+    for finding out why publishing is failing -- an unmounted or read-only
+    share is reported here in full rather than as one line in daemon health.
+    """
+    if getattr(args, "shared_root", None):
+        settings.export.shared_root = args.shared_root
+
+    exporter = Exporter(settings)
+    result = exporter.export_now(force=True)
+
+    if args.json:
+        print(json.dumps({
+            "ok": result.ok,
+            "path": result.path,
+            "runs": result.runs,
+            "errors": list(result.errors),
+        }, indent=2, sort_keys=True))
+        return 0 if result.ok else 1
+
+    if result.ok:
+        print("published %d run(s) for %s" % (result.runs, exporter.user))
+        print("  %s/status.html" % result.path)
+        print("  %s/index.html" % exporter.shared_root)
+        return 0
+
+    print("export failed:", file=sys.stderr)
+    for error in result.errors:
+        print("  %s" % error, file=sys.stderr)
+    return 1
 
 
 def cmd_web(args: argparse.Namespace, settings: Settings) -> int:
@@ -657,6 +703,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rerun": cmd_rerun,
         "daemon": cmd_daemon,
         "web": cmd_web,
+        "export": cmd_export,
         "plan": cmd_plan,
         "check-cfg": cmd_check_cfg,
         "inspect": cmd_inspect,

@@ -243,4 +243,17 @@ launch:
 # ---------------------------------------------------------------------------
 export:
   shared_root: "/tmp1/.auto_golden"
+  # Independent of the daemon tick on purpose: the daemon polls every 30s while
+  # cases run, and rewriting files on a shared NFS mount that often is rude to
+  # everybody who has it mounted.
   interval_sec: 60
+  # Runs carried on the exported page, newest first. This is the history:
+  # enough to answer "did this ever work" without piling every run a user has
+  # ever done onto one page.
+  history_limit: 50
+  # Publish automatically from the daemon. Turning this off leaves `export`
+  # available as a manual command.
+  enabled: true
+  # Octal, in the YAML 1.1 form this parser understands (0755, not 0o755).
+  dir_mode: 0755
+  file_mode: 0644
