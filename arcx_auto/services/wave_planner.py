@@ -14,10 +14,11 @@ landed in this wave" genuinely matters.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from arcx_auto.domain.enums import PlanMode
-from arcx_auto.domain.models import IndexSpec, Wave, WavePlan
+from arcx_auto.domain.models import IndexSpec, SubmitGroup, Wave, WavePlan
 
 
 def plan_waves(
@@ -77,6 +78,54 @@ def plan_waves(
         max_slots_per_wave=max_slots_per_wave,
         waves=waves,
         excluded=excluded,
+        warnings=tuple(warnings),
+        created_at=now,
+    )
+    return _with_oversize_warnings(plan)
+
+
+def plan_groups(
+    groups: Sequence[Tuple[SubmitGroup, Sequence[IndexSpec]]],
+    max_slots_per_wave: int,
+    mode: PlanMode = PlanMode.AUTO,
+    now: Optional[float] = None,
+) -> WavePlan:
+    """Plan several groups into one ordered list of waves.
+
+    Each group is a person's selection: its own dir_map, its own arcx.cfg, and
+    the indices they ticked. Groups are planned **separately**, because a wave
+    is one Arcx command against one cfg and mixing two cfgs into one wave is
+    not a thing Arcx can do. They are then concatenated in the order the person
+    built them.
+
+    Wave numbering is global across groups, so wave_001 is the first thing that
+    goes out no matter which group it came from -- the gate releases one wave at
+    a time and the number is the order it releases in.
+    """
+    now = now if now is not None else time.time()
+    waves: List[Wave] = []
+    excluded: List[IndexSpec] = []
+    warnings: List[str] = []
+
+    for group, specs in groups:
+        part = plan_waves(specs, max_slots_per_wave, mode=mode, now=now)
+        excluded.extend(part.excluded)
+        for warning in part.warnings:
+            warnings.append("%s: %s" % (group.label, warning))
+        for wave in part.waves:
+            waves.append(replace(
+                wave,
+                seq=len(waves) + 1,
+                group=group.name,
+                dir_map=group.dir_map,
+                arcx_cfg=group.arcx_cfg,
+            ))
+
+    plan = WavePlan(
+        mode=mode,
+        max_slots_per_wave=max_slots_per_wave,
+        waves=tuple(waves),
+        excluded=tuple(excluded),
         warnings=tuple(warnings),
         created_at=now,
     )

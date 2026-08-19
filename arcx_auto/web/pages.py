@@ -7,6 +7,7 @@ entirely without disturbing the daemon (architecture decision 1).
 
 from __future__ import annotations
 
+import os
 import urllib.parse
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -221,6 +222,7 @@ def render_index(state: Dict[str, Any], index: Dict[str, Any],
     body = cards([(state_name, count,
                    "alert" if state_name in ("FAILED", "LOST", "STALLED") else "")
                   for state_name, count in sorted(counts.items())])
+    body += rerun_link(state, index)
 
     rows = []
     for case in index.get("cases") or []:
@@ -249,6 +251,31 @@ def render_index(state: Dict[str, Any], index: Dict[str, Any],
     return page("%s / %s" % (run_id, index_key), body, refresh=refresh,
                 crumbs=[("/", "all runs"), (_q("run", run_id), run_id),
                         (_q("run", run_id, "index", index_key), index_key)])
+
+
+def rerun_link(state: Dict[str, Any], index: Dict[str, Any]) -> str:
+    """Offer a rerun where the problem is visible, not on a separate page.
+
+    Only when something is actually wrong: a button that is always there
+    invites a rerun of a wave that did not need one, and a rerun is the one
+    operation that moves directories.
+    """
+    if not index.get("attention"):
+        return ""
+    run_folder = index.get("run_folder") or ""
+    wave_dir = os.path.dirname(run_folder.rstrip("/"))
+    if not wave_dir:
+        return ""
+    run_id = state.get("run_id", "")
+    return (
+        "<p><a class='pill bad' href=\"/rerun?wave_dir=%s&amp;run_id=%s"
+        "&amp;back=%s\">rerun this wave...</a> "
+        "<span class='muted'>shows what would be moved aside before "
+        "anything happens</span></p>"
+        % (urllib.parse.quote(wave_dir), urllib.parse.quote(run_id),
+           urllib.parse.quote("/run/%s/index/%s"
+                              % (run_id, index.get("index_key", ""))))
+    )
 
 
 def _silent_cell(case: Dict[str, Any]) -> str:

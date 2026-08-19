@@ -106,19 +106,55 @@ elapsed)`. A plain OR has a hole -- once the timer expires, submitting while the
 quota is still full floods the queue anyway -- so this combination covers "not
 too dense", "not flooding" and "never stuck forever".
 
-## Continuous monitoring and the web UI
+## The normal way to use it
 
 ```bash
-# terminal 1: the daemon (the single writer)
-python3 -m arcx_auto daemon --run-id nightly --wave-dir /path/to/wave_001
+# terminal 1: the daemon -- monitors, and runs whatever the UI asks for
+python3 -m arcx_auto daemon
 
-# terminal 2: the web UI (read only, open and close it freely)
+# terminal 2: the UI
 python3 -m arcx_auto web            # then open http://127.0.0.1:8765/
 ```
 
-The web UI uses only the standard library `http.server`, binds to `127.0.0.1`
-by default, and has no write endpoints. Four levels of drill-down: all runs ->
-index list and issue summary -> case table -> the evidence for one case.
+Naming no directory is the point: the daemon watches every wave under
+`run_root`, so a submission made in the browser a minute ago is picked up
+without restarting anything.
+
+Then, in the browser:
+
+1. **new submission** -> type a `dir_map` and an `arcx.cfg`
+2. tick the indices you want; each row shows its GDS count and slot demand
+3. **add this group.** A group is one (dir_map, arcx.cfg, indices) selection --
+   add another with a different cfg if some indices need one
+4. **run the pre-submission checks.** This creates nothing. A FATAL means the
+   submit button is not rendered at all: a button you are allowed to press and
+   then told off for is worse than no button
+5. **submit.** The browser queues an intent and returns immediately -- the gate
+   can wait two hours for the LSF quota, which is not something a page can sit
+   through. The daemon does the work
+6. the run appears on the monitoring page as it goes
+7. where a case needs attention, **rerun this wave...** shows exactly which
+   directories would be moved aside, and only then offers the button
+
+A group is what a person selected; a wave is what may go out at once. Ticking
+fifty indices does not mean fifty go at once -- the slot cap still splits a
+group into waves, because that cap is what keeps the queue from flooding.
+
+**The UI never acts.** Every POST writes an intent into `commands/` and the
+daemon, already the single writer, executes it. Two writers on one run folder
+is the failure this whole system exists to avoid, and "the UI only writes when
+the daemon is not looking" is not an invariant anybody can keep.
+
+Every POST also checks the `Origin` header. Binding to loopback stops the
+network from reaching the server, but it does **not** stop a page open in the
+same browser from posting to it -- without that check, an open tab could
+trigger a rerun that moves directories. `--read-only` turns the buttons off
+entirely.
+
+The UI uses only the standard library `http.server`. Plain forms, a POST and a
+redirect; the small amount of inline JavaScript is convenience only, and every
+action works with it disabled. Four levels of drill-down: all runs -> index
+list and issue summary -> case table -> the evidence for one case.
 
 The daemon can be stopped and restarted at any time: it resumes the previous
 verdicts from `state.json`, and rebuilds from the run folders even without it.
@@ -214,8 +250,8 @@ manufacture false alarms. Exits 1 on a FATAL, so it chains into a submit script.
 | `plan --dir-map FILE --index ...` | Produce a wave plan (**never submits**) |
 | `submit --dir-map X --arcx-cfg Y` | Check, create wave dirs, submit (**dry run by default**) |
 | `rerun --wave-dir PATH` | Stop, drain, back up, clean and resubmit (**dry run by default**) |
-| `daemon --wave-dir PATH` | Keep monitoring, writing state for the web UI |
-| `web` | Serve the local read-only dashboard |
+| `daemon` | Monitor, and run what the UI asks for |
+| `web` | Serve the local UI (`--read-only` for display only) |
 | `export` | Publish this user's status to the shared disk, once |
 | `policy` | What automatic handling would do (**decides, never acts**) |
 | `policy --review RUN_ID` | What it has recorded so far |

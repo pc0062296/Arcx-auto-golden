@@ -67,6 +67,16 @@ class WaveWorkspace:
         return os.path.join(self.meta_dir, "attempts")
 
 
+def _resolve(path: Optional[str], label: str) -> str:
+    """Absolute path to an input that must exist before anything is created."""
+    if not path:
+        raise WorkspaceError("no %s was given" % label)
+    resolved = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(resolved):
+        raise WorkspaceError("%s not found: %s" % (label, resolved))
+    return resolved
+
+
 class WorkspaceBuilder:
     """Turns a WavePlan into directories on disk."""
 
@@ -78,8 +88,8 @@ class WorkspaceBuilder:
         self,
         plan: WavePlan,
         run_dir: str,
-        arcx_cfg: str,
-        dir_map: str,
+        arcx_cfg: str = "",
+        dir_map: str = "",
         run_id: str = "",
         now: Optional[float] = None,
     ) -> List[WaveWorkspace]:
@@ -90,17 +100,16 @@ class WorkspaceBuilder:
         """
         now = now if now is not None else time.time()
         run_dir = os.path.abspath(os.path.expanduser(run_dir))
-        arcx_cfg = os.path.abspath(os.path.expanduser(arcx_cfg))
-        dir_map = os.path.abspath(os.path.expanduser(dir_map))
-
-        for path, label in ((arcx_cfg, "arcx.cfg"), (dir_map, "dir_map")):
-            if not os.path.isfile(path):
-                raise WorkspaceError("%s not found: %s" % (label, path))
 
         workspaces: List[WaveWorkspace] = []
         for wave in plan.waves:
+            # Each wave carries the pair its group was built from. The
+            # arguments are the fallback, for the single-group case where the
+            # caller supplied one of each.
+            cfg = _resolve(wave.arcx_cfg or arcx_cfg, "arcx.cfg")
+            mapping = _resolve(wave.dir_map or dir_map, "dir_map")
             workspaces.append(
-                self._build_wave(wave, run_dir, arcx_cfg, dir_map, run_id, now))
+                self._build_wave(wave, run_dir, cfg, mapping, run_id, now))
         return workspaces
 
     # ------------------------------------------------------------------

@@ -12,6 +12,7 @@ Three families:
 from __future__ import annotations
 
 import dataclasses
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
@@ -318,12 +319,46 @@ class IndexSpec:
 
 
 @dataclass(frozen=True)
+class SubmitGroup:
+    """One selection a person made: a dir_map, an arcx.cfg, and some indices.
+
+    A group is the unit of *intent*. Somebody picks a dir_map and a cfg, ticks
+    the indices they want, and that is one group; they can then pick a
+    different dir_map and cfg and tick more, which is a second group.
+
+    It is not the unit of *submission*. The slot cap exists to keep the queue
+    from flooding, and a person ticking fifty indices has not thought about
+    that -- so a group is still split into waves by slot demand. The person
+    says what belongs together; the planner says how much may go at once.
+    """
+
+    name: str
+    dir_map: str
+    arcx_cfg: str
+    index_keys: Tuple[str, ...] = ()
+
+    @property
+    def label(self) -> str:
+        return self.name or os.path.basename(self.arcx_cfg or "group")
+
+
+@dataclass(frozen=True)
 class Wave:
-    """A batch of indices submitted together: one Arcx command, one directory."""
+    """A batch of indices submitted together: one Arcx command, one directory.
+
+    ``dir_map`` and ``arcx_cfg`` travel with the wave rather than with the plan
+    because different groups in one submission may use different ones. The wave
+    directory snapshots whichever pair it was built from, so QA three days later
+    reads the cfg that run actually used.
+    """
 
     seq: int
     indices: Tuple[IndexSpec, ...]
     state: WaveState = WaveState.PLANNED
+    #: Which group's selection this wave came from
+    group: str = ""
+    dir_map: str = ""
+    arcx_cfg: str = ""
 
     @property
     def name(self) -> str:

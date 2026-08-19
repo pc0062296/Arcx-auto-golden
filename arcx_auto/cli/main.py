@@ -207,6 +207,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="loopback only by default; any other address "
                           "publishes this as a service")
     web.add_argument("--port", type=int, default=8765)
+    web.add_argument("--read-only", action="store_true",
+                     help="serve the dashboard with no action buttons")
     web.add_argument("--refresh", type=int, default=30,
                      help="page auto-refresh in seconds, 0 to disable")
 
@@ -559,11 +561,14 @@ def cmd_rerun(args: argparse.Namespace, settings: Settings) -> int:
 # --------------------------------------------------------------------------
 
 def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
-    if not args.wave_dir and not args.run_folder:
-        print("error: give at least one --wave-dir or --run-folder",
-              file=sys.stderr)
-        return 2
+    """Monitor, and run whatever the UI has asked for.
 
+    Naming no directory is the normal way to run this alongside the web UI:
+    the daemon then watches every wave under run_root, so a submission made in
+    the browser a minute ago is picked up without anybody restarting anything.
+    Naming one turns discovery off -- somebody who named a directory means that
+    directory.
+    """
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
     options = DaemonOptions(
         run_id=run_id,
@@ -671,6 +676,8 @@ def cmd_web(args: argparse.Namespace, settings: Settings) -> int:
         host=args.host,
         port=args.port,
         refresh_sec=args.refresh,
+        settings=settings,
+        allow_actions=not getattr(args, "read_only", False),
     )
     url = "http://%s:%d/" % (options.host, options.port)
     print("Web UI: %s" % url)

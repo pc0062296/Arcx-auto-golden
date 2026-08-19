@@ -823,6 +823,84 @@ The automatic-versus-human matrix:
 
 ---
 
+## 7.10 Operating it from a browser
+
+Everything above is a service or a display. This is the layer that lets a
+person outside the system ask it to do work, and its whole design is one
+sentence: **the browser posts an intent and the daemon does it.**
+
+```
+browser  --POST-->  <state_root>/commands/pending/<id>.json
+                              |
+                    daemon claims it with os.replace
+                              |
+                    CommandExecutor validates, then calls the
+                    services that already know how
+```
+
+Not because a browser cannot run the code, but because two writers on one run
+folder is the failure this whole system is built to avoid, and "the UI only
+writes when the daemon is not looking" is not an invariant anybody can keep.
+
+There is also a plain reason it cannot be synchronous: **the gate can wait two
+hours** for the LSF quota, and a browser request cannot.
+
+### Groups and waves are different things
+
+| | Group | Wave |
+|---|---|---|
+| Made by | a person ticking boxes | the planner |
+| Is | one (dir_map, arcx.cfg, indices) selection | one Arcx command, one directory |
+| Answers | what belongs together | how much may go at once |
+
+A wave carries its own `dir_map` and `arcx.cfg` rather than the plan holding
+one of each, because two groups may use different ones and a wave is a single
+Arcx command against a single cfg. Wave numbering is global across groups: the
+gate releases one wave at a time, and the number is that order.
+
+Ticking fifty indices does not mean fifty go at once. The slot cap still splits
+a group, because the cap is what keeps the queue from flooding and the person
+ticking boxes has not thought about that.
+
+### Three properties of the boundary
+
+**A command file is the one input this system did not write itself.** By the
+time it reaches WorkspaceBuilder it decides where directories get created, so
+every path in it is resolved and checked in `CommandExecutor` first, and a
+command that does not make sense fails having changed nothing.
+
+**Claiming is `os.replace` from pending/ to running/.** Atomic within a
+filesystem, so two daemons racing means one wins and the other gets nothing.
+A command left in running/ was interrupted; it is retired into done/ with an
+explanation and **never retried**, because a submit that died half way may
+already have created directories and sent jobs.
+
+**What was shown is what happens.** The rerun confirmation posts back the case
+ids it displayed, and the executor refuses if the plan has changed since --
+rather than acting on a different set of cases than the person agreed to.
+
+### Origin, not authentication
+
+Binding to `127.0.0.1` stops the network from reaching the server. It does
+**not** stop a page open in the same browser from posting to it: any site can
+submit a form to `127.0.0.1`. Without an Origin check an open tab could trigger
+a rerun that moves directories.
+
+A *missing* Origin is accepted, because some browsers omit it for same-origin
+form posts and refusing those would break the UI for the person it serves. A
+*present and different* Origin is what a cross-site post looks like, and that
+is refused.
+
+### The gate is the absence of a button
+
+A FATAL pre-submission check means the submit button is not rendered at all,
+rather than rendered and refused. The page runs the **same** preflight the
+executor will, LSF adapter included -- an earlier version did not, showed
+"every check passed", and then had the submission refused for an unreachable
+`bsub`.
+
+---
+
 ## 8. Storage and process model
 
 ```

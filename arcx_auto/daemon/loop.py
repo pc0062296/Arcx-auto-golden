@@ -38,6 +38,8 @@ from arcx_auto.config.settings import Settings
 from arcx_auto.daemon.state import build_state_payload, daemon_info
 from arcx_auto.domain.models import as_json_dict
 from arcx_auto.domain.policy import PolicyOutcome
+from arcx_auto.services.commands import CommandQueue
+from arcx_auto.services.executor import CommandExecutor
 from arcx_auto.services.exporter import Exporter
 from arcx_auto.services.policy import evaluate_policy, history_from_records
 from arcx_auto.services.monitor import MonitorService, ScanResult
@@ -54,6 +56,9 @@ class DaemonOptions:
     once: bool = False
     max_ticks: Optional[int] = None           # for tests
     export: Optional[bool] = None             # None -> follow settings
+    #: Consume the command queue. The UI posts intents; somebody has to run
+    #: them, and the daemon is already the single writer.
+    serve_commands: bool = True
 
 
 class Daemon:
@@ -66,11 +71,15 @@ class Daemon:
         monitor: Optional[MonitorService] = None,
         on_tick: Optional[Callable[[ScanResult], None]] = None,
         exporter: Optional[Exporter] = None,
+        executor: Optional[CommandExecutor] = None,
     ) -> None:
         self.options = options
         self.settings = settings or Settings()
         self.monitor = monitor or MonitorService(self.settings)
         self.exporter = exporter or Exporter(self.settings)
+        self.executor = executor or CommandExecutor(
+            self.settings, on_progress=lambda msg: print("  %s" % msg))
+        self.queue = CommandQueue(self.settings.expanded_state_root())
         self.store = RunStore(self.settings.expanded_state_root(), options.run_id)
         self.on_tick = on_tick
 
@@ -79,6 +88,7 @@ class Daemon:
         self._tick = 0
         self._last_error: Optional[str] = None
         self._export_error: Optional[str] = None
+        self._command_error: Optional[str] = None
         self._policy: Optional[PolicyOutcome] = None
         self._policy_seen: set = set()
 
@@ -163,7 +173,7 @@ class Daemon:
         """
         try:
             result = self.monitor.scan(
-                wave_dirs=self.options.wave_dirs,
+                wave_dirs=self._wave_dirs(),
                 run_folders=self.options.run_folders,
                 arcx_config=arcx_config,
                 use_lsf=self.options.use_lsf,
@@ -174,12 +184,84 @@ class Daemon:
             return None
 
         self._last_error = None
+        self._serve_commands()
         self._decide(result)
         self._persist(result)
         self._publish()
         if self.on_tick is not None:
             self.on_tick(result)
         return result
+
+    def _wave_dirs(self) -> List[str]:
+        """Which wave directories to watch this tick.
+
+        With none given the daemon discovers them under run_root, so a wave
+        submitted from the UI a minute ago is monitored without anybody
+        restarting anything -- which is what makes "submit, then watch it"
+        one flow rather than two.
+
+        An explicit --wave-dir turns discovery off: somebody who named a
+        directory means that directory.
+        """
+        if self.options.wave_dirs or self.options.run_folders:
+            return list(self.options.wave_dirs)
+        return self._discover_wave_dirs()
+
+    def _discover_wave_dirs(self) -> List[str]:
+        """Every wave directory this tool has built under run_root.
+
+        Recognised by the .arcx_auto/ marker rather than by name: that is the
+        thing only this system creates, so nothing else on the disk can be
+        mistaken for a wave.
+        """
+        root = self.settings.expanded_run_root()
+        found: List[str] = []
+        try:
+            runs = sorted(os.scandir(root), key=lambda e: e.name)
+        except OSError:
+            return found
+        for run in runs:
+            if not run.is_dir():
+                continue
+            try:
+                waves = sorted(os.scandir(run.path), key=lambda e: e.name)
+            except OSError:
+                continue
+            for wave in waves:
+                if wave.is_dir() and os.path.isdir(
+                        os.path.join(wave.path, ".arcx_auto")):
+                    found.append(wave.path)
+        return found
+
+    def _serve_commands(self) -> None:
+        """Run whatever the UI has asked for since the last tick.
+
+        One command per tick. A submission can sit at the gate for a long time,
+        and running several at once would both delay the queue behind the
+        slowest and spend the LSF quota in parallel -- which is the thing the
+        gate exists to prevent.
+
+        Nothing here may raise: a bad command is the caller's problem, not a
+        reason to stop monitoring.
+        """
+        if not self.options.serve_commands:
+            return
+        try:
+            self.queue.requeue_stale()
+            for command in self.executor.drain(limit=1):
+                self.store.append_audit({
+                    "action": "command_%s" % command.kind,
+                    "run_id": self.options.run_id,
+                    "command_id": command.id,
+                    "requested_by": command.requested_by,
+                    "ok": command.ok,
+                    "error": command.error,
+                    "reason": "requested through the UI",
+                })
+        except Exception:  # noqa: BLE001 - see the docstring
+            self._command_error = traceback.format_exc(limit=4)
+            return
+        self._command_error = None
 
     def _decide(self, result: ScanResult) -> None:
         """Run the policy engine over this tick's issues and record the result.
