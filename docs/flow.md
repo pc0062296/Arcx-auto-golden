@@ -209,6 +209,28 @@ only the starting point:
 A run that finished and produced a truncated netlist reads `FAILED`. That is
 the whole point: it is the failure that otherwise ships as a success.
 
+### Investigating a failure
+
+```
+   the case page                      what it answers without leaving it
+
+   state + reason                     what the verdict is
+   QA issues, worst first             why -- with the evidence
+     every path in the evidence   ->  /view (the file itself)
+   the end of the log                 what it was doing when it stopped
+   the files it produced              or that it produced none at all
+```
+
+`/view` is the only read endpoint that takes a path from the request, so it
+takes it under a confinement check: the path is resolved with `realpath` and
+must land inside `run_root` or inside a wave directory the daemon is actually
+monitoring. `realpath` comes first because anyone who can write into a run
+folder can drop a symlink in it, and a check on the literal path would see
+something under the root and say yes. No roots configured denies everything.
+
+Nothing is ever read whole. A tail seeks to the end and reads backwards in
+blocks, so a 400MB netlist costs the same as a log.
+
 ### Deciding about a failure
 
 ```

@@ -321,10 +321,12 @@ def _anomaly_cell(index: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def render_index(state: Dict[str, Any], index: Dict[str, Any],
-                 refresh: int) -> str:
+                 refresh: int, show: str = "") -> str:
     run_id = state.get("run_id", "?")
     index_key = index.get("index_key", "?")
     counts = index.get("counts") or {}
+    all_cases = index.get("cases") or []
+    shown = _matching(all_cases, show)
 
     body = cards([(state_name, count,
                    "alert" if state_name in ("FAILED", "LOST", "STALLED") else "")
@@ -332,7 +334,7 @@ def render_index(state: Dict[str, Any], index: Dict[str, Any],
     body += rerun_link(state, index)
 
     rows = []
-    for case in index.get("cases") or []:
+    for case in shown:
         issue_ids = sorted({i["id"] for i in case.get("issues") or []})
         rows.append([
             "<a href='%s'>%s</a>" % (
@@ -348,16 +350,89 @@ def render_index(state: Dict[str, Any], index: Dict[str, Any],
             "<span class='muted'>%s</span>" % esc(case.get("note") or ""),
         ])
 
-    body += "<h2>cases</h2>" + table(
+    body += "<h2>cases</h2>"
+    body += _filter_bar(run_id, index_key, all_cases, show)
+    body += table(
         ["case", "state", "LSF", "in state", "log quiet", "log size",
          "issues", "note"],
-        rows, numeric=[3, 4, 5])
+        rows, numeric=[3, 4, 5],
+        empty=("no case matches this filter"
+               if show else "this index has no case"))
 
     body += _anomaly_section(index)
 
     return page("%s / %s" % (run_id, index_key), body, refresh=refresh,
                 crumbs=[("/", "all runs"), (_q("run", run_id), run_id),
                         (_q("run", run_id, "index", index_key), index_key)])
+
+
+def _matching(cases: Sequence[Dict[str, Any]], show: str
+              ) -> List[Dict[str, Any]]:
+    """The cases a filter selects. Unknown filter values select everything.
+
+    An unrecognised value showing everything, rather than nothing, is
+    deliberate: a hand-edited or stale URL should not make a case table look
+    empty, which reads exactly like "there is nothing wrong".
+    """
+    if not show or show == "all":
+        return list(cases)
+    if show == "attention":
+        return [c for c in cases if c.get("state") in ATTENTION_STATES]
+    if show in _STATE_ORDER or show in {c.get("state") for c in cases}:
+        return [c for c in cases if c.get("state") == show]
+    return list(cases)
+
+
+#: The order filter chips appear in: the states worth looking at first.
+_STATE_ORDER = ("FAILED", "LOST", "STALLED", "SUSPENDED", "UNKNOWN",
+                "RUNNING", "QUEUED", "PENDING", "COMPLETED_MARKER", "DONE")
+
+
+def _filter_bar(run_id: str, index_key: str,
+                cases: Sequence[Dict[str, Any]], show: str) -> str:
+    """Links, not JavaScript, so a filtered table is a URL somebody can send.
+
+    An index of three hundred cases where four are wrong is a table nobody
+    reads; the four are the whole content of the page. Filtering with plain
+    links keeps that shareable and keeps the auto refresh honest -- the page
+    reloads into the same filter rather than dropping back to everything.
+    """
+    counts: Dict[str, int] = {}
+    for case in cases:
+        state = case.get("state") or "UNKNOWN"
+        counts[state] = counts.get(state, 0) + 1
+    attention = sum(counts.get(s, 0) for s in ATTENTION_STATES)
+
+    base = _q("run", run_id, "index", index_key)
+    options: List[Tuple[str, str, int, bool]] = [
+        ("all", "all", len(cases), False),
+    ]
+    if attention:
+        options.append(("attention", "needs a person", attention, True))
+    for state in _STATE_ORDER:
+        if counts.get(state):
+            options.append((state, state, counts[state],
+                            state in ATTENTION_STATES))
+    for state in sorted(counts):
+        if state not in _STATE_ORDER:
+            options.append((state, state, counts[state], False))
+
+    current = show or "all"
+    chips = []
+    for value, label, count, alert in options:
+        selected = (current == value)
+        href = base if value == "all" else "%s?show=%s" % (
+            base, urllib.parse.quote(value))
+        klass = "pill %s" % ("bad" if alert else "muted")
+        if selected:
+            chips.append("<span class='%s' style='font-weight:600;"
+                         "text-decoration:underline'>%s %d</span>"
+                         % (klass, esc(label), count))
+        else:
+            chips.append("<a class='%s' href='%s'>%s %d</a>"
+                         % (klass, esc(href), esc(label), count))
+    return ("<p style='display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px'>"
+            "%s</p>" % "".join(chips))
 
 
 def rerun_link(state: Dict[str, Any], index: Dict[str, Any]) -> str:
@@ -426,7 +501,9 @@ def _anomaly_section(index: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def render_case(state: Dict[str, Any], index: Dict[str, Any],
-                case: Dict[str, Any], refresh: int) -> str:
+                case: Dict[str, Any], refresh: int,
+                log: Optional[Dict[str, Any]] = None,
+                files: Sequence[Dict[str, Any]] = ()) -> str:
     run_id = state.get("run_id", "?")
     index_key = index.get("index_key", "?")
     case_id = case["case_id"]
@@ -454,7 +531,10 @@ def render_case(state: Dict[str, Any], index: Dict[str, Any],
         ["field", "value"],
         [[esc(k), "<span class='muted'>%s</span>" % esc(v)] for k, v in facts])
 
-    body += "<h2>QA issues</h2>" + _case_issues(case)
+    back = _q("run", run_id, "index", index_key, "case", case_id)
+    body += "<h2>QA issues</h2>" + _case_issues(case, back)
+    body += _log_section(log, case.get("log_path") or "", back)
+    body += _files_section(files, back, case.get("case_dir") or "")
 
     return page("%s / %s" % (index_key, case_id), body, refresh=refresh,
                 crumbs=[("/", "all runs"), (_q("run", run_id), run_id),
@@ -463,12 +543,13 @@ def render_case(state: Dict[str, Any], index: Dict[str, Any],
                             "case", case_id), case_id)])
 
 
-def _case_issues(case: Dict[str, Any]) -> str:
+def _case_issues(case: Dict[str, Any], back: str = "/") -> str:
     issues = sorted(case.get("issues") or [],
                     key=lambda i: _SEVERITY_RANK.get(i["severity"], 9))
     if not issues:
         return "<div class='empty'>no problems found</div>"
 
+    case_dir = case.get("case_dir") or ""
     blocks = []
     for issue in issues:
         evidence = ""
@@ -480,9 +561,157 @@ def _case_issues(case: Dict[str, Any]) -> str:
         blocks.append(
             "<div class='card' style='margin-bottom:10px'>"
             "<div>%s <strong>%s</strong> - %s</div>"
-            "<div class='doc'>%s</div>%s</div>"
+            "<div class='doc'>%s</div>%s%s</div>"
             % (severity_pill(issue["severity"]), esc(issue["id"]),
                esc(issue.get("message") or ""),
-               esc(issue.get("doc") or ""), evidence)
+               esc(issue.get("doc") or ""), evidence,
+               _evidence_links(issue, case_dir, back))
         )
     return "".join(blocks)
+
+
+def _evidence_paths(evidence: Any) -> List[str]:
+    """Every file an issue's evidence names, in the order it names them.
+
+    A verdict like "the first line has no QuickCap wording" is only worth
+    something if the next click is that first line. The evidence already
+    carries the paths; this is what turns them from text into somewhere to go.
+    """
+    found: List[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("path", "file", "log_path") and isinstance(value, str):
+                    found.append(value)
+                else:
+                    walk(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+
+    walk(evidence)
+    out = []
+    for item in found:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _evidence_links(issue: Dict[str, Any], case_dir: str, back: str) -> str:
+    paths = _evidence_paths(issue.get("evidence"))
+    if not paths or not case_dir:
+        return ""
+    links = []
+    for relpath in paths[:8]:
+        full = relpath if os.path.isabs(relpath) else os.path.join(
+            case_dir, relpath)
+        links.append("<a href='%s'>%s</a>"
+                     % (esc(view_url(full, back=back)), esc(relpath)))
+    return ("<div class='doc'>open: %s</div>"
+            % " &middot; ".join(links))
+
+
+# ---------------------------------------------------------------------------
+# Looking at a file
+# ---------------------------------------------------------------------------
+
+def view_url(path: str, mode: str = "tail", lines: int = 200,
+             back: str = "/") -> str:
+    return "/view?%s" % urllib.parse.urlencode(
+        {"path": path, "mode": mode, "lines": lines, "back": back})
+
+
+def _log_section(log: Optional[Dict[str, Any]], log_path: str,
+                 back: str) -> str:
+    """The end of the log, on the page, without a trip to a terminal.
+
+    This is the most repeated action in the whole review -- a case reads
+    FAILED, and the next thing anybody does is tail its log -- and until now
+    the tool answered it with a path to copy.
+    """
+    if not log_path:
+        return "<h2>log</h2><div class='empty'>this case has no log yet</div>"
+    header = ("<p class='muted'>%s &middot; "
+              "<a href='%s'>last 500</a> &middot; "
+              "<a href='%s'>first 200</a></p>"
+              % (esc(log_path),
+                 esc(view_url(log_path, "tail", 500, back)),
+                 esc(view_url(log_path, "head", 200, back))))
+    if log is None:
+        return "<h2>log</h2>" + header
+    if log.get("error"):
+        return ("<h2>log</h2>%s<div class='empty'>could not read it: %s</div>"
+                % (header, esc(log["error"])))
+    if not log.get("text"):
+        return ("<h2>log</h2>%s<div class='empty'>the log is empty</div>"
+                % header)
+    note = ""
+    if log.get("truncated"):
+        note = ("<div class='doc'>showing the last %d line(s); there is more "
+                "above</div>" % log.get("lines_shown", 0))
+    return "<h2>log</h2>%s%s<pre>%s</pre>" % (header, note, esc(log["text"]))
+
+
+def _files_section(files: Sequence[Dict[str, Any]], back: str,
+                   case_dir: str = "") -> str:
+    """Listed even when empty, because empty is the finding.
+
+    A case that carries a .complete marker and produced no file at all is the
+    false success this whole system exists to catch, and "produced nothing" is
+    the plainest way to show it.
+    """
+    if not files and not case_dir:
+        return ""
+    rows = []
+    for entry in files:
+        rows.append([
+            "<a href='%s'>%s</a>" % (
+                esc(view_url(entry["path"], back=back)), esc(entry["name"])),
+            esc(size(entry.get("size"))),
+        ])
+    return "<h2>files this case produced</h2>" + table(
+        ["file", "size"], rows, numeric=[1],
+        empty="this case run dir contains no file at all")
+
+
+def render_file_view(view: Dict[str, Any], back: str = "/") -> str:
+    """One file, bounded. Never the whole thing: these are netlists."""
+    path = view.get("path") or ""
+    name = os.path.basename(path.rstrip("/")) or path
+    mode = view.get("mode") or "tail"
+    lines = view.get("lines_shown") or 0
+    asked = view.get("lines_asked") or lines or 200
+
+    body = ("<p><a href='%s'>&larr; back</a></p>" % esc(back or "/"))
+    if view.get("error"):
+        body += ("<div class='card alert'><div>could not read this file</div>"
+                 "<div class='doc'>%s</div><div class='doc'>%s</div></div>"
+                 % (esc(path), esc(view["error"])))
+        return page(name, body, crumbs=[("/", "all runs")])
+
+    body += cards([
+        ("size", size(view.get("size")), ""),
+        ("modified", timestamp(view.get("mtime")), ""),
+        ("showing", "%s %d line(s)" % (mode, lines), ""),
+    ])
+    choices = []
+    for label, choice_mode, count in (("last 100", "tail", 100),
+                                      ("last 500", "tail", 500),
+                                      ("last 2000", "tail", 2000),
+                                      ("first 200", "head", 200),
+                                      ("first 2000", "head", 2000)):
+        choices.append("<a class='pill muted' href='%s'>%s</a>"
+                       % (esc(view_url(path, choice_mode, count, back)),
+                          esc(label)))
+    body += ("<p style='display:flex;gap:6px;flex-wrap:wrap'>%s</p>"
+             % "".join(choices))
+    body += "<p class='muted'>%s</p>" % esc(path)
+    if view.get("truncated"):
+        body += ("<div class='doc'>this is a window, not the whole file; "
+                 "there is more %s</div>"
+                 % ("above" if mode == "tail" else "below"))
+    body += "<pre>%s</pre>" % esc(view.get("text") or "(empty)")
+    return page(name, body, crumbs=[
+        ("/", "all runs"), (back or "/", "back"),
+        (view_url(path, mode, asked, back), name)])

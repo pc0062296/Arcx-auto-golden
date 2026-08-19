@@ -81,6 +81,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._rerun_confirm()
             if parts[0] == "pick" and len(parts) == 3:
                 return self._pick_page(parts[1], parts[2])
+            if parts[0] == "view":
+                return self._view_page()
         except Exception as exc:  # noqa: BLE001 - a bad request must not take
             # the whole server down
             return self._error(500, "internal error: %s" % exc)
@@ -181,15 +183,20 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._error(404, "no such index: %s" % parts[2])
 
             if len(parts) == 3:
-                return self._html(
-                    pages.render_index(state, index, self.options.refresh_sec))
+                query = urllib.parse.parse_qs(
+                    urllib.parse.urlparse(self.path).query)
+                return self._html(pages.render_index(
+                    state, index, self.options.refresh_sec,
+                    show=(query.get("show") or [""])[0]))
 
             if len(parts) == 5 and parts[3] == "case":
                 case = _find(index.get("cases") or [], "case_id", parts[4])
                 if case is None:
                     return self._error(404, "no such case: %s" % parts[4])
+                log, files = self._case_files(case)
                 return self._html(pages.render_case(
-                    state, index, case, self.options.refresh_sec))
+                    state, index, case, self.options.refresh_sec,
+                    log=log, files=files))
 
         self._error(404, "no such page")
 
@@ -207,6 +214,84 @@ class _Handler(BaseHTTPRequestHandler):
         if state is None:
             return self._error(404, "no such run: %s" % run_id)
         self._send_json(state)
+
+    # -- Looking at a file ---------------------------------------------
+
+    def _view_roots(self) -> List[str]:
+        """Where the viewer is allowed to read.
+
+        The configured run_root, plus the wave directory of every run the
+        daemon has actually recorded. The second half matters because a run
+        may have been started with an explicit wave dir outside run_root, and
+        a viewer that refuses to open the log of a run it is displaying is
+        worse than useless. Both halves come from configuration or from the
+        daemon's own state -- never from the request.
+        """
+        roots: List[str] = []
+        settings = self.options.resolved_settings()
+        run_root = settings.expanded_run_root()
+        if run_root:
+            roots.append(run_root)
+        for run_id in RunStore.list_runs(self.options.state_root):
+            state = self._load_state(run_id)
+            for index in (state or {}).get("indexes") or []:
+                folder = (index.get("run_folder") or "").rstrip("/")
+                if folder:
+                    roots.append(os.path.dirname(folder))
+        out: List[str] = []
+        for root in roots:
+            if root and root not in out:
+                out.append(root)
+        return out
+
+    def _view_page(self) -> None:
+        from arcx_auto.services.fileview import read_view, within
+
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        path = (query.get("path") or [""])[0]
+        back = (query.get("back") or ["/"])[0]
+        mode = (query.get("mode") or ["tail"])[0]
+        mode = mode if mode in ("tail", "head") else "tail"
+        try:
+            lines = int((query.get("lines") or ["200"])[0])
+        except ValueError:
+            lines = 200
+        lines = max(1, min(lines, 5000))
+
+        if not path:
+            return self._error(400, "no file given")
+        if not back.startswith("/"):
+            # An absolute URL here would turn a "back" link into an open
+            # redirect. Only somewhere on this server is a valid destination.
+            back = "/"
+        if not within(path, self._view_roots()):
+            return self._error(
+                403,
+                "this file is outside the run directories, so it is not "
+                "shown here: %s" % path)
+        view = read_view(path, mode=mode, lines=lines)
+        self._html(pages.render_file_view(view.as_dict(), back=back))
+
+    def _case_files(self, case: Dict[str, Any]):
+        """The tail of the log and the files the case produced.
+
+        Read here rather than in the page functions: the UI modules render
+        what they are handed and import no service (architecture decision 1).
+        """
+        from arcx_auto.services.fileview import list_case_files, read_view
+
+        log = None
+        log_path = case.get("log_path")
+        if log_path:
+            # A tighter byte budget than the full viewer gets: one log line
+            # can be megabytes, and this one is only the preview.
+            log = read_view(log_path, mode="tail", lines=40,
+                            max_bytes=32 * 1024).as_dict()
+        case_dir = case.get("case_dir")
+        files = []
+        if case_dir:
+            files = [entry.as_dict() for entry in list_case_files(case_dir)]
+        return log, files
 
     # -- Submission flow -----------------------------------------------
 

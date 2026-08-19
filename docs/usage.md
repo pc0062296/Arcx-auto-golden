@@ -149,6 +149,29 @@ The page refreshes itself every 30 seconds.
 Click an index for the case table, and a case for the evidence behind its
 verdict.
 
+On a big index, filter the table with the buttons above it:
+
+```
+[ all 312 ]  [ needs a person 4 ]  [ FAILED 3 ]  [ STALLED 1 ]  [ DONE 308 ]
+```
+
+**needs a person** is the one to press. They are plain links, so a filtered
+table is a URL you can paste to a colleague, and the page keeps refreshing
+into the same filter.
+
+A case page shows **the end of its log on the page** -- no terminal, no `cd`,
+no `tail`. Above it are **last 500** and **first 200** for the full viewer,
+where you can also read the netlists and every other file the case produced.
+The files themselves are listed at the bottom of the case page; if that list
+says *no file at all*, that is your answer already.
+
+Every path a QA issue names is a link. `NETLIST_NO_SIGNATURE` says the first
+line is wrong -- click the path and read the first line.
+
+The viewer only opens files inside your run directories. It is a window, not
+a download: it reads the end (or the start) of a file, never all of it, so
+opening a 400MB netlist costs the same as opening a log.
+
 `DONE` means more than "Arcx wrote `.complete`". It means the netlists exist,
 are the right size, carry the extraction engine's own banner, and the `QC_*`
 summary values are real numbers. A run that finished but produced a truncated
@@ -213,6 +236,7 @@ first: every case needing a person, across every run.
 | Ctrl-C seems ignored | it is at the submission gate. Press it again, or `arcx-auto stop` |
 | the page is stale | the daemon terminal -- it prints errors and carries on |
 | an index cannot be selected | it has no GDS files; the reason is on the row |
+| a file will not open | it is outside `run_root` and the run directories; the viewer only reads inside them |
 | everything says `LOST` | LSF is unreachable. Nothing is actually wrong with the jobs |
 
 To check a cfg without submitting anything:

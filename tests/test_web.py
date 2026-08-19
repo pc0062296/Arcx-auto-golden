@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from arcx_auto.config.settings import Settings
@@ -146,6 +147,90 @@ class WebTest(unittest.TestCase):
             self.fail("POST should not be accepted")
         except urllib.error.HTTPError as exc:
             self.assertIn(exc.code, (400, 404, 405, 501))
+
+    # -- Looking at a file ---------------------------------------------
+
+    def _log_path(self, index_key, case_id):
+        _code, body = self.get("/api/state/demo")
+        state = json.loads(body)
+        for index in state["indexes"]:
+            if index["index_key"] != index_key:
+                continue
+            for case in index["cases"]:
+                if case["case_id"] == case_id:
+                    return case.get("log_path")
+        return None
+
+    def test_case_page_shows_the_end_of_the_log(self):
+        """The most repeated action in the whole review, answered on the page.
+
+        Before this the page gave a path and the engineer went to a terminal
+        to tail it -- once per failure, every time.
+        """
+        _code, body = self.get("/run/demo/index/1000/case/PDIO_1")
+        self.assertIn("<h2>log</h2>", body)
+        self.assertIn("last 500", body)
+
+    def test_case_page_lists_the_files_the_case_produced(self):
+        _code, body = self.get("/run/demo/index/1001/case/PMOS_10")
+        self.assertIn("files this case produced", body)
+
+    def test_view_serves_a_file_inside_the_run(self):
+        log = self._log_path("1000", "PDIO_1")
+        self.assertTrue(log)
+        code, body = self.get("/view?" + urllib.parse.urlencode(
+            {"path": log, "mode": "tail", "lines": "20"}))
+        self.assertEqual(code, 200)
+        self.assertIn("tail", body)
+
+    def test_view_refuses_a_file_outside_the_run_directories(self):
+        """The check that separates "reads a log" from "reads anything".
+
+        The process runs as the person using it, so this is not a privilege
+        boundary -- it is a promise about what this tool will open when asked,
+        and it has to hold before anyone points it at a shared disk.
+        """
+        for attack in ("/etc/passwd", os.path.join(self.tmp.name, "..", "etc"),
+                       "~/.ssh/id_rsa"):
+            code = self.status_of("/view?" + urllib.parse.urlencode(
+                {"path": attack}))
+            self.assertEqual(code, 403, attack)
+
+    def test_view_refuses_a_symlink_pointing_out_of_the_run(self):
+        outside = os.path.join(self.tmp.name, "outside_secret")
+        with open(outside, "w") as handle:
+            handle.write("not for the viewer")
+        link = os.path.join(self.demo["wave_dir"], "innocent.log")
+        if not os.path.exists(link):
+            os.symlink(outside, link)
+        self.addCleanup(lambda: os.path.exists(link) and os.unlink(link))
+        code = self.status_of("/view?" + urllib.parse.urlencode(
+            {"path": link}))
+        self.assertEqual(code, 403)
+
+    def test_view_of_a_missing_file_is_a_page_not_a_crash(self):
+        missing = os.path.join(self.demo["wave_dir"], "no_such_file.log")
+        code, body = self.get("/view?" + urllib.parse.urlencode(
+            {"path": missing}))
+        self.assertEqual(code, 200)
+        self.assertIn("could not read this file", body)
+
+    def test_view_without_a_path_is_a_bad_request(self):
+        self.assertEqual(self.status_of("/view"), 400)
+
+    # -- Filtering the case table --------------------------------------
+
+    def test_index_filter_narrows_the_table(self):
+        _code, everything = self.get("/run/demo/index/1001")
+        self.assertIn("PMOS_10", everything)
+        _code, only_bad = self.get("/run/demo/index/1001?show=attention")
+        self.assertIn("needs a person", only_bad)
+        self.assertNotIn(">PMOS_10<", only_bad)
+
+    def test_index_filter_chips_are_plain_links(self):
+        """No JavaScript: a filtered table is a URL somebody can send."""
+        _code, body = self.get("/run/demo/index/1001")
+        self.assertIn("?show=attention", body)
 
     def test_serving_does_not_touch_run_folder(self):
         before = _tree(self.demo["wave_dir"])
