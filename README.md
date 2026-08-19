@@ -38,6 +38,76 @@ Full design: **[docs/architecture.md](docs/architecture.md)**.
 
 ---
 
+## Installing it somewhere you can run it from
+
+The package has **no dependencies**, so being importable is the whole
+installation. Three ways, in the order they are worth trying:
+
+**1. The launcher (nothing installed).** Symlink it onto your PATH:
+
+```bash
+ln -s /path/to/arcx-auto-golden/bin/arcx-auto ~/bin/arcx-auto
+arcx-auto --version          # now works from any directory
+```
+
+The script resolves its own symlink to find its source tree, so the link can
+live anywhere. Set `ARCX_PYTHON` if `python3` is not the interpreter you want.
+
+**2. PYTHONPATH, if you would rather not add a script:**
+
+```bash
+export PYTHONPATH=/path/to/arcx-auto-golden:$PYTHONPATH
+python3 -m arcx_auto --version
+```
+
+Put that line in your shell profile and `python3 -m arcx_auto` works everywhere.
+
+**3. pip, if your site allows it:**
+
+```bash
+pip install --user /path/to/arcx-auto-golden      # or: -e for a live checkout
+arcx-auto --version
+```
+
+No network is needed -- there is nothing to download.
+
+### Where things get written
+
+Two roots, both under your home directory by default, so they do **not** depend
+on where you run the command from:
+
+| Setting | Default | Holds |
+|---|---|---|
+| `state_root` | `~/.arcx-auto` | state.json, events, audit, the command queue |
+| `run_root` | `~/arcx_runs` | the wave directories Arcx runs in |
+
+Point `run_root` at the disk you actually want the results on:
+
+```yaml
+run_root: "/proj/rc_golden/runs"
+```
+
+**A relative root follows your shell's working directory**, which means waves
+created from one directory and a daemon started from another never see each
+other. The tool warns if you configure one.
+
+### Settings file
+
+Optional; every field has a default. Search order:
+
+1. `-c/--config /path/to/settings.yaml`
+2. `./arcx_auto.yaml` (the directory you are in)
+3. `~/.arcx-auto/config/default.yaml`
+
+For a per-user setup, copy the shipped template once:
+
+```bash
+mkdir -p ~/.arcx-auto/config
+cp /path/to/arcx-auto-golden/config/default.yaml ~/.arcx-auto/config/
+```
+
+Without PyYAML, use the same structure as `.json` instead.
+
 ## Quick start
 
 ```bash

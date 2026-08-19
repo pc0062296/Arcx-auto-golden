@@ -1,0 +1,29 @@
+#!/bin/sh
+# Run arcx-auto from anywhere, with nothing installed.
+#
+# The package only has to be importable, and it has no dependencies, so
+# pointing PYTHONPATH at the directory this script lives in is the whole
+# installation. Symlink this into a directory on your PATH:
+#
+#     ln -s /path/to/arcx-auto-golden/bin/arcx-auto ~/bin/arcx-auto
+#
+# The symlink is resolved below, so the script finds its own source tree
+# rather than wherever the link happens to sit.
+#
+# Override the interpreter with ARCX_PYTHON if python3 is not the one you
+# want (it must be 3.9 or newer).
+
+self=$0
+# Follow symlinks without readlink -f, which older systems do not have.
+while [ -L "$self" ]; do
+    link=$(ls -ld "$self" | sed 's/.*-> //')
+    case $link in
+        /*) self=$link ;;
+        *)  self=$(dirname "$self")/$link ;;
+    esac
+done
+here=$(cd "$(dirname "$self")/.." && pwd)
+
+PYTHONPATH=$here${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH
+exec "${ARCX_PYTHON:-python3}" -m arcx_auto "$@"

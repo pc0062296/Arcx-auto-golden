@@ -8,7 +8,7 @@
 # Without PyYAML on the network, use the .json form; the structure is identical.
 
 state_root: "~/.arcx-auto"     # per-user state (state.json, events, audit)
-run_root: "./arcx_runs"        # root for the isolated wave directories
+run_root: "~/arcx_runs"        # absolute: a relative root follows your shell's cwd
 
 # ---------------------------------------------------------------------------
 # File conventions (architecture 9.3)

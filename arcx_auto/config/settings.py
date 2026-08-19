@@ -492,7 +492,11 @@ class Settings:
     """Root settings object."""
 
     state_root: str = "~/.arcx-auto"
-    run_root: str = "./arcx_runs"
+    # Absolute on purpose. A relative run_root follows the shell's working
+    # directory, so wave directories would land somewhere different depending
+    # on where the command happened to be typed -- and the daemon, which finds
+    # waves by scanning run_root, would then silently monitor nothing.
+    run_root: str = "~/arcx_runs"
     layout: LayoutSettings = field(default_factory=LayoutSettings)
     monitor: MonitorSettings = field(default_factory=MonitorSettings)
     plan: PlanSettings = field(default_factory=PlanSettings)
@@ -608,4 +612,27 @@ def load_settings(
         settings.source_path = resolved
         break
 
+    warnings.extend(_check_roots(settings))
     return settings, warnings
+
+
+def _check_roots(settings: "Settings") -> List[str]:
+    """A relative root is almost always a mistake, so say so rather than obey
+    it silently.
+
+    It is still obeyed: somebody may genuinely want a run_root relative to a
+    project directory they always work from. But the failure it causes is
+    invisible -- waves created from one directory, and a daemon started from
+    another finding none of them -- so it cannot be silent.
+    """
+    warnings: List[str] = []
+    for name in ("state_root", "run_root"):
+        value = str(getattr(settings, name, "") or "")
+        if not value or value.startswith("~") or os.path.isabs(value):
+            continue
+        warnings.append(
+            "%s is a relative path (%r), so it follows the directory the "
+            "command is run from. It resolves to %s right now. Use an "
+            "absolute path unless you always run from the same place."
+            % (name, value, os.path.abspath(os.path.expanduser(value))))
+    return warnings

@@ -286,3 +286,92 @@ class ConfigTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RootsAreNotTiedToTheWorkingDirectoryTest(unittest.TestCase):
+    """Where results land must not depend on where the command was typed.
+
+    A relative run_root means waves created from one directory and a daemon
+    started from another never see each other -- and the daemon finds waves by
+    scanning run_root, so the symptom is that it silently monitors nothing.
+    """
+
+    def test_the_defaults_are_absolute(self):
+        from arcx_auto.config.settings import Settings
+
+        settings = Settings()
+        for value in (settings.state_root, settings.run_root):
+            self.assertTrue(value.startswith("~") or os.path.isabs(value),
+                            "%r follows the shell's cwd" % value)
+
+    def test_the_default_run_root_does_not_move_with_the_cwd(self):
+        from arcx_auto.config.settings import Settings
+
+        here = os.getcwd()
+        try:
+            first = Settings().expanded_run_root()
+            os.chdir(tempfile.gettempdir())
+            self.assertEqual(Settings().expanded_run_root(), first)
+        finally:
+            os.chdir(here)
+
+    def test_a_relative_root_is_obeyed_but_warned_about(self):
+        from arcx_auto.config.settings import load_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"run_root": "./somewhere"}, handle)
+            settings, warnings = load_settings(path)
+
+        self.assertEqual(settings.run_root, "./somewhere")
+        self.assertTrue(any("relative path" in w for w in warnings), warnings)
+
+    def test_an_absolute_root_warns_about_nothing(self):
+        from arcx_auto.config.settings import load_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"run_root": "/proj/runs",
+                           "state_root": "~/.arcx-auto"}, handle)
+            _settings, warnings = load_settings(path)
+        self.assertEqual([w for w in warnings if "relative" in w], [])
+
+
+class LauncherTest(unittest.TestCase):
+    """bin/arcx-auto is the whole installation on a machine with no pip."""
+
+    def _launcher(self):
+        return os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "bin", "arcx-auto")
+
+    def test_it_exists_and_is_executable(self):
+        path = self._launcher()
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(os.access(path, os.X_OK), "not executable")
+
+    def test_it_runs_from_an_unrelated_directory(self):
+        import subprocess
+
+        result = subprocess.run(
+            [self._launcher(), "--version"],
+            cwd=tempfile.gettempdir(), capture_output=True, text=True,
+            timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(".", result.stdout.strip())
+
+    def test_it_works_through_a_symlink(self):
+        """The link may live on a PATH directory far from the source tree, so
+        the script has to resolve itself rather than trust its own path.
+        """
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            link = os.path.join(tmp, "arcx-auto")
+            os.symlink(self._launcher(), link)
+            result = subprocess.run(
+                [link, "--version"], cwd=tempfile.gettempdir(),
+                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
