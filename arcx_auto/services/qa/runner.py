@@ -140,6 +140,7 @@ class QaRunner:
         arcx_config: Optional[ArcxConfig] = None,
         now: Optional[float] = None,
         attempts: Optional[Dict[str, int]] = None,
+        gds_count: Optional[int] = None,
     ) -> IndexQaReport:
         now = now if now is not None else time.time()
         attempts = attempts or {}
@@ -174,6 +175,7 @@ class QaRunner:
             config=arcx_config,
             cache=cache,
             now=now,
+            gds_count=gds_count,
         )
         index_results = (
             self.registry.run(index_context, IssueScope.INDEX, IssueStage.LIVE,

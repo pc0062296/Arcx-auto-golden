@@ -255,3 +255,38 @@ def parse_arcx_cfg(path: str) -> ArcxConfig:
         globals=dict(globals_),
         warnings=tuple(warnings),
     )
+
+
+def discover_arcx_cfg(run_folder: str) -> Optional["ArcxConfig"]:
+    """Find the arcx.cfg snapshot Arcx leaves inside an index run folder.
+
+    Arcx copies the cfg it ran into the run folder under a name derived from
+    the user (for example ``zmwu.cfg``), so the name cannot be hard coded and
+    cannot be guessed. Every ``*.cfg`` in the folder is parsed instead, and the
+    one that actually looks like an arcx.cfg -- at least one BEGIN_SETTINGS
+    block -- wins. ``special.cfg`` is plain key = value, so it fails that test
+    on its own rather than needing to be named as an exception.
+
+    This matters more than it looks. Without it, running `status` against a
+    finished run folder produced CFG_EXPECTATION_UNAVAILABLE for every case: an
+    UNKNOWN issue, which blocks success, so five genuinely complete cases were
+    reported as FAILED. The cfg was sitting in the folder the whole time.
+
+    Returns None when nothing in the folder parses as an arcx.cfg. That is not
+    an error -- the caller falls back to whatever cfg it was given.
+    """
+    try:
+        names = sorted(os.listdir(run_folder))
+    except OSError:
+        return None
+
+    for name in names:
+        if not name.endswith(".cfg"):
+            continue
+        path = os.path.join(run_folder, name)
+        if not os.path.isfile(path):
+            continue
+        config = parse_arcx_cfg(path)
+        if config.error is None and config.blocks:
+            return config
+    return None

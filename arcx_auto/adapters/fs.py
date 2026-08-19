@@ -9,12 +9,27 @@ A real index run folder looks like this:
     QC_Cc/  QC_Ct/  QC_Spice/      reports Arcx assembles, not cases
     submit_bjob_cmd_file_1.log     logs, named only by sequence number
     cmd_folder/cmd_file_1          the submitted script, containing `cd <dir>`
+    zmwu.cfg                       Arcx's own snapshot of the arcx.cfg it ran
 
 Two conventions drive the implementation:
 
-  1. **Case ids are cell names with no shared pattern.** Case run dirs are
-     therefore identified by exclusion (not QC_*, not cmd_folder, not hidden)
-     rather than by an include pattern.
+  1. **The case roster comes from markers and cmd_files, never from the
+     directory listing.** Every cmd_folder/cmd_file_N is one submitted case,
+     and every .queue/.run/.complete marker names one. Case ids are cell names
+     with no shared pattern, so a directory cannot be recognised as a case by
+     its name -- it can only be matched against a roster built elsewhere.
+
+     Deciding by exclusion instead ("not QC_*, not cmd_folder, not hidden, so
+     it must be a case") is what turned a real five case run into seven: two
+     directories nobody had told the scanner about became two UNKNOWN cases.
+     Any list of things-that-are-not-cases is a list of the ones we happened to
+     think of. Directories that match no case are now reported as
+     ``unexpected_dirs`` and counted as nothing.
+
+     A third source, the GDS files in the index path, is deliberately *not*
+     used for identity: the run uses top cell names, which need not match the
+     GDS filenames. It is only good for a count, so it is a cross-check that
+     warns (QA's INDEX_CASE_COUNT_MISMATCH), never a source of truth.
 
   2. **Log filenames say nothing about their case.** submit_bjob_cmd_file_1.log
      pairs by number with cmd_folder/cmd_file_1, and that script's `cd <path>`
@@ -49,9 +64,7 @@ class FsAdapter:
         self._log_re = re.compile(self.layout.log_regex)
         self._report_re = re.compile(self.layout.report_dir_regex)
         self._cd_re = re.compile(self.layout.cmd_cd_regex)
-        self._non_case_res = [
-            re.compile(pattern) for pattern in self.layout.non_case_dir_regexes
-        ]
+        self._cmd_file_re = re.compile(self.layout.cmd_file_regex)
         # cmd_file path -> resolved execution path. Read once; scripts do not
         # change after submission.
         self._cmd_cache: Dict[str, Optional[str]] = {}
@@ -68,12 +81,16 @@ class FsAdapter:
     ) -> IndexRunObservation:
         """Scan one index run folder into an observation.
 
-        Cases are the **union** of markers, case run dirs, and cmd_file-resolved
-        logs. Each missing piece signals a different failure, so looking at only
-        one of them loses information:
-          - dir but no marker  -> the case exists but was never submitted
-          - marker but no dir  -> the directory was deleted, or not yet created
-          - log but no marker  -> the marker write failed
+        The case roster is the union of two sources that **name** cases:
+        cmd_folder/cmd_file_N (one per submitted case) and the .queue/.run/
+        .complete markers. Directories are matched against that roster, never
+        used to extend it.
+
+        Each missing piece still signals a different failure, so both sources
+        are kept rather than one preferred:
+          - cmd_file but no marker -> submitted, marker never written
+          - marker but no dir      -> the directory was deleted, or not created
+          - dir but no roster entry -> not a case at all; unexpected_dirs
         """
         import time
 
@@ -101,9 +118,10 @@ class FsAdapter:
 
         markers: Dict[str, Set[MarkerKind]] = {}
         unknown_markers: List[Tuple[str, str]] = []
-        case_dirs: Dict[str, str] = {}
+        dirs_by_name: Dict[str, str] = {}
         logs_by_num: Dict[str, str] = {}
         report_dirs: List[str] = []
+        cfg_files: List[str] = []
         unmatched: List[str] = []
 
         for entry in entries:
@@ -121,7 +139,7 @@ class FsAdapter:
 
             # Shaped like a marker but not one of the known three. Confirmed
             # abnormal, so it is recorded separately and surfaced in the UI.
-            # It still proves the case exists, so its id joins the case list.
+            # It still names a case, so its id joins the roster.
             any_marker = self._marker_any_re.match(name)
             if any_marker:
                 unknown_markers.append((name, any_marker.group("case")))
@@ -135,9 +153,10 @@ class FsAdapter:
             if is_dir:
                 if self._report_re.match(name):
                     report_dirs.append(name)
-                elif self._is_case_dir_name(name):
-                    case_dirs[name] = entry.path
-                # anything else (cmd_folder, hidden dirs) is a known non-case
+                elif name != self.layout.cmd_dir_name and not name.startswith("."):
+                    # Held, not classified. Whether it is a case run dir is
+                    # decided by the roster below, not by its name.
+                    dirs_by_name[name] = entry.path
                 continue
 
             log_match = self._log_re.match(name)
@@ -145,16 +164,24 @@ class FsAdapter:
                 logs_by_num[log_match.group("num")] = entry.path
                 continue
 
+            if name.endswith(".cfg"):
+                # Arcx's snapshot of the cfg it ran, named after the user
+                # (zmwu.cfg). We read it in discover_arcx_cfg, so calling it
+                # unclassified would be reporting our own input as an anomaly.
+                cfg_files.append(name)
+                continue
+
             unmatched.append(name)
 
-        logs_by_case, cmd_by_case, exec_by_case, unresolved = self._resolve_logs(
-            run_folder, logs_by_num
-        )
+        # -- the roster: every cmd_file is one submitted case ------------
+        cmd_by_case, exec_by_case, unreadable_cmds = self._scan_cmd_folder(
+            run_folder)
+        logs_by_case, unresolved = self._resolve_logs(
+            run_folder, logs_by_num, exec_by_case)
 
         all_case_ids = sorted(
             set(markers)
-            | set(case_dirs)
-            | set(logs_by_case)
+            | set(cmd_by_case)
             | {case_id for _name, case_id in unknown_markers},
             key=natural_key,
         )
@@ -163,7 +190,8 @@ class FsAdapter:
         for case_id in all_case_ids:
             log_path = logs_by_case.get(case_id)
             size, mtime = self.stat_file(log_path) if log_path else (None, None)
-            case_dir = case_dirs.get(case_id)
+            case_dir = self._case_dir_for(
+                case_id, exec_by_case.get(case_id), dirs_by_name, run_folder)
             cases[case_id] = CaseObservation(
                 case_id=case_id,
                 markers=frozenset(markers.get(case_id, set())),
@@ -176,41 +204,93 @@ class FsAdapter:
                 exec_path=exec_by_case.get(case_id),
             )
 
+        unexpected = sorted(
+            name for name in dirs_by_name if name not in cases)
+
         return IndexRunObservation(
             index_key=key,
             run_folder=run_folder,
             observed_at=now,
             cases=cases,
             report_dirs=tuple(sorted(report_dirs)),
+            cfg_files=tuple(sorted(cfg_files)),
+            unexpected_dirs=tuple(unexpected),
             unmatched_entries=tuple(sorted(unmatched)),
-            unresolved_logs=tuple(sorted(unresolved)),
+            unresolved_logs=tuple(sorted(unresolved + unreadable_cmds)),
             unknown_markers=tuple(sorted(unknown_markers)),
         )
 
-    def _is_case_dir_name(self, name: str) -> bool:
-        """Exclusion rule: not a report, not cmd_folder, not hidden -> a case.
+    def _case_dir_for(
+        self,
+        case_id: str,
+        exec_path: Optional[str],
+        dirs_by_name: Dict[str, str],
+        run_folder: str,
+    ) -> Optional[str]:
+        """Where this case's run dir is, if it exists yet.
 
-        Exclusion rather than an include pattern because case ids are cell names
-        (NDIO_1, PDIO_1, NTN_1) with nothing in common. The cost is that a new
-        kind of non-case directory would be misread, which is why the exclusion
-        list is configurable.
+        The cmd_file's own `cd` path is preferred: it is what the job actually
+        used, so it stays right even when the directory is not a direct child
+        of the run folder. Falling back to a same-named directory covers a case
+        known only from its marker.
         """
-        return not any(pattern.match(name) for pattern in self._non_case_res)
+        if exec_path and os.path.isdir(exec_path):
+            return exec_path
+        return dirs_by_name.get(case_id)
+
+    def _scan_cmd_folder(
+        self, run_folder: str
+    ) -> Tuple[Dict[str, str], Dict[str, str], List[str]]:
+        """Read every cmd_folder/cmd_file_N: one submitted case each.
+
+        This is the roster. It is read directly rather than reached through the
+        logs, because a case that has been submitted but has not written a log
+        yet still exists and still has to be shown.
+
+        Returns (cmd_by_case, exec_by_case, unreadable).
+        """
+        cmd_by_case: Dict[str, str] = {}
+        exec_by_case: Dict[str, str] = {}
+        unreadable: List[str] = []
+
+        cmd_dir = os.path.join(run_folder, self.layout.cmd_dir_name)
+        try:
+            entries = list(os.scandir(cmd_dir))
+        except OSError:
+            return (cmd_by_case, exec_by_case, unreadable)
+
+        for entry in entries:
+            if not self._cmd_file_re.match(entry.name):
+                continue
+            exec_path = self.read_cmd_exec_path(entry.path, run_folder)
+            case_id = os.path.basename(exec_path.rstrip("/")) if exec_path else ""
+            if not case_id:
+                # A submitted case we cannot name is a case we cannot monitor.
+                unreadable.append("%s/%s" % (self.layout.cmd_dir_name, entry.name))
+                continue
+            cmd_by_case[case_id] = entry.path
+            exec_by_case[case_id] = exec_path
+        return (cmd_by_case, exec_by_case, unreadable)
 
     # ------------------------------------------------------------------
     # log -> cmd_file -> case
     # ------------------------------------------------------------------
 
     def _resolve_logs(
-        self, run_folder: str, logs_by_num: Dict[str, str]
-    ) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str], List[str]]:
+        self,
+        run_folder: str,
+        logs_by_num: Dict[str, str],
+        exec_by_case: Dict[str, str],
+    ) -> Tuple[Dict[str, str], List[str]]:
         """Pair each log with its cmd_file by number and resolve its case.
 
-        Returns (logs_by_case, cmd_by_case, exec_by_case, unresolved_logs).
+        The cmd_files have already been read into the roster, so this only
+        pairs numbers; ``exec_by_case`` is passed in to confirm the case the
+        number points at is one we know about.
+
+        Returns (logs_by_case, unresolved_logs).
         """
         logs_by_case: Dict[str, str] = {}
-        cmd_by_case: Dict[str, str] = {}
-        exec_by_case: Dict[str, str] = {}
         unresolved: List[str] = []
 
         cmd_dir = os.path.join(run_folder, self.layout.cmd_dir_name)
@@ -220,20 +300,14 @@ class FsAdapter:
             cmd_path = os.path.join(cmd_dir, cmd_name)
 
             exec_path = self.read_cmd_exec_path(cmd_path, run_folder)
-            if not exec_path:
-                unresolved.append(os.path.basename(log_path))
-                continue
-
-            case_id = os.path.basename(exec_path.rstrip("/"))
-            if not case_id:
+            case_id = os.path.basename(exec_path.rstrip("/")) if exec_path else ""
+            if not case_id or case_id not in exec_by_case:
                 unresolved.append(os.path.basename(log_path))
                 continue
 
             logs_by_case[case_id] = log_path
-            cmd_by_case[case_id] = cmd_path
-            exec_by_case[case_id] = exec_path
 
-        return logs_by_case, cmd_by_case, exec_by_case, unresolved
+        return logs_by_case, unresolved
 
     def read_cmd_exec_path(
         self, cmd_path: str, run_folder: Optional[str] = None

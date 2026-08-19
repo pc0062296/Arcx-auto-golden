@@ -946,11 +946,33 @@ cmd_folder/cmd_file_1          the submitted script, containing `cd <path>`
 
 **Two conventions drive the implementation.**
 
-**1. Case ids are cell names with no shared pattern.** `NDIO_1`, `PDIO_1` and
-`NTN_1` have nothing in common, so case run dirs are identified by **exclusion**
-(not `QC_*`, not `cmd_folder`, not hidden) rather than by an include pattern. The
-cost is that a new kind of non-case directory would be misread, so the exclusion
-list is configurable (`layout.non_case_dir_regexes`).
+**1. The case roster comes from markers and cmd_files, never from the directory
+listing.** There are three things that could in principle say how many cases a
+run has, and only two of them can be trusted:
+
+| Source | Names cases? | Counts cases? |
+|---|---|---|
+| `cmd_folder/cmd_file_N` | **yes** -- one file, one submitted case | yes |
+| `.queue` / `.run` / `.complete` markers | **yes** -- the id is in the filename | yes |
+| GDS files in the index path | **no** -- the run uses top cell names, which need not match GDS filenames | roughly |
+
+So the first two build the roster and the third is only ever a cross-check
+(`INDEX_CASE_COUNT_MISMATCH`, WARN, and only when a dir_map was supplied).
+
+Directories are then **matched against** that roster, never used to extend it.
+`NDIO_1`, `PDIO_1` and `NTN_1` have nothing in common, so a directory cannot be
+recognised as a case by its name at all.
+
+This used to work by exclusion -- "not `QC_*`, not `cmd_folder`, not hidden, so
+it must be a case" -- and that is a list of the non-case directories somebody
+thought of. On a real run folder the ones nobody thought of (`svdb`,
+`work_calQCAP`) became two phantom UNKNOWN cases, turning a five case run into
+a seven case one. Directories matching no roster entry are now reported as
+`unexpected_dirs` and counted as nothing.
+
+Reading the cmd_files **directly**, rather than reaching them through the logs,
+is what lets a case submitted seconds ago -- no marker, no log yet -- still
+appear. That is exactly when it is most worth seeing.
 
 **2. Log filenames say nothing about their case.**
 
@@ -976,6 +998,18 @@ all-clear while partly blind.
 **Markers outside the known three** (`.queue`, `.run`, `.complete`) are abnormal.
 They are reported separately as `unknown_markers`, and their case id still joins
 the case list -- the case exists regardless of a marker kind we do not recognise.
+
+**Arcx keeps its own cfg snapshot in the run folder**, under a name derived
+from the user (`zmwu.cfg`). The name cannot be hard coded, so every `*.cfg` in
+the folder is parsed and the one with at least one `BEGIN_SETTINGS` block wins;
+`special.cfg` is plain `key = value` and fails that test without needing to be
+named as an exception.
+
+This is what makes `status --run-folder` work with no arguments. Without it
+every case raised `CFG_EXPECTATION_UNAVAILABLE` -- UNKNOWN, which blocks
+success -- so five genuinely complete cases reported as FAILED, with the cfg
+sitting in the folder the whole time. An explicitly supplied cfg still wins:
+that is a deliberate choice and outranks whatever happens to be lying around.
 
 Report directories: `QC_Cc` and `QC_Ct` are always present; others may not be.
 Each holds `Report_QC_<X>` and exactly one `Report_QC_<X>_Summary_*`, so more

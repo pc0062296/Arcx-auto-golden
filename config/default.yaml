@@ -36,11 +36,11 @@ layout:
   # QC_Cc/ QC_Ct/ QC_Spice/ -- reports Arcx assembles, not case dirs
   report_dir_regex: '^QC_.+$'
 
-  # Case run dirs are named after the cell, so there is no shared pattern.
-  # They are identified by exclusion: any directory in the run folder that is
-  # not one of these. A rerun deletes exactly those dirs. If a new kind of
-  # non-case directory appears, add it here; no code change is needed.
-  non_case_dir_regexes: ['^QC_.+$', '^cmd_folder$', '^\..*$']
+  # Every cmd_file in cmd_folder is one submitted case. Enumerating them
+  # directly is what makes the case roster independent of the directory
+  # listing: a directory matching no marker and no cmd_file is reported as
+  # "dir is not a case", never counted as one.
+  cmd_file_regex: '^cmd_file_(?P<num>\d+)$'
 
   gds_globs: ["*.gds", "*.gds.gz", "*.GDS", "*.gds.bz2"]
   special_cfg_name: "special.cfg"

@@ -228,6 +228,11 @@ def _render_scan_issues(observations: Sequence["IndexRunObservation"]) -> str:
                 obs.index_key, "log unmapped to a case", name,
                 "its cmd_file is missing or unparseable",
             ])
+        for name in obs.unexpected_dirs:
+            rows.append([
+                obs.index_key, "dir is not a case", name,
+                "no marker and no cmd_file names it; not counted as a case",
+            ])
         for name in obs.unmatched_entries:
             rows.append([obs.index_key, "unclassified file", name,
                          "matches no known convention"])

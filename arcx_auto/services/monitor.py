@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from arcx_auto.adapters.arcx_cfg import ArcxConfig
+from arcx_auto.adapters.arcx_cfg import ArcxConfig, discover_arcx_cfg
 from arcx_auto.adapters.fs import FsAdapter
 from arcx_auto.adapters.lsf import LsfAdapter
 from arcx_auto.config.settings import Settings
@@ -92,6 +92,7 @@ class MonitorService:
         arcx_config: Optional[ArcxConfig] = None,
         use_lsf: bool = True,
         now: Optional[float] = None,
+        gds_counts: Optional[Dict[str, int]] = None,
     ) -> ScanResult:
         now = now if now is not None else time.time()
 
@@ -123,6 +124,7 @@ class MonitorService:
         events: List[StateEvent] = []
         updated: Dict[str, IndexRunSnapshot] = dict(self.previous)
         attempt_cache: Dict[str, int] = {}
+        cfg_cache: Dict[str, Optional[ArcxConfig]] = {}
 
         for observation in observations:
             key = observation.run_folder
@@ -133,8 +135,10 @@ class MonitorService:
             if self.qa_runner is not None:
                 attempt = self._attempt_for(key, attempt_cache)
                 report = self.qa_runner.run_index(
-                    snapshot, observation, arcx_config, now=now,
+                    snapshot, observation,
+                    self._cfg_for(key, arcx_config, cfg_cache), now=now,
                     attempts={cid: attempt for cid in snapshot.cases},
+                    gds_count=(gds_counts or {}).get(snapshot.index_key),
                 )
                 reports.append(report)
                 snapshot = _apply_qa(snapshot, report)
@@ -154,6 +158,29 @@ class MonitorService:
             lsf_job_count=len(lsf_jobs),
         )
 
+
+    @staticmethod
+    def _cfg_for(
+        run_folder: str,
+        given: Optional[ArcxConfig],
+        cache: Dict[str, Optional[ArcxConfig]],
+    ) -> Optional[ArcxConfig]:
+        """Which arcx.cfg describes what this run folder should contain.
+
+        An explicitly supplied cfg always wins -- from --arcx-cfg, or from the
+        wave snapshot, both of which the caller chose deliberately. Otherwise
+        Arcx's own snapshot inside the run folder is used, which is what makes
+        `status --run-folder` work on its own.
+
+        Resolved per folder rather than once per scan: a wave holds several
+        index run folders, and each carries its own snapshot of the cfg that
+        actually ran there.
+        """
+        if given is not None:
+            return given
+        if run_folder not in cache:
+            cache[run_folder] = discover_arcx_cfg(run_folder)
+        return cache[run_folder]
 
     @staticmethod
     def _attempt_for(run_folder: str, cache: Dict[str, int]) -> int:

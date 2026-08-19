@@ -382,6 +382,7 @@ class IndexContext(_BaseContext):
         config: Optional[ArcxConfig],
         cache: _FsCache,
         now: float,
+        gds_count: Optional[int] = None,
     ) -> None:
         super().__init__(snapshot.run_folder, settings, cache, now)
         self.snapshot = snapshot
@@ -389,6 +390,10 @@ class IndexContext(_BaseContext):
         self.index_key = snapshot.index_key
         self.case_id = None
         self.arcx_config = config
+        # How many GDS files the index path holds, when a dir_map was supplied.
+        # A cross-check only: the run uses top cell names, which need not match
+        # the GDS filenames, so this can confirm a count but never a name.
+        self.gds_count = gds_count
 
     @property
     def cases(self) -> Dict[str, CaseSnapshot]:

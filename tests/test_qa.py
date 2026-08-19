@@ -598,3 +598,87 @@ class ReportSummaryCountTest(unittest.TestCase):
     def test_two_summaries_flagged(self):
         ids = self._run(extra_summaries=("Report_QC_Cc_Summary_OLD",))
         self.assertIn("REPORT_FILE_MISSING", ids)
+
+
+class StatusOnARealRunFolderTest(unittest.TestCase):
+    """End to end on the shape of a real finished run folder.
+
+    Reported symptom: five complete cases displayed as seven -- five FAILED and
+    two UNKNOWN. Everything below is one assertion about that one run.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.settings = Settings()
+        self.names = ["NDIO_1", "PDIO_1", "NTN_1", "PTN_1", "CAP_MIM"]
+        self.folder = make_index_run_folder(
+            self.tmp.name, "1000",
+            [CaseSpec(n, "complete", artifacts="full") for n in self.names])
+        for name in ("svdb", "work_calQCAP"):
+            os.makedirs(os.path.join(self.folder, name), exist_ok=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _states(self, **kwargs):
+        from arcx_auto.services.monitor import MonitorService
+
+        result = MonitorService(self.settings).scan(
+            run_folders=[self.folder], use_lsf=False, **kwargs)
+        snapshot = result.snapshots[0]
+        return {cid: case.state for cid, case in snapshot.cases.items()}
+
+    def test_five_cases_all_done_with_no_cfg_argument(self):
+        """The whole reported bug, in one assertion.
+
+        Arcx's own cfg snapshot sits in the run folder, so QA knows what to
+        expect without being told, and the phantom directories never become
+        cases.
+        """
+        make_arcx_cfg(os.path.join(self.folder, "zmwu.cfg"))
+        states = self._states()
+        self.assertEqual(sorted(states), sorted(self.names))
+        self.assertEqual(set(states.values()), {CaseState.DONE})
+
+    def test_without_any_cfg_it_says_it_does_not_know(self):
+        """The counterpart: with no cfg anywhere, the checks must not silently
+        pass. UNKNOWN blocks success, so the cases read FAILED -- correct, and
+        the reason names the missing cfg rather than inventing a defect.
+        """
+        states = self._states()
+        self.assertEqual(sorted(states), sorted(self.names))
+        self.assertEqual(set(states.values()), {CaseState.FAILED})
+
+    def test_an_explicit_cfg_still_wins(self):
+        """A cfg passed on the command line is a deliberate choice and must
+        override whatever happens to be lying in the folder.
+        """
+        outside = make_arcx_cfg(os.path.join(self.tmp.name, "explicit.cfg"))
+        make_arcx_cfg(os.path.join(self.folder, "zmwu.cfg"))
+        states = self._states(arcx_config=parse_arcx_cfg(outside))
+        self.assertEqual(set(states.values()), {CaseState.DONE})
+
+    def test_the_gds_cross_check_is_silent_without_a_dir_map(self):
+        from arcx_auto.services.monitor import MonitorService
+
+        make_arcx_cfg(os.path.join(self.folder, "zmwu.cfg"))
+        result = MonitorService(self.settings).scan(
+            run_folders=[self.folder], use_lsf=False)
+        ids = {i.id for i in result.all_issues()}
+        self.assertNotIn("INDEX_CASE_COUNT_MISMATCH", ids)
+
+    def test_the_gds_cross_check_warns_when_the_totals_disagree(self):
+        from arcx_auto.domain.enums import Severity as Sev
+        from arcx_auto.services.monitor import MonitorService
+
+        make_arcx_cfg(os.path.join(self.folder, "zmwu.cfg"))
+        result = MonitorService(self.settings).scan(
+            run_folders=[self.folder], use_lsf=False, gds_counts={"1000": 7})
+        hits = [i for i in result.all_issues()
+                if i.id == "INDEX_CASE_COUNT_MISMATCH"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].severity, Sev.WARN)
+        # A warning only: the run still reads as five successful cases, because
+        # GDS filenames and top cell names need not correspond.
+        states = self._states(gds_counts={"1000": 7})
+        self.assertEqual(set(states.values()), {CaseState.DONE})

@@ -136,3 +136,36 @@ def index_incomplete(index: IndexContext) -> Optional[Issue]:
         "%d of %d cases are not finished" % (len(pending), len(index.cases)),
         evidence={"pending": sorted(pending)[:50], "total": len(index.cases)},
     )
+
+
+@qa_check(id="INDEX_CASE_COUNT_MISMATCH", title="case count differs from the GDS count",
+          severity=Severity.WARN, scope=INDEX, stage=POST)
+def case_count_mismatch(index: IndexContext) -> Optional[Issue]:
+    """The run has a different number of cases than the index path has GDS.
+
+    A cross-check, never a source of truth. The case roster comes from the
+    markers and the cmd_files, which name real cases; the GDS files only say
+    how many were expected, and even that loosely -- the run works on top cell
+    names, which need not match the GDS filenames at all. So this can disagree
+    for entirely legitimate reasons.
+
+    It still earns its place: "we submitted 25 and the folder knows about 18"
+    is exactly the shape of a silent partial submission, and nothing else in
+    the system would notice.
+
+    Only runs when a dir_map was supplied, and stays quiet otherwise rather
+    than reporting UNKNOWN -- `status --run-folder` has no dir_map by design,
+    and that is not a failure to check anything.
+    """
+    expected = index.gds_count
+    if expected is None or expected <= 0:
+        return None
+    actual = len(index.cases)
+    if actual == expected:
+        return None
+    return index.warn(
+        "the run folder has %d case(s) but the index path holds %d GDS file(s)"
+        % (actual, expected),
+        evidence={"cases": actual, "gds_files": expected,
+                  "case_ids": sorted(index.cases)},
+    )

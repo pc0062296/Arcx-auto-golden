@@ -116,6 +116,7 @@ def _index_payload(
                 {"file": n, "case_id": c} for n, c in observation.unknown_markers
             ],
             "unresolved_logs": list(observation.unresolved_logs),
+            "unexpected_dirs": list(observation.unexpected_dirs),
             "unmatched_entries": list(observation.unmatched_entries),
         }
 

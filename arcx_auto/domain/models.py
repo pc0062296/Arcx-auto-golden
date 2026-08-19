@@ -139,6 +139,14 @@ class IndexRunObservation:
     observed_at: float
     cases: Dict[str, CaseObservation] = field(default_factory=dict)
     report_dirs: Tuple[str, ...] = ()     # QC_Cc / QC_Ct / QC_Spice ...
+    # Directories that are neither a case run dir, a QC_* report, nor
+    # cmd_folder. They are reported, never counted as cases: guessing that an
+    # unrecognised directory must be a case is what turned a five case run into
+    # a seven case one.
+    unexpected_dirs: Tuple[str, ...] = ()
+    # Arcx's own snapshot of the cfg it ran, kept in the run folder under a
+    # name derived from the user (zmwu.cfg). Recognised rather than reported.
+    cfg_files: Tuple[str, ...] = ()
     unmatched_entries: Tuple[str, ...] = ()  # unclassifiable entries
     # A log whose owning case could not be resolved from its cmd_file.
     # That means a case we cannot monitor at all, so it must surface rather

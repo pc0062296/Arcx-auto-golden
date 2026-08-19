@@ -182,20 +182,20 @@ class DiscoveryUnionTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_case_discovered_from_dir_alone(self):
-        """A run dir with no marker and no log.
+        """A directory alone does not make a case.
 
-        It means the case exists but was never submitted, the failure the
-        current process misses most easily.
+        Case ids are cell names with no shared pattern, so a directory can only
+        be recognised by matching a roster built from markers and cmd_files.
+        Treating any unrecognised directory as a case is what turned a real
+        five case run into seven. It is reported, not counted.
         """
         folder = make_index_run_folder(self.tmp.name, "1001", [
             CaseSpec("NDIO_1", "running"),
             CaseSpec("RES_HI", "orphan_dir"),
         ])
         obs = self.fs.scan_index_run_folder(folder, "1001")
-        self.assertIn("RES_HI", obs.cases)
-        self.assertEqual(obs.cases["RES_HI"].markers, frozenset())
-        self.assertTrue(obs.cases["RES_HI"].case_dir_exists)
-        self.assertIsNone(obs.cases["RES_HI"].log_path)
+        self.assertNotIn("RES_HI", obs.cases)
+        self.assertIn("RES_HI", obs.unexpected_dirs)
 
     def test_case_discovered_from_marker_alone(self):
         folder = make_index_run_folder(self.tmp.name, "1001", [
@@ -289,18 +289,25 @@ class ConfigurableLayoutTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_extra_non_case_dir_can_be_excluded(self):
-        layout = LayoutSettings()
-        layout.non_case_dir_regexes = layout.non_case_dir_regexes + [r"^scratch$"]
+    def test_an_unknown_dir_needs_no_configuration_to_be_excluded(self):
+        """This used to need an exclusion pattern per surprising directory.
+
+        An exclusion list only contains the cases somebody thought of, and the
+        ones nobody thought of became phantom cases. Now the roster decides, so
+        a directory nobody has ever heard of costs nothing.
+        """
         folder = make_index_run_folder(self.tmp.name, "1000",
                                        [CaseSpec("NDIO_1")])
-        os.makedirs(os.path.join(folder, "scratch"))
+        for name in ("scratch", "QC_Cc", "svdb", "work_calQCAP"):
+            os.makedirs(os.path.join(folder, name), exist_ok=True)
 
-        default_obs = FsAdapter().scan_index_run_folder(folder, "1000")
-        self.assertIn("scratch", default_obs.cases)
-
-        tuned_obs = FsAdapter(layout).scan_index_run_folder(folder, "1000")
-        self.assertNotIn("scratch", tuned_obs.cases)
+        obs = FsAdapter().scan_index_run_folder(folder, "1000")
+        self.assertEqual(sorted(obs.cases), ["NDIO_1"])
+        for name in ("scratch", "svdb", "work_calQCAP"):
+            self.assertIn(name, obs.unexpected_dirs)
+        # QC_* is a report directory, which we do know about.
+        self.assertIn("QC_Cc", obs.report_dirs)
+        self.assertNotIn("QC_Cc", obs.unexpected_dirs)
 
 
 class GdsCountTest(unittest.TestCase):
@@ -337,3 +344,88 @@ class NaturalKeyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealRunFolderTest(unittest.TestCase):
+    """The scenario reported from a real run folder.
+
+    Five genuinely complete cases were shown as seven: five FAILED and two
+    UNKNOWN. Two separate defects combined to produce that, and each is pinned
+    here separately so a fix to one cannot quietly undo the other.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cases = ["NDIO_1", "PDIO_1", "NTN_1", "PTN_1", "CAP_MIM"]
+        self.folder = make_index_run_folder(
+            self.tmp.name, "1000",
+            [CaseSpec(n, "complete", artifacts="full") for n in self.cases])
+        # Directories Arcx leaves behind that nobody told the scanner about.
+        for name in ("svdb", "work_calQCAP"):
+            os.makedirs(os.path.join(self.folder, name), exist_ok=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_five_cases_not_seven(self):
+        obs = FsAdapter().scan_index_run_folder(self.folder, "1000")
+        self.assertEqual(sorted(obs.cases), sorted(self.cases))
+        self.assertEqual(obs.case_count, 5)
+
+    def test_the_two_extra_dirs_are_reported_not_counted(self):
+        """Skipped, but never silently: they show in the anomalies table."""
+        obs = FsAdapter().scan_index_run_folder(self.folder, "1000")
+        self.assertEqual(sorted(obs.unexpected_dirs), ["svdb", "work_calQCAP"])
+
+    def test_the_cfg_snapshot_is_not_an_anomaly(self):
+        """zmwu.cfg is an input we read, so reporting it as unclassified would
+        be the tool flagging its own source of truth.
+        """
+        open(os.path.join(self.folder, "zmwu.cfg"), "w").close()
+        obs = FsAdapter().scan_index_run_folder(self.folder, "1000")
+        self.assertIn("zmwu.cfg", obs.cfg_files)
+        self.assertNotIn("zmwu.cfg", obs.unmatched_entries)
+
+
+class CmdFileRosterTest(unittest.TestCase):
+    """cmd_folder/cmd_file_N is the roster: one file, one submitted case."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_cmd(self, folder, num, target):
+        cmd_dir = os.path.join(folder, "cmd_folder")
+        os.makedirs(cmd_dir, exist_ok=True)
+        with open(os.path.join(cmd_dir, "cmd_file_%d" % num), "w",
+                  encoding="utf-8") as handle:
+            handle.write("#!/bin/csh -f\nsource setup\ncd %s\nArcx ...\n" % target)
+
+    def test_a_submitted_case_with_no_marker_and_no_log_still_appears(self):
+        """The cmd_file is read directly rather than reached through the log.
+
+        A case submitted seconds ago has neither a marker nor a log yet. Going
+        via the logs would make it invisible for exactly as long as it is most
+        worth seeing.
+        """
+        folder = make_index_run_folder(self.tmp.name, "1002",
+                                       [CaseSpec("NDIO_1", "running")])
+        self._write_cmd(folder, 9, os.path.join(folder, "FRESH_1"))
+        obs = FsAdapter().scan_index_run_folder(folder, "1002")
+        self.assertIn("FRESH_1", obs.cases)
+        self.assertEqual(obs.cases["FRESH_1"].markers, frozenset())
+        self.assertIsNone(obs.cases["FRESH_1"].log_path)
+        self.assertIsNotNone(obs.cases["FRESH_1"].cmd_file)
+
+    def test_an_unreadable_cmd_file_is_surfaced(self):
+        """A submitted case we cannot name is a case we cannot monitor."""
+        folder = make_index_run_folder(self.tmp.name, "1003",
+                                       [CaseSpec("NDIO_1", "running")])
+        cmd_dir = os.path.join(folder, "cmd_folder")
+        with open(os.path.join(cmd_dir, "cmd_file_8"), "w",
+                  encoding="utf-8") as handle:
+            handle.write("#!/bin/csh -f\n# no cd line at all\n")
+        obs = FsAdapter().scan_index_run_folder(folder, "1003")
+        self.assertTrue(any("cmd_file_8" in name for name in obs.unresolved_logs))

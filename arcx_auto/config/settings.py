@@ -46,18 +46,15 @@ class LayoutSettings:
     log_regex: str = r"^submit_bjob_cmd_file_(?P<num>\d+)\.log$"
     cmd_dir_name: str = "cmd_folder"
     cmd_file_template: str = "cmd_file_{num}"
+    # Every cmd_file in cmd_folder is one submitted case. This enumerates them
+    # directly, which is what makes the case roster independent of the
+    # directory listing.
+    cmd_file_regex: str = r"^cmd_file_(?P<num>\d+)$"
     cmd_cd_regex: str = r"^\s*cd\s+[\"']?(?P<path>[^\s\"';#]+)"
     cmd_file_head_bytes: int = 16384
 
     # QC_Cc/ QC_Ct/ QC_Spice/ -- reports Arcx assembles, not case dirs
     report_dir_regex: str = r"^QC_.+$"
-
-    # Case run dirs are named after the cell, so there is no shared pattern to
-    # match. They are identified by exclusion instead: any directory in the run
-    # folder that is not one of these. (A rerun deletes exactly these dirs.)
-    non_case_dir_regexes: List[str] = field(
-        default_factory=lambda: [r"^QC_.+$", r"^cmd_folder$", r"^\..*$"]
-    )
 
     # Index run folders Arcx creates under a wave directory
     index_run_folder_regex: str = r"^(?P<index>[^./].*)$"

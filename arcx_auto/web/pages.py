@@ -199,6 +199,9 @@ def _anomaly_cell(index: Dict[str, Any]) -> str:
     if anomalies.get("unresolved_logs"):
         parts.append("<span class='warn'>orphan logs %d</span>"
                      % len(anomalies["unresolved_logs"]))
+    if anomalies.get("unexpected_dirs"):
+        parts.append("<span class='warn'>non-case dirs %d</span>"
+                     % len(anomalies["unexpected_dirs"]))
     if anomalies.get("unmatched_entries"):
         parts.append("<span class='muted'>unclassified %d</span>"
                      % len(anomalies["unmatched_entries"]))
@@ -272,6 +275,9 @@ def _anomaly_section(index: Dict[str, Any]) -> str:
     for name in anomalies.get("unresolved_logs") or []:
         rows.append(["<span class='warn'>log unmapped</span>", esc(name),
                      "its cmd_file is missing or unparseable"])
+    for name in anomalies.get("unexpected_dirs") or []:
+        rows.append(["<span class='warn'>dir is not a case</span>", esc(name),
+                     "no marker and no cmd_file names it; not counted"])
     for name in anomalies.get("unmatched_entries") or []:
         rows.append(["<span class='muted'>unclassified</span>", esc(name),
                      "matches no known convention"])

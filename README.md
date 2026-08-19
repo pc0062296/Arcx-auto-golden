@@ -141,6 +141,7 @@ manufacture false alarms. Exits 1 on a FATAL, so it chains into a submit script.
 |---|---|
 | `status --run-folder PATH...` | Scan the given index run folders |
 | `status --wave-dir PATH` | Scan every index run folder under a wave dir |
+| `status ... --dir-map FILE` | Also cross-check the case count against the index path's GDS count (warning only) |
 | `plan --dir-map FILE --index ...` | Produce a wave plan (**never submits**) |
 | `submit --dir-map X --arcx-cfg Y` | Check, create wave dirs, submit (**dry run by default**) |
 | `rerun --wave-dir PATH` | Stop, drain, back up, clean and resubmit (**dry run by default**) |
@@ -190,10 +191,23 @@ NDIO_1/  PDIO_1/  NTN_1/                      case run dirs (a rerun deletes the
 QC_Cc/  QC_Ct/  QC_Spice/                     reports Arcx assembles, not cases
 submit_bjob_cmd_file_1.log                    logs, named only by number
 cmd_folder/cmd_file_1                         the script, with `cd <case run dir>`
+zmwu.cfg                                      Arcx's snapshot of the cfg it ran
 ```
 
-**1. Case ids are cell names with no shared pattern**, so case run dirs are
-identified by exclusion; the exclusion list is `layout.non_case_dir_regexes`.
+**1. The case roster comes from markers and cmd_files, never from the directory
+listing.** One `cmd_file_N` is one submitted case, and a marker filename names
+one. Case ids are cell names with nothing in common, so a directory can only be
+recognised by matching that roster -- it can never extend it.
+
+Deciding by exclusion instead ("not `QC_*`, not `cmd_folder`, so it must be a
+case") only ever lists the non-case directories somebody thought of; the ones
+nobody thought of become phantom cases. Directories matching no roster entry are
+reported under "scan anomalies" as `dir is not a case`, and counted as nothing.
+
+The GDS files in the index path are a third possible source and are deliberately
+**not** used for identity -- the run works on top cell names, which need not
+match GDS filenames. Pass `--dir-map` and they become a count cross-check that
+warns (`INDEX_CASE_COUNT_MISMATCH`), nothing more.
 
 **2. Log filenames say nothing about their case.**
 `submit_bjob_cmd_file_1.log` pairs by number with `cmd_folder/cmd_file_1`, and
@@ -204,6 +218,11 @@ shortcut that guesses from the number.
 A log whose case cannot be resolved lands in `unresolved_logs` and is shown
 under "scan anomalies": it means a case that cannot be monitored, which must
 never be dropped silently.
+
+**3. Arcx leaves its own cfg snapshot in the run folder**, named after the user
+(`zmwu.cfg`). Every `*.cfg` there is parsed and the one with at least one
+`BEGIN_SETTINGS` block is used, so `status --run-folder` needs no `--arcx-cfg`.
+An explicit `--arcx-cfg` still wins.
 
 ### QA: expected artifacts are derived from arcx.cfg
 

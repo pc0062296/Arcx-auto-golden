@@ -190,3 +190,63 @@ class RealFormatTest(unittest.TestCase):
             handle.write("0 g:QCA = Yes\n1 BEGIN_SETTING : x\n"
                          "1 QC_FLOW = calQCAP\nEND_SETTINGS\n")
         self.assertEqual(parse_arcx_cfg(path).globals, {})
+
+
+class DiscoverCfgSnapshotTest(unittest.TestCase):
+    """Arcx keeps its own copy of the cfg it ran inside the index run folder.
+
+    Without finding it, `status --run-folder` raised CFG_EXPECTATION_UNAVAILABLE
+    for every case -- an UNKNOWN issue, which blocks success -- so five
+    genuinely complete cases were reported as FAILED. The cfg was in the folder
+    the whole time, under a name derived from the user.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, name, text):
+        path = os.path.join(self.tmp.name, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def test_finds_a_user_named_cfg(self):
+        from arcx_auto.adapters.arcx_cfg import discover_arcx_cfg
+
+        self._write("zmwu.cfg",
+                    "1 BEGIN_SETTING : blk\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n")
+        config = discover_arcx_cfg(self.tmp.name)
+        self.assertIsNotNone(config)
+        self.assertEqual([b.name for b in config.blocks], ["blk"])
+
+    def test_special_cfg_is_rejected_without_being_named(self):
+        """special.cfg is plain key = value, so it fails the "has blocks" test
+        on its own. Nothing has to list it as an exception.
+        """
+        from arcx_auto.adapters.arcx_cfg import discover_arcx_cfg
+
+        self._write("special.cfg", "O_QCAP_LSF_NUM = 4\nOTHER = 1\n")
+        self.assertIsNone(discover_arcx_cfg(self.tmp.name))
+
+    def test_picks_the_real_cfg_when_both_are_present(self):
+        from arcx_auto.adapters.arcx_cfg import discover_arcx_cfg
+
+        self._write("special.cfg", "O_QCAP_LSF_NUM = 4\n")
+        self._write("zmwu.cfg",
+                    "1 BEGIN_SETTING : blk\n1 QC_FLOW = calQCAP\nEND_SETTINGS\n")
+        config = discover_arcx_cfg(self.tmp.name)
+        self.assertIsNotNone(config)
+        self.assertTrue(config.blocks)
+
+    def test_no_cfg_at_all_is_not_an_error(self):
+        from arcx_auto.adapters.arcx_cfg import discover_arcx_cfg
+
+        self.assertIsNone(discover_arcx_cfg(self.tmp.name))
+
+    def test_a_missing_folder_is_not_an_error(self):
+        from arcx_auto.adapters.arcx_cfg import discover_arcx_cfg
+
+        self.assertIsNone(discover_arcx_cfg(os.path.join(self.tmp.name, "nope")))
