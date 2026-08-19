@@ -53,6 +53,8 @@ class CaseSpec:
         full            every block's netlist is complete
         missing_netlist flow and work dirs exist but no netlist (false success)
         empty_netlist   the netlist exists but is 0 bytes (job died at once)
+        no_signature    a full sized netlist with no QuickCap banner on line 1,
+                        which is what a truncated extraction leaves behind
         missing_flow    the whole <block>_<flow>/ directory is absent
         none            nothing at all
     """
@@ -191,15 +193,21 @@ def _make_artifacts(case_dir, case_id, mode, blocks=DEFAULT_BLOCKS):
         if mode == "missing_netlist":
             continue
         netlist = os.path.join(work_dir, netlist_tmpl.format(case=case_id))
+        # A complete calQCAP netlist opens with the extraction engine's own
+        # banner. Leaving it out of the "full" fixture would mean every test
+        # ran against a netlist that real QA would reject.
+        header = "* netlist for %s (%s)\n" % (case_id, flow)
+        if flow == "calQCAP" and mode != "no_signature":
+            header = "* QuickCap extraction for %s\n" % case_id + header
         body = b"" if mode == "empty_netlist" else (
-            ("* netlist for %s (%s)\n" % (case_id, flow)).encode() + b"R1 a b 1k\n" * 200
+            header.encode() + b"R1 a b 1k\n" * 200
         )
         with open(netlist, "wb") as handle:
             handle.write(body)
 
 
 def make_report_dirs(folder, names=("QC_Cc", "QC_Ct", "QC_Spice"),
-                     summary_suffix="SCCB3", skip_files=()):
+                     summary_suffix="SCCB3", skip_files=(), summary_bad=()):
     """Build the QC_* report directories:
 
         QC_Cc/Report_QC_Cc
@@ -210,10 +218,36 @@ def make_report_dirs(folder, names=("QC_Cc", "QC_Ct", "QC_Spice"),
         os.makedirs(path, exist_ok=True)
         if name in skip_files:
             continue
-        for filename in ("Report_%s" % name,
-                         "Report_%s_Summary_%s" % (name, summary_suffix)):
-            with open(os.path.join(path, filename), "w", encoding="utf-8") as h:
-                h.write("# %s\n" % filename)
+        with open(os.path.join(path, "Report_%s" % name), "w",
+                  encoding="utf-8") as h:
+            h.write("# Report_%s\n" % name)
+        summary = os.path.join(
+            path, "Report_%s_Summary_%s" % (name, summary_suffix))
+        with open(summary, "w", encoding="utf-8") as h:
+            h.write(make_summary_table(bad=summary_bad))
+
+
+def make_summary_table(bad=(), rows=("cell_a", "cell_b")):
+    """A QC_* Summary in the real shape.
+
+    ``bad`` names the rows whose comparison failed, so a test can ask for a
+    table that looks complete but is not -- which is the whole point of the
+    check that reads it.
+    """
+    lines = [
+        "input report: /path/to/ref",
+        "input report: /path/to/cmp",
+        "",
+        "refReport = /path/to/ref",
+        "rep item refReport cmpReport1 diffCmp1",
+    ]
+    for row in rows:
+        if row in bad:
+            lines.append("%s total_cap 1.234 fail -" % row)
+        else:
+            lines.append("%s total_cap 1.234 1.240 0.006" % row)
+    lines.append("########")
+    return "\n".join(lines) + "\n"
 
 
 def make_index_source(

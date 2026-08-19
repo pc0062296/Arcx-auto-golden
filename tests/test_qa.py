@@ -14,6 +14,7 @@ from arcx_auto.domain.enums import (
     Completeness,
     Severity,
 )
+from arcx_auto.domain.models import IndexSource
 from arcx_auto.domain.qa import Issue, QaResult
 from arcx_auto.services.qa import QaRunner, REGISTRY
 from arcx_auto.services.qa.expectations import expected_artifacts
@@ -673,12 +674,12 @@ class StatusOnARealRunFolderTest(unittest.TestCase):
 
         make_arcx_cfg(os.path.join(self.folder, "zmwu.cfg"))
         result = MonitorService(self.settings).scan(
-            run_folders=[self.folder], use_lsf=False, gds_counts={"1000": 7})
+            run_folders=[self.folder], use_lsf=False, index_sources={"1000": IndexSource(index_key="1000", gds_count=7)})
         hits = [i for i in result.all_issues()
                 if i.id == "INDEX_CASE_COUNT_MISMATCH"]
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0].severity, Sev.WARN)
         # A warning only: the run still reads as five successful cases, because
         # GDS filenames and top cell names need not correspond.
-        states = self._states(gds_counts={"1000": 7})
+        states = self._states(index_sources={"1000": IndexSource(index_key="1000", gds_count=7)})
         self.assertEqual(set(states.values()), {CaseState.DONE})

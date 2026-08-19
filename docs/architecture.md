@@ -596,7 +596,8 @@ StateEngine    markers + LSF only  ->  base_state
                         |
 QA Registry    emits Issue[]
                LIVE ->  CASE_QUIET / LSF_SUSPENDED / CASE_NEVER_STARTED / ...
-               POST ->  NETLIST_MISSING / NETLIST_EMPTY / FLOW_DIR_MISSING / ...
+               POST ->  NETLIST_MISSING / NETLIST_EMPTY / FLOW_DIR_MISSING /
+                        NETLIST_NO_SIGNATURE / SUMMARY_TABLE_BAD_VALUE / ...
                         |
 StateResolver  base_state + issues  ->  final_state
                COMPLETED_MARKER + anything blocking  ->  FAILED
@@ -616,7 +617,66 @@ single.
 compare base against base: comparing against the resolved state would make
 `COMPLETED_MARKER -> DONE` look like a change on every tick.
 
-### 7.3 Expected artifacts are derived from arcx.cfg
+### 7.3 Reading content, not just counting files
+
+Existence and size checks share one blind spot: a file that is present, large,
+and wrong passes all of them. That is what a **false success** is, and it is the
+expensive failure -- the run reports DONE, the result flows downstream, and the
+mistake surfaces days later.
+
+Two checks read content instead. Both are POST, both were specified from real
+failures rather than invented.
+
+**`NETLIST_NO_SIGNATURE`** -- the extraction engine stamps its name on the
+netlist's first line (`QuickCap` for `calQCAP`), so that line is the cheapest
+evidence it ran at all. Whether it is required depends on `special.cfg`:
+
+| netlist first line | `O_EXTARCTION` | verdict |
+|---|---|---|
+| has the wording | anything | pass |
+| missing | `R` (resistance only) | pass -- that engine never runs |
+| missing | anything else | **FATAL**, the netlist is not complete |
+| missing | could not read special.cfg | **UNKNOWN**, we cannot tell |
+
+`special.cfg` is only read **once the wording is already missing**, which is
+what keeps this quiet: a healthy netlist never touches the file. It is looked
+for in the wave's own snapshot (`.arcx_auto/special_cfg/<index>.cfg`) first,
+then in the index path if a `dir_map` was supplied.
+
+**`SUMMARY_TABLE_BAD_VALUE`** -- the table after `refReport =` in a `QC_*`
+Summary is where the run states its actual result:
+
+```
+refReport = /path/to/ref
+rep       item       refReport  cmpReport1  diffCmp1
+some_cell total_cap      1.234       1.240     0.006
+other_cell total_cap     2.000        fail         -     <- no answer
+########
+```
+
+Every column after the two naming columns must be a real number. Blank, the
+word `fail`, and a sentinel like `1e+15` all mean the comparison produced no
+answer. The sentinel is the interesting one: it parses as a float, so a naive
+numeric check waves it straight through.
+
+The comparison columns vary in number, so the **header defines the width**
+rather than any fixed expectation.
+
+Not finding a table at all is `SUMMARY_TABLE_UNREADABLE`, deliberately UNKNOWN
+rather than FATAL: an unfamiliar report shape says nothing about the run, and a
+check that is usually wrong stops being read. It cannot be a pass either, since
+the values were never examined.
+
+**An index level failure cannot be attributed to a case**, so it puts nothing
+on the rerun delete list. It is carried into the rerun plan as a warning
+instead -- a plan that quietly said "nothing needs rerunning" would be the same
+false success arriving by a different route.
+
+The parsing lives in `services/qa/summary_table.py` as **pure functions over
+strings**, so every malformed shape is enumerable in milliseconds without
+writing a file.
+
+### 7.4 Expected artifacts are derived from arcx.cfg
 
 ```
 arcx.cfg                                case run dir
@@ -649,7 +709,7 @@ This is also why the cfg must be snapshotted into the wave directory at
 submission time (section 8): QA three days later has to read the cfg the run
 actually used.
 
-### 7.4 Two API levels
+### 7.5 Two API levels
 
 **Declarative (YAML)** covers the common "these files must exist and be big
 enough", with no Python involved.
@@ -678,7 +738,7 @@ The brevity comes from `CaseContext`: paths are relative to the case run dir, it
 **never raises** (unreadable means None). The docstring is displayed in the UI,
 so documentation and code cannot drift apart.
 
-### 7.5 Three properties that are not negotiable
+### 7.6 Three properties that are not negotiable
 
 **1. "I do not know" is a first-class value.** `Severity.UNKNOWN` exists for
 exactly that: no cfg snapshot, an unrecognised format, a QA function that threw.
@@ -695,7 +755,7 @@ so rewriting a check does not touch policy. Registering a duplicate id raises
 immediately -- silent shadowing is the hardest kind of bug to find. Disabling a
 check is `qa.disabled_checks`, not deleting code.
 
-### 7.6 "Stuck" is graded, not binary
+### 7.7 "Stuck" is graded, not binary
 
 A single case can take ten minutes or three days, and a log can legitimately go
 quiet because the artifacts are already written. A hard rule produces false
@@ -709,7 +769,7 @@ quiet:
   downgrade_when_artifacts_ready: true   # artifacts present -> one level down
 ```
 
-### 7.7 PRE checks on arcx.cfg
+### 7.8 PRE checks on arcx.cfg
 
 The highest return of any layer: most configuration mistakes are visible before
 anything is submitted, and finding the same mistake afterwards costs hours.
@@ -730,7 +790,7 @@ Path checking covers only the keys listed in `qa.cfg_path_keys`, and only on
 output paths and on values like `TOOL_VERSION_LVS` that are a command plus
 arguments -- and once there are false alarms nobody reads the warnings.
 
-### 7.8 Policy (Phase 4)
+### 7.9 Policy (Phase 4)
 
 ```yaml
 policies:

@@ -24,6 +24,7 @@ from arcx_auto.domain.models import (
     CaseSnapshot,
     IndexRunObservation,
     IndexRunSnapshot,
+    IndexSource,
     WavePlan,
 )
 from arcx_auto.domain.qa import ExpectedArtifact, Issue
@@ -163,6 +164,45 @@ class _BaseContext:
         """Used when the check computes its own severity, e.g. by quiet time."""
         return self._issue(severity, message, evidence)
 
+    # -- special.cfg ----------------------------------------------------
+
+    def _resolve_special_cfg(
+        self, run_folder: str, index_key: str, source: Optional[IndexSource]
+    ) -> Optional[Dict[str, str]]:
+        """The index's special.cfg values, or None if it cannot be read.
+
+        Two places, in order:
+
+          1. ``<wave>/.arcx_auto/special_cfg/<index>.cfg`` -- the snapshot the
+             WorkspaceBuilder took at submission time. This is the one that
+             matters: it is what the run actually used, and it needs no
+             arguments, so `status --wave-dir` gets the check for free.
+          2. ``<index_path>/special.cfg`` -- the live source, only known when a
+             dir_map was supplied.
+
+        None means "could not read it", never "no settings". Callers must not
+        turn that into a pass.
+        """
+        from arcx_auto.adapters.arcx import ArcxAdapter
+
+        candidates: List[str] = []
+        if run_folder and index_key:
+            wave_dir = os.path.dirname(os.path.abspath(run_folder))
+            candidates.append(os.path.join(
+                wave_dir, ".arcx_auto", "special_cfg", "%s.cfg" % index_key))
+        if source and source.path:
+            candidates.append(os.path.join(
+                source.path, self.settings.layout.special_cfg_name))
+
+        for path in candidates:
+            if self._cache.stat(path) is None:
+                continue
+            values, _warnings = ArcxAdapter(
+                self.settings.layout, self.settings.plan).parse_key_values(path)
+            if values:
+                return values
+        return None
+
 
 class CaseContext(_BaseContext):
     """Check environment for one case. root is the case run dir."""
@@ -177,6 +217,7 @@ class CaseContext(_BaseContext):
         cache: _FsCache,
         now: float,
         attempt: int = 1,
+        source: Optional[IndexSource] = None,
     ) -> None:
         root = case.case_dir or os.path.join(run_folder, case.case_id)
         super().__init__(root, settings, cache, now)
@@ -186,10 +227,22 @@ class CaseContext(_BaseContext):
         self.run_folder = os.path.abspath(run_folder)
         self.attempt = attempt
         self.arcx_config = config
+        self.source = source
+        self._special_cfg: Optional[Dict[str, str]] = None
+        self._special_cfg_read = False
         self._expected: Optional[Tuple[Tuple[ExpectedArtifact, ...],
                                        Tuple[str, ...]]] = None
 
     # -- Convenience ----------------------------------------------------
+
+    @property
+    def special_cfg(self) -> Optional[Dict[str, str]]:
+        """The index's special.cfg values. None means it could not be read."""
+        if not self._special_cfg_read:
+            self._special_cfg = self._resolve_special_cfg(
+                self.run_folder, self.index_key, self.source)
+            self._special_cfg_read = True
+        return self._special_cfg
 
     @property
     def state(self) -> CaseState:
@@ -382,7 +435,7 @@ class IndexContext(_BaseContext):
         config: Optional[ArcxConfig],
         cache: _FsCache,
         now: float,
-        gds_count: Optional[int] = None,
+        source: Optional[IndexSource] = None,
     ) -> None:
         super().__init__(snapshot.run_folder, settings, cache, now)
         self.snapshot = snapshot
@@ -390,10 +443,17 @@ class IndexContext(_BaseContext):
         self.index_key = snapshot.index_key
         self.case_id = None
         self.arcx_config = config
-        # How many GDS files the index path holds, when a dir_map was supplied.
-        # A cross-check only: the run uses top cell names, which need not match
-        # the GDS filenames, so this can confirm a count but never a name.
-        self.gds_count = gds_count
+        self.run_folder = os.path.abspath(snapshot.run_folder)
+        self.source = source
+
+    @property
+    def gds_count(self) -> Optional[int]:
+        """How many GDS files the index path holds, when a dir_map was given.
+
+        A cross-check only: the run uses top cell names, which need not match
+        the GDS filenames, so this can confirm a count but never a name.
+        """
+        return self.source.gds_count if self.source else None
 
     @property
     def cases(self) -> Dict[str, CaseSnapshot]:

@@ -23,6 +23,7 @@ from arcx_auto.domain.enums import CaseState, IssueScope, IssueStage, Severity
 from arcx_auto.domain.qa import Issue
 from arcx_auto.services.qa.context import IndexContext
 from arcx_auto.services.qa.registry import qa_check
+from arcx_auto.services.qa.summary_table import find_bad_values, parse_summary_table
 
 INDEX = IssueScope.INDEX
 POST = IssueStage.POST
@@ -168,4 +169,112 @@ def case_count_mismatch(index: IndexContext) -> Optional[Issue]:
         % (actual, expected),
         evidence={"cases": actual, "gds_files": expected,
                   "case_ids": sorted(index.cases)},
+    )
+
+
+@qa_check(id="SUMMARY_TABLE_BAD_VALUE", title="summary table has values that are not numbers",
+          severity=Severity.FATAL, scope=INDEX, stage=POST)
+def summary_table_bad_value(index: IndexContext) -> Optional[Issue]:
+    """A comparison in a QC_* Summary produced no usable number.
+
+    The table after the `refReport =` line is where the run states its actual
+    result. Every column after the two naming columns must be a real number; a
+    blank cell, the word "fail", or a sentinel like 1e+15 all mean the
+    comparison did not produce an answer.
+
+    This is a false success in its purest form. The job finished, the marker is
+    there, the report directory exists and the file is not empty -- and the
+    number that was supposed to prove the result is missing. Nothing else in
+    the system would notice.
+
+    The number of comparison columns varies (cmpReport2, cmpReport3 and their
+    diffs may or may not be present), so the header defines the width rather
+    than any fixed expectation.
+    """
+    rules = index.qa.summary_table
+    problems: List[dict] = []
+
+    for dir_name in rules.dirs:
+        if not index.is_dir(dir_name):
+            continue                       # optional; REPORT_DIR_MISSING's job
+        for relpath in _summary_files(index, dir_name):
+            table = parse_summary_table(
+                index.read_text(relpath, rules.max_bytes),
+                ref_marker_regex=rules.ref_marker_regex,
+                end_markers=rules.end_markers,
+            )
+            if not table.found:
+                continue           # SUMMARY_TABLE_UNREADABLE reports this
+            for bad in find_bad_values(
+                table,
+                fail_words=rules.fail_words,
+                fail_value_threshold=rules.fail_value_threshold,
+                name_columns=rules.name_columns,
+            ):
+                item = bad.as_dict()
+                item["file"] = relpath
+                problems.append(item)
+
+    if not problems:
+        return None
+
+    return index.fail(
+        "%d value(s) in the summary table(s) are not usable numbers"
+        % len(problems),
+        evidence={"problems": problems[:rules.max_reported],
+                  "total": len(problems)},
+    )
+
+
+def _summary_files(index: IndexContext, dir_name: str) -> List[str]:
+    """Summary reports inside one QC_* directory.
+
+    Matched case insensitively: the directory is QC_Spice but the file is
+    Report_QC_spice_Summary, and a check that silently found nothing because of
+    one letter would be worse than no check at all.
+    """
+    names = index.listdir(dir_name)
+    return [
+        "%s/%s" % (dir_name, name)
+        for name in names
+        if "summary" in name.lower() and name.lower().startswith("report")
+    ]
+
+
+@qa_check(id="SUMMARY_TABLE_UNREADABLE", title="summary table could not be found",
+          severity=Severity.UNKNOWN, scope=INDEX, stage=POST)
+def summary_table_unreadable(index: IndexContext) -> Optional[Issue]:
+    """A QC_* Summary exists but holds no comparison table we recognise.
+
+    Deliberately UNKNOWN rather than FATAL. Not finding the table says nothing
+    about the run -- the report may legitimately have no comparison in it, or
+    the format may have moved on. Calling that a failure would cry wolf on
+    every summary of an unfamiliar shape, and people stop reading a check that
+    is usually wrong.
+
+    It cannot be a pass either: the values that would have proved the result
+    were not examined. UNKNOWN blocks success and says exactly that, which is
+    what Severity.UNKNOWN is for.
+    """
+    rules = index.qa.summary_table
+    unreadable: List[dict] = []
+
+    for dir_name in rules.dirs:
+        if not index.is_dir(dir_name):
+            continue
+        for relpath in _summary_files(index, dir_name):
+            table = parse_summary_table(
+                index.read_text(relpath, rules.max_bytes),
+                ref_marker_regex=rules.ref_marker_regex,
+                end_markers=rules.end_markers,
+            )
+            if not table.found:
+                unreadable.append({"file": relpath, "reason": table.error})
+
+    if not unreadable:
+        return None
+    return index.unknown(
+        "%d summary report(s) hold no table this check understands, so their "
+        "values were not verified" % len(unreadable),
+        evidence={"files": unreadable[:rules.max_reported]},
     )

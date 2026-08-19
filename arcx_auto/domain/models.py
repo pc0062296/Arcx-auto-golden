@@ -271,6 +271,20 @@ class DirMap:
 
 
 @dataclass(frozen=True)
+class IndexSource:
+    """What we know about an index's *source* directory, from dir_map.
+
+    Everything here is optional context for QA: the run folder is the truth,
+    and the source only ever confirms or contradicts it. Absent means "we were
+    not told", which is normal for `status --run-folder`, not a failure.
+    """
+
+    index_key: str
+    path: str = ""
+    gds_count: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class IndexSpec:
     """The resource footprint of one index; WavePlanner's input unit.
 

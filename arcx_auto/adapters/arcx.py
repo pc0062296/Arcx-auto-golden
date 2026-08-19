@@ -25,9 +25,16 @@ from arcx_auto.domain.models import DirMap, IndexSpec
 _DIR_MAP_ENTRY_RE = re.compile(
     r"""["'](?P<key>[^"']+)["']\s*=>\s*["'](?P<value>[^"']*)["']"""
 )
-# O_QCAP_LSF_NUM = 4  -- accepts = or :, optional quotes, # starts a comment
+# O_QCAP_LSF_NUM = 4  -- accepts = or :, optional quotes, # starts a comment.
+#
+# The optional `g:` scope prefix (g:O_EXTARCTION = PARA) marks a global, the
+# same convention arcx.cfg uses. It has to be consumed here rather than left to
+# the generic key rule: `=` and `:` are both accepted as separators, so `g:X = V`
+# would otherwise parse as key `g`, value `X = V` -- and every g: line in the
+# file would overwrite the last, collapsing them all into one bogus entry.
 _KV_RE = re.compile(
-    r"""^\s*(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*[=:]\s*(?P<value>.*?)\s*$"""
+    r"""^\s*(?:(?P<scope>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*)?"""
+    r"""(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*[=:]\s*(?P<value>.*?)\s*$"""
 )
 
 

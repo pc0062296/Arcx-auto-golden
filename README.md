@@ -21,6 +21,7 @@ Full design: **[docs/architecture.md](docs/architecture.md)**.
 | **1b** | Store + LockManager + Daemon + read-only web UI | done |
 | **2b** | Preflight + WorkspaceBuilder + Launcher + gate + `submit` | done |
 | **3** | Rerun planner + drain state machine + `rerun` (manual trigger) | done |
+| **3.5** | False-success detection: netlist signature + QC_* summary values | done |
 | 4 | Policy engine and automatic remediation | to do |
 | 5 | Shared-disk export and history | to do |
 
@@ -225,6 +226,35 @@ never be dropped silently.
 (`zmwu.cfg`). Every `*.cfg` there is parsed and the one with at least one
 `BEGIN_SETTINGS` block is used, so `status --run-folder` needs no `--arcx-cfg`.
 An explicit `--arcx-cfg` still wins.
+
+### Catching a false success
+
+Existence and size checks share one blind spot: a file that is present, large
+and wrong passes all of them. Two checks read content instead.
+
+**`NETLIST_NO_SIGNATURE`** -- a `calQCAP` netlist's first line should mention
+`QuickCap`, the extraction engine's own stamp. Whether it is required comes from
+`special.cfg`:
+
+| first line | `O_EXTARCTION` | verdict |
+|---|---|---|
+| has it | anything | pass |
+| missing | `R` | pass -- resistance only, that engine never runs |
+| missing | anything else | **FATAL** |
+| missing | special.cfg unreadable | **UNKNOWN** |
+
+`special.cfg` is read only once the wording is already missing, so a healthy
+netlist never touches it.
+
+**`SUMMARY_TABLE_BAD_VALUE`** -- in a `QC_Spice` Summary, every column of the
+table after `refReport =` must be a real number. Blank, `fail`, or a sentinel
+like `1e+15` all mean the comparison produced no answer. The sentinel matters
+most: it parses as a float, so a naive numeric check lets it through.
+
+Not finding a table at all is `SUMMARY_TABLE_UNREADABLE` -- UNKNOWN, not FATAL,
+because an unfamiliar report shape says nothing about the run.
+
+Both are tunable in `qa.netlist_signature` and `qa.summary_table`.
 
 ### QA: expected artifacts are derived from arcx.cfg
 

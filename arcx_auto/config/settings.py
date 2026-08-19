@@ -194,6 +194,61 @@ class ReportSettings:
 
 
 @dataclass
+class NetlistSignatureSettings:
+    """First-line signature check on an extracted netlist.
+
+    A netlist that exists and is big enough can still be truncated. The cheapest
+    real evidence that the extraction engine actually ran is the wording it
+    writes on the first line, so a flow is mapped to the word its netlist must
+    start with.
+
+    Whether the word is required depends on special.cfg: when the extraction
+    mode is resistance only, the engine that writes it never runs, so its
+    absence is correct rather than a defect.
+    """
+
+    # Key in special.cfg. Spelled as the real files spell it.
+    extraction_key: str = "O_EXTARCTION"
+    # Value meaning "resistance only", where the signature is not expected
+    resistance_only_value: str = "R"
+    # QC_FLOW -> the word the netlist's first line must contain
+    flow_signatures: Dict[str, str] = field(
+        default_factory=lambda: {"calQCAP": "QuickCap"})
+    # How much of the file to read to see the first line
+    head_bytes: int = 4096
+
+
+@dataclass
+class SummaryTableSettings:
+    """Value checks on a QC_* Summary report's comparison table.
+
+        refReport = <path>
+        rep   item   refReport   cmpReport1   diffCmp1   ...
+        <rep> <item> <number>    <number>     <number>   ...
+        ########
+
+    Every value column must be a real number. Blank, the word "fail", or a
+    sentinel like 1e+15 all mean the comparison did not produce an answer --
+    which is a false success when the case is otherwise reported as complete.
+    """
+
+    # Which report directories carry a table of this shape
+    dirs: List[str] = field(default_factory=lambda: ["QC_Spice"])
+    # The table begins after this line
+    ref_marker_regex: str = r"^\s*refReport\s*="
+    # ... and ends at one of these, or at a blank line
+    end_markers: List[str] = field(default_factory=lambda: ["########"])
+    # Words that mean "no result" rather than a number
+    fail_words: List[str] = field(default_factory=lambda: ["fail"])
+    # Magnitudes at or above this are the tool's default failure value
+    fail_value_threshold: float = 1e15
+    # The first two columns name the row; everything after is a value
+    name_columns: int = 2
+    max_bytes: int = 1 << 20
+    max_reported: int = 20
+
+
+@dataclass
 class QuietSettings:
     """Thresholds for "the log has not grown in a while".
 
@@ -221,6 +276,10 @@ class QaSettings:
     min_netlist_bytes: int = 1
     reports: ReportSettings = field(default_factory=ReportSettings)
     quiet: QuietSettings = field(default_factory=QuietSettings)
+    netlist_signature: NetlistSignatureSettings = field(
+        default_factory=NetlistSignatureSettings)
+    summary_table: SummaryTableSettings = field(
+        default_factory=SummaryTableSettings)
 
     # Which arcx.cfg keys to verify as existing files/directories before
     # submission. An explicit list rather than "anything that looks like a

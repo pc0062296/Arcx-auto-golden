@@ -87,6 +87,23 @@ def build_rerun_plan(
             "nothing to delete for them: %s"
             % (len(missing_dirs), ", ".join(sorted(missing_dirs)[:10])))
 
+    # Index level failures cannot be attributed to a case, so they cannot put
+    # anything on the delete list -- but they must not vanish either. A summary
+    # table whose comparison produced no number means this index did not really
+    # succeed, and a plan that quietly said "nothing needs rerunning" would be
+    # the false success arriving by a different route.
+    for snapshot in snapshots:
+        report = qa_by_index.get(snapshot.index_key)
+        if report is None:
+            continue
+        blocking = sorted({i.id for result in report.index_results
+                           for i in result.issues if i.blocks_success})
+        if blocking:
+            warnings.append(
+                "index %s has unresolved index level issues that no single "
+                "case owns, so a rerun will not clear them on its own: %s"
+                % (snapshot.index_key, ", ".join(blocking)))
+
     uncertain = [d for d in decisions if d.uncertain]
     if uncertain:
         warnings.append(

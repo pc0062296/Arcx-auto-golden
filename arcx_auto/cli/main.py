@@ -275,7 +275,7 @@ def _scan_once(args, settings, fs, collector, store):
         run_folders=list(args.run_folder or []),
         arcx_config=_load_arcx_cfg(args, settings),
         use_lsf=not args.no_lsf,
-        gds_counts=_gds_counts(args, settings, fs),
+        index_sources=_index_sources(args, settings, fs),
     )
 
     if args.wave_dir and not result.observations:
@@ -289,13 +289,16 @@ def _scan_once(args, settings, fs, collector, store):
             list(result.qa_reports), result.lsf_note)
 
 
-def _gds_counts(args, settings: Settings, fs) -> Dict[str, int]:
-    """How many GDS files each index path holds, when a dir_map was given.
+def _index_sources(args, settings: Settings, fs) -> Dict[str, "IndexSource"]:
+    """What dir_map says about each index: where it is, and how many GDS.
 
-    Used only as a cross-check on the case count. The run works on top cell
-    names, which need not match the GDS filenames, so this can never name a
-    case -- it can only notice that the totals disagree.
+    Optional context. The run folder is the truth; the source can only confirm
+    or contradict it -- the GDS count cross-checks the case count, and the
+    index path is a fallback place to read special.cfg when the run was not
+    submitted through this tool (a wave we built has its own snapshot).
     """
+    from arcx_auto.domain.models import IndexSource
+
     path = getattr(args, "dir_map", None)
     if not path:
         return {}
@@ -303,12 +306,13 @@ def _gds_counts(args, settings: Settings, fs) -> Dict[str, int]:
 
     arcx = ArcxAdapter(settings.layout, settings.plan, fs=fs)
     dir_map = arcx.parse_dir_map(path)
-    counts: Dict[str, int] = {}
+    sources: Dict[str, IndexSource] = {}
     for index_key, index_path in dir_map.entries.items():
         count, _names = fs.count_gds(index_path)
-        if count:
-            counts[index_key] = count
-    return counts
+        sources[index_key] = IndexSource(
+            index_key=index_key, path=index_path,
+            gds_count=count or None)
+    return sources
 
 
 def _load_arcx_cfg(args, settings: Settings) -> Optional[ArcxConfig]:

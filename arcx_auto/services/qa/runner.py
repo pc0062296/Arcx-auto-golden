@@ -140,7 +140,7 @@ class QaRunner:
         arcx_config: Optional[ArcxConfig] = None,
         now: Optional[float] = None,
         attempts: Optional[Dict[str, int]] = None,
-        gds_count: Optional[int] = None,
+        source=None,
     ) -> IndexQaReport:
         now = now if now is not None else time.time()
         attempts = attempts or {}
@@ -158,6 +158,7 @@ class QaRunner:
                 cache=cache,
                 now=now,
                 attempt=attempt,
+                source=source,
             )
             results: List[QaResult] = [self.registry.run(
                 context, IssueScope.CASE, IssueStage.LIVE, case_id,
@@ -175,7 +176,7 @@ class QaRunner:
             config=arcx_config,
             cache=cache,
             now=now,
-            gds_count=gds_count,
+            source=source,
         )
         index_results = (
             self.registry.run(index_context, IssueScope.INDEX, IssueStage.LIVE,

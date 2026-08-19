@@ -256,3 +256,64 @@ def case_never_started(case: CaseContext) -> Optional[Issue]:
         "run dir exists but no marker or log; it may never have been submitted",
         evidence={"case_dir": case.root},
     )
+
+
+@qa_check(id="NETLIST_NO_SIGNATURE", title="netlist does not look extracted",
+          severity=Severity.FATAL, scope=CASE, stage=POST)
+def netlist_no_signature(case: CaseContext) -> Optional[Issue]:
+    """The netlist's first line is missing the extraction engine's wording.
+
+    A netlist can exist and be large and still be truncated, which existence and
+    size checks both pass. The cheapest real evidence that the engine ran is the
+    wording it stamps on the first line -- calQCAP netlists start with a line
+    mentioning QuickCap.
+
+    Whether it is required depends on special.cfg. When O_EXTARCTION is R the
+    extraction is resistance only, that engine never runs, and its absence is
+    correct. So the check only has an opinion once it knows the mode:
+
+        signature present            -> pass, whatever the mode
+        absent, mode is R            -> pass, it was never expected
+        absent, mode is anything else-> FATAL, the netlist is not complete
+        absent, special.cfg unreadable -> UNKNOWN, we genuinely cannot tell
+
+    Reading special.cfg only when the signature is missing is what keeps this
+    quiet: a healthy netlist never needs the file at all.
+    """
+    rules = case.qa.netlist_signature
+    missing = []
+    for artifact in case.expected_artifacts:
+        signature = rules.flow_signatures.get(artifact.flow)
+        if not signature:
+            continue
+        if case.size(artifact.relpath) is None:
+            continue                       # NETLIST_MISSING covers this
+        head = case.read_text(artifact.relpath, rules.head_bytes)
+        first_line = head.splitlines()[0] if head.splitlines() else ""
+        if signature.lower() in first_line.lower():
+            continue
+        missing.append({"path": artifact.relpath, "flow": artifact.flow,
+                        "expected": signature, "first_line": first_line[:200]})
+
+    if not missing:
+        return None
+
+    special = case.special_cfg
+    if special is None:
+        return case.unknown(
+            "%d netlist(s) have no %s wording on the first line, and %s could "
+            "not be read to tell whether it was expected"
+            % (len(missing), missing[0]["expected"],
+               case.settings.layout.special_cfg_name),
+            evidence={"netlists": missing},
+        )
+
+    mode = (special.get(rules.extraction_key) or "").strip()
+    if mode.upper() == rules.resistance_only_value.upper():
+        return None                        # resistance only; never expected
+
+    return case.fail(
+        "%d netlist(s) do not start with the extraction wording (%s = %s, so "
+        "it is expected)" % (len(missing), rules.extraction_key, mode or "?"),
+        evidence={"netlists": missing, rules.extraction_key: mode},
+    )

@@ -23,6 +23,7 @@ from arcx_auto.config.settings import Settings
 from arcx_auto.domain.models import (
     IndexRunObservation,
     IndexRunSnapshot,
+    IndexSource,
     LsfJobView,
     StateEvent,
 )
@@ -92,7 +93,7 @@ class MonitorService:
         arcx_config: Optional[ArcxConfig] = None,
         use_lsf: bool = True,
         now: Optional[float] = None,
-        gds_counts: Optional[Dict[str, int]] = None,
+        index_sources: Optional[Dict[str, IndexSource]] = None,
     ) -> ScanResult:
         now = now if now is not None else time.time()
 
@@ -138,7 +139,7 @@ class MonitorService:
                     snapshot, observation,
                     self._cfg_for(key, arcx_config, cfg_cache), now=now,
                     attempts={cid: attempt for cid in snapshot.cases},
-                    gds_count=(gds_counts or {}).get(snapshot.index_key),
+                    source=(index_sources or {}).get(snapshot.index_key),
                 )
                 reports.append(report)
                 snapshot = _apply_qa(snapshot, report)
