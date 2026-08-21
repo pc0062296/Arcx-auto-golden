@@ -50,6 +50,7 @@ from arcx_auto.services.state_engine import (
 from arcx_auto.services.state_resolver import resolve_case_state
 from arcx_auto.web import WebOptions, serve
 from arcx_auto.services.wave_planner import plan_waves
+from arcx_auto.services.workspaces import workspace_id
 
 
 # --------------------------------------------------------------------------
@@ -591,7 +592,7 @@ def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
     Naming one turns discovery off -- somebody who named a directory means that
     directory.
     """
-    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
+    run_id = args.run_id or workspace_id(settings.run_root)
     options = DaemonOptions(
         run_id=run_id,
         wave_dirs=[os.path.abspath(os.path.expanduser(p)) for p in args.wave_dir],
@@ -604,7 +605,11 @@ def cmd_daemon(args: argparse.Namespace, settings: Settings) -> int:
         export=False if args.no_export else None,
     )
     daemon = Daemon(options, settings=settings)
-    print("monitoring run_id=%s  state=%s" % (run_id, daemon.store.dir))
+    # The run root first: with one workspace per project directory, "which
+    # directory is this daemon serving" is the thing somebody needs to read
+    # back before they trust what they are looking at.
+    print("workspace: %s" % settings.expanded_run_root())
+    print("run id   : %s  (state: %s)" % (run_id, daemon.store.dir))
     if not args.once:
         print("web UI: arcx-auto web    (Ctrl-C stops the daemon)")
     return daemon.run()
@@ -625,7 +630,7 @@ def cmd_start(args: argparse.Namespace, settings: Settings) -> int:
     """
     import threading
 
-    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
+    run_id = args.run_id or workspace_id(settings.run_root)
     url = "http://%s:%d/" % (args.host, args.port)
 
     web_options = WebOptions(
@@ -638,9 +643,9 @@ def cmd_start(args: argparse.Namespace, settings: Settings) -> int:
     web_thread.start()
 
     print("UI       : %s" % url)
-    print("state    : %s" % settings.expanded_state_root())
-    print("runs     : %s" % settings.expanded_run_root())
+    print("workspace: %s" % settings.expanded_run_root())
     print("run id   : %s" % run_id)
+    print("state    : %s" % settings.expanded_state_root())
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print("  ! binding to %s publishes this to others." % args.host,
               file=sys.stderr)

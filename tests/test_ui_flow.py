@@ -16,6 +16,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -24,6 +25,7 @@ import urllib.request
 from arcx_auto.config.settings import Settings
 from arcx_auto.domain.enums import PlanMode
 from arcx_auto.domain.models import IndexSpec, SubmitGroup
+from arcx_auto.services import workspaces
 from arcx_auto.services.commands import DONE, PENDING, RUNNING, CommandQueue
 from arcx_auto.services.drafts import Draft, DraftGroup, DraftStore
 from arcx_auto.services.executor import CommandExecutor, IntentError
@@ -447,6 +449,169 @@ class WebActionTest(unittest.TestCase):
             "index_keys": ["1000"], "name": "g1"})
         self._post("/submit/%s/go" % draft_id, {"confirm": draft_id})
         self.assertIn("no daemon is running", self._get("/commands"))
+
+
+class WorkspaceTargetingTest(unittest.TestCase):
+    """Two directories, two daemons, one browser.
+
+    With one workspace everything works by accident: every default is the only
+    run_root there is. Two is where a submission can silently land on the
+    wrong disk, so these tests are about which one it goes to.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.settings = Settings()
+        cls.settings.state_root = os.path.join(cls.tmp.name, "state")
+        # The web server's own run_root: a third directory, so a test that
+        # passes by falling back to it is a test that failed.
+        cls.settings.run_root = os.path.join(cls.tmp.name, "web_runs")
+        cls.settings.export.shared_root = os.path.join(cls.tmp.name, "shared")
+
+        cls.dir_map = make_dir_map(
+            os.path.join(cls.tmp.name, "dir_map"),
+            {"1000": make_index_source(os.path.join(cls.tmp.name, "src"),
+                                       "1000", gds_count=2)})
+        cls.cfg = make_arcx_cfg(os.path.join(cls.tmp.name, "arcx.cfg"))
+
+        cls.project_a = os.path.join(cls.tmp.name, "projA")
+        cls.project_b = os.path.join(cls.tmp.name, "projB")
+        for path in (cls.project_a, cls.project_b):
+            os.makedirs(path, exist_ok=True)
+        cls.root_a = os.path.join(cls.project_a, "arcx_runs")
+        cls.root_b = os.path.join(cls.project_b, "arcx_runs")
+
+        cls.ready = _Ready()
+        threading.Thread(
+            target=serve,
+            args=(WebOptions(state_root=cls.settings.expanded_state_root(),
+                             port=0, refresh_sec=0, settings=cls.settings),
+                  cls.ready),
+            daemon=True).start()
+        cls.ready.wait(5)
+        cls.base = "http://127.0.0.1:%d" % cls.ready.port
+
+    @classmethod
+    def tearDownClass(cls):
+        httpd = getattr(cls.ready, "httpd", None)
+        if httpd is not None:
+            httpd.shutdown()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        registry = workspaces.registry_dir(self.settings.expanded_state_root())
+        if os.path.isdir(registry):
+            for name in os.listdir(registry):
+                os.unlink(os.path.join(registry, name))
+
+    def _post(self, path, data):
+        payload = urllib.parse.urlencode(data, doseq=True).encode()
+        return urllib.request.urlopen(
+            urllib.request.Request(self.base + path, data=payload), timeout=10)
+
+    def _get(self, path):
+        return urllib.request.urlopen(
+            self.base + path, timeout=10).read().decode()
+
+    def _new_draft(self):
+        url = self._post("/submit/new", {}).geturl()
+        return url.rstrip("/").split("/")[-1].split("?")[0]
+
+    def _register(self, run_id, run_root):
+        return workspaces.register(self.settings.expanded_state_root(),
+                                   run_id, run_root)
+
+    def _queued_payload(self, draft_id):
+        self._post("/submit/%s/add" % draft_id, {
+            "dir_map": self.dir_map, "arcx_cfg": self.cfg,
+            "index_keys": ["1000"], "name": "g1"})
+        self._post("/submit/%s/go" % draft_id, {"confirm": draft_id})
+        queue = CommandQueue(self.settings.expanded_state_root())
+        pending = queue.list(PENDING)
+        self.addCleanup(lambda: [queue.cancel(c.id) for c in queue.list(PENDING)])
+        return pending[-1].payload
+
+    def test_one_live_workspace_is_used_without_asking(self):
+        self._register("a", self.root_a)
+        payload = self._queued_payload(self._new_draft())
+        self.assertEqual(payload["run_root"], self.root_a)
+
+    def test_with_two_workspaces_the_page_shows_both(self):
+        self._register("a", self.root_a)
+        self._register("b", self.root_b)
+        page = self._get("/submit/%s" % self._new_draft())
+        self.assertIn(self.root_a, page)
+        self.assertIn(self.root_b, page)
+        self.assertIn("workspace", page)
+
+    def test_a_workspace_can_be_chosen_and_the_choice_is_kept(self):
+        self._register("a", self.root_a)
+        self._register("b", self.root_b)
+        draft_id = self._new_draft()
+        self._post("/submit/%s/workspace" % draft_id,
+                   {"run_root": self.root_b})
+        payload = self._queued_payload(draft_id)
+        self.assertEqual(payload["run_root"], self.root_b)
+
+    def test_an_unregistered_run_root_is_refused(self):
+        """The form must not be able to name any directory on the disk: it
+        decides where wave directories get created.
+        """
+        self._register("a", self.root_a)
+        draft_id = self._new_draft()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/submit/%s/workspace" % draft_id,
+                       {"run_root": os.path.join(self.tmp.name, "elsewhere")})
+        self.assertEqual(caught.exception.code, 400)
+
+    def test_a_dead_workspace_is_not_chosen_silently(self):
+        """One live and one stale is still one choice, and it is the live
+        one -- but the dead one stays visible, because "the daemon I started
+        here is gone" is something to see rather than to be protected from.
+        """
+        stale = time.time() - 10 * workspaces.STALE_AFTER_SEC
+        workspaces.register(self.settings.expanded_state_root(), "old",
+                            self.root_b, now=stale)
+        self._register("a", self.root_a)
+        payload = self._queued_payload(self._new_draft())
+        self.assertEqual(payload["run_root"], self.root_a)
+        self.assertIn(self.root_b, self._get("/"))
+
+    def test_the_preflight_page_says_when_nobody_is_watching(self):
+        stale = time.time() - 10 * workspaces.STALE_AFTER_SEC
+        workspaces.register(self.settings.expanded_state_root(), "old",
+                            self.root_b, now=stale)
+        draft_id = self._new_draft()
+        self._post("/submit/%s/add" % draft_id, {
+            "dir_map": self.dir_map, "arcx_cfg": self.cfg,
+            "index_keys": ["1000"], "name": "g1"})
+        body = self._post("/submit/%s/check" % draft_id,
+                          {"run_id": "r1"}).read().decode()
+        self.assertIn("No daemon is watching", body)
+
+    def test_the_home_page_lists_which_directory_each_daemon_owns(self):
+        self._register("a", self.root_a)
+        self._register("b", self.root_b)
+        page = self._get("/")
+        self.assertIn("workspaces", page)
+        self.assertIn(self.root_a, page)
+        self.assertIn(self.root_b, page)
+
+    def test_the_ui_own_workspace_wins_when_it_is_one_of_them(self):
+        """`arcx-auto start` in one directory and bare daemons in the others:
+        the UI's own root is a workspace, and it is the one being looked at.
+        """
+        self._register("web", self.settings.expanded_run_root())
+        self._register("a", self.root_a)
+        self._register("b", self.root_b)
+        payload = self._queued_payload(self._new_draft())
+        self.assertEqual(payload["run_root"],
+                         self.settings.expanded_run_root())
+
+    def test_with_no_workspace_the_page_says_how_to_start_one(self):
+        page = self._get("/submit/%s" % self._new_draft())
+        self.assertIn("arcx-auto daemon", page)
 
 
 class ReadOnlyWebTest(unittest.TestCase):

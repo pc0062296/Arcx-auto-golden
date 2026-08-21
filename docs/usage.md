@@ -21,13 +21,19 @@ mkdir -p ~/.arcx-auto/config
 cp /path/to/arcx-auto-golden/config/default.yaml ~/.arcx-auto/config/
 ```
 
-Edit that file and set **one** line -- the disk you want the runs on:
+The one line worth looking at is where runs are kept:
 
 ```yaml
-run_root: "/proj/rc_golden/runs"
+run_root: "./arcx_runs"
 ```
 
-Everything else has a working default.
+`./arcx_runs` means *beside the work you are doing* -- one workspace per
+project directory, which is the normal way to use this. An absolute path means
+one shared place wherever you run from. Everything else has a working default.
+
+`state_root` is different and must stay one fixed place: the command queue and
+the daemon locks live there, and a request queued in one directory has to be
+visible to a daemon started in another.
 
 ---
 
@@ -58,6 +64,44 @@ UI on another:
 arcx-auto daemon
 arcx-auto web
 ```
+
+---
+
+## Working in more than one directory
+
+A **workspace** is a `run_root` -- with the default `./arcx_runs`, it is the
+directory you started the daemon in. Start one daemon per directory you are
+working in:
+
+```bash
+cd /proj/chipA   &&  arcx-auto start     # daemon + UI + browser
+cd /proj/chipB   &&  arcx-auto daemon    # just a daemon
+cd /proj/chipC   &&  arcx-auto daemon
+```
+
+**One browser is enough.** The UI is not tied to the directory it was started
+in: every daemon registers the run_root it owns, the front page lists them, and
+a submission picks one.
+
+```
+workspaces
+run_root                     daemon      run          started in
+/proj/chipA/arcx_runs        watching    chipA-4f21   /proj/chipA
+/proj/chipB/arcx_runs        watching    chipB-9ac0   /proj/chipB
+/proj/chipC/arcx_runs        stopped     chipC-1de8   /proj/chipC
+```
+
+On **new submission** the page says which workspace the waves go into, with a
+**use this** next to each of the others. With one daemon running there is
+nothing to choose and it is a single line. The file picker opens in that
+workspace's directory, so your `dir_map` and `arcx.cfg` are usually one click
+away.
+
+A daemon started in the same directory again is the **same** workspace: it
+picks the run page back up rather than starting a new one. Restarting is free.
+
+If you submit to a workspace whose daemon has stopped, the checks page says so
+before you press the button -- the request is queued and waits, it is not lost.
 
 ---
 
@@ -238,6 +282,8 @@ first: every case needing a person, across every run.
 | an index cannot be selected | it has no GDS files; the reason is on the row |
 | a file will not open | it is outside `run_root` and the run directories; the viewer only reads inside them |
 | everything says `LOST` | LSF is unreachable. Nothing is actually wrong with the jobs |
+| a submission went to the wrong directory | the **workspace** line on the submission page; it names the run_root before you submit |
+| an index says `special.cfg` cannot be read | it is still selectable and sized at `plan.default_cpu_per_case`. If your config file predates that, check it says 4, not 0 |
 
 To check a cfg without submitting anything:
 

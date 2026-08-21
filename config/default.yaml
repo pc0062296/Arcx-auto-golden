@@ -8,7 +8,12 @@
 # Without PyYAML on the network, use the .json form; the structure is identical.
 
 state_root: "~/.arcx-auto"     # per-user state (state.json, events, audit)
-run_root: "~/arcx_runs"        # absolute: a relative root follows your shell's cwd
+# Where wave directories are created and monitored. A relative path such as
+# ./arcx_runs is supported and means "the directory the daemon was started
+# in" -- one workspace per project directory. Absolute means one shared
+# workspace wherever you run from. See docs/usage.md, "working in more than
+# one directory".
+run_root: "./arcx_runs"
 
 # ---------------------------------------------------------------------------
 # File conventions (architecture 9.3)
@@ -69,7 +74,12 @@ plan:
   max_slots_per_wave: 200
   priority_keywords: ["sram", "ro"]   # path hits go into earlier waves
   keyword_ignore_case: true
-  default_cpu_per_case: 0             # 0 = exclude rather than guess
+  # Used when <index>/special.cfg has no O_QCAP_LSF_NUM, or cannot be read at
+  # all. 0 means "refuse to guess", which excludes the index from the batch;
+  # any other number sizes it and says so in the PRE checks. Under-guessing
+  # oversizes every wave the index appears in, so raise it if your real
+  # O_QCAP_LSF_NUM is commonly above this.
+  default_cpu_per_case: 4
 
 # ---------------------------------------------------------------------------
 # Submission gate (architecture 5.4)
@@ -77,7 +87,7 @@ plan:
 # ---------------------------------------------------------------------------
 gate:
   min_interval_sec: 600
-  quota_threshold: 100
+  quota_threshold: 10000
   max_wait_sec: 7200
 
 # ---------------------------------------------------------------------------
@@ -282,14 +292,20 @@ policy:
   rules:
     # Verify failures always go to a person: the run says it succeeded and the
     # result is wrong, and deciding what that means needs judgement.
-    NETLIST_NO_SIGNATURE:   {action: escalate, class: verify_fail}
+    NETLIST_NO_SIGNATURE:
+      {action: escalate, class: verify_fail,
+       note: "a truncated netlist may mean the extraction died; a person should see it before it is redone"}
     SUMMARY_TABLE_BAD_VALUE: {action: escalate, class: verify_fail}
     SUMMARY_TABLE_UNREADABLE: {action: escalate, class: unknown}
 
     # The clearest "it did not finish", and so the first candidates for
     # automation once the shadow log says they behave.
-    NETLIST_MISSING: {action: escalate, class: tool, max_auto: 1}
-    NETLIST_EMPTY:   {action: escalate, class: tool, max_auto: 1}
+    NETLIST_MISSING:
+      {action: escalate, class: tool, max_auto: 1,
+       note: "switch to rerun_wave once the shadow log shows it is safe"}
+    NETLIST_EMPTY:
+      {action: escalate, class: tool, max_auto: 1,
+       note: "switch to rerun_wave once the shadow log shows it is safe"}
 
     # Setup failures would fail identically every time.
     FLOW_DIR_MISSING:            {action: escalate, class: setup}
@@ -299,7 +315,9 @@ policy:
 
     CASE_QUIET:        {action: escalate, class: unknown}
     LSF_SUSPENDED:     {action: escalate, class: infra}
-    QA_INTERNAL_ERROR: {action: escalate, class: unknown}
+    QA_INTERNAL_ERROR:
+      {action: escalate, class: unknown,
+       note: "a check has a bug; the case may well be fine"}
 
 # ---------------------------------------------------------------------------
 # Shared-disk export (architecture 9.6)

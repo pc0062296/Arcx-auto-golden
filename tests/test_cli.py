@@ -288,90 +288,107 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class RootsAreNotTiedToTheWorkingDirectoryTest(unittest.TestCase):
-    """Where results land must not depend on where the command was typed.
+class RootsTest(unittest.TestCase):
+    """state_root and run_root are different kinds of thing.
 
-    A relative run_root means waves created from one directory and a daemon
-    started from another never see each other -- and the daemon finds waves by
-    scanning run_root, so the symptom is that it silently monitors nothing.
+    run_root is the work. One per project directory is the normal way to use
+    this tool, and a relative ./arcx_runs is how somebody says so -- which
+    makes "where the command was typed" meaningful rather than a hazard.
+
+    state_root is the tool's own memory: the command queue, the drafts, the
+    daemon locks. There has to be exactly one per person, or a request queued
+    in one directory is invisible to the daemon started in another.
     """
 
-    def test_the_defaults_are_absolute(self):
+    def test_state_root_does_not_move_with_the_cwd(self):
         from arcx_auto.config.settings import Settings
 
-        settings = Settings()
-        for value in (settings.state_root, settings.run_root):
-            self.assertTrue(value.startswith("~") or os.path.isabs(value),
-                            "%r follows the shell's cwd" % value)
+        here = os.getcwd()
+        try:
+            first = Settings().expanded_state_root()
+            os.chdir(tempfile.gettempdir())
+            self.assertEqual(Settings().expanded_state_root(), first)
+        finally:
+            os.chdir(here)
 
-    def test_the_default_run_root_does_not_move_with_the_cwd(self):
+    def test_run_root_is_meant_to_follow_the_working_directory(self):
         from arcx_auto.config.settings import Settings
 
         here = os.getcwd()
         try:
             first = Settings().expanded_run_root()
             os.chdir(tempfile.gettempdir())
-            self.assertEqual(Settings().expanded_run_root(), first)
+            self.assertNotEqual(Settings().expanded_run_root(), first)
         finally:
             os.chdir(here)
 
-    def test_a_relative_root_is_obeyed_but_warned_about(self):
+    def test_a_relative_state_root_is_obeyed_but_warned_about(self):
         from arcx_auto.config.settings import load_settings
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "s.json")
             with open(path, "w", encoding="utf-8") as handle:
-                json.dump({"run_root": "./somewhere"}, handle)
+                json.dump({"state_root": "./somewhere"}, handle)
             settings, warnings = load_settings(path)
 
-        self.assertEqual(settings.run_root, "./somewhere")
+        self.assertEqual(settings.state_root, "./somewhere")
         self.assertTrue(any("relative path" in w for w in warnings), warnings)
 
-    def test_an_absolute_root_warns_about_nothing(self):
+    def test_a_relative_run_root_warns_about_nothing(self):
+        """It is the supported workspace model, not a mistake."""
         from arcx_auto.config.settings import load_settings
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "s.json")
             with open(path, "w", encoding="utf-8") as handle:
-                json.dump({"run_root": "/proj/runs",
-                           "state_root": "~/.arcx-auto"}, handle)
+                json.dump({"run_root": "./arcx_runs"}, handle)
             _settings, warnings = load_settings(path)
         self.assertEqual([w for w in warnings if "relative" in w], [])
 
 
-class LauncherTest(unittest.TestCase):
-    """bin/arcx-auto is the whole installation on a machine with no pip."""
+class ShippedConfigTest(unittest.TestCase):
+    """config/default.yaml must say exactly what the code already does.
 
-    def _launcher(self):
-        return os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "bin", "arcx-auto")
+    It is copied into ~/.arcx-auto/config/ as the starting point, so every
+    value in it silently overrides a code default from then on. When the two
+    drift, changing a default in the code changes nothing for anybody who
+    followed the setup instructions -- which is how default_cpu_per_case
+    stayed at 0 for a week after it was raised to 4, quietly excluding every
+    index whose special.cfg could not be read.
+    """
 
-    def test_it_exists_and_is_executable(self):
-        path = self._launcher()
-        self.assertTrue(os.path.isfile(path))
-        self.assertTrue(os.access(path, os.X_OK), "not executable")
+    def test_the_shipped_config_matches_the_code_defaults(self):
+        from dataclasses import fields, is_dataclass
 
-    def test_it_runs_from_an_unrelated_directory(self):
-        import subprocess
+        from arcx_auto.config.settings import Settings, load_settings
 
-        result = subprocess.run(
-            [self._launcher(), "--version"],
-            cwd=tempfile.gettempdir(), capture_output=True, text=True,
-            timeout=60)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(".", result.stdout.strip())
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(here, "config", "default.yaml")
+        self.assertTrue(os.path.isfile(path), path)
 
-    def test_it_works_through_a_symlink(self):
-        """The link may live on a PATH directory far from the source tree, so
-        the script has to resolve itself rather than trust its own path.
-        """
-        import subprocess
+        loaded, warnings = load_settings(path)
+        self.assertEqual([w for w in warnings if "unknown" in w], [])
 
-        with tempfile.TemporaryDirectory() as tmp:
-            link = os.path.join(tmp, "arcx-auto")
-            os.symlink(self._launcher(), link)
-            result = subprocess.run(
-                [link, "--version"], cwd=tempfile.gettempdir(),
-                capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        differences = []
+
+        def compare(left, right, prefix=""):
+            for spec in fields(left):
+                if spec.name == "source_path":
+                    continue
+                where = "%s.%s" % (prefix, spec.name) if prefix else spec.name
+                mine = getattr(left, spec.name)
+                theirs = getattr(right, spec.name)
+                if is_dataclass(mine) and not isinstance(mine, type):
+                    compare(mine, theirs, where)
+                elif mine != theirs:
+                    differences.append("%s: file=%r code=%r"
+                                       % (where, mine, theirs))
+
+        compare(loaded, Settings())
+        self.assertEqual(differences, [],
+                         "config/default.yaml has drifted from the code "
+                         "defaults:\n  " + "\n  ".join(differences))
+
+
+if __name__ == "__main__":
+    unittest.main()

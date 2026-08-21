@@ -43,6 +43,7 @@ from arcx_auto.services.executor import CommandExecutor
 from arcx_auto.services.exporter import Exporter
 from arcx_auto.services.policy import evaluate_policy, history_from_records
 from arcx_auto.services.monitor import MonitorService, ScanResult
+from arcx_auto.services import workspaces
 
 
 @dataclass
@@ -95,6 +96,8 @@ class Daemon:
         self._served = 0
         self._policy: Optional[PolicyOutcome] = None
         self._policy_seen: set = set()
+        self._workspace = None
+        self._last_heartbeat = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -120,6 +123,7 @@ class Daemon:
 
     def _run_locked(self) -> int:
         self._started_at = time.time()
+        self._register_workspace()
         self._install_signal_handlers()
         self._write_manifest()
         self._restore_previous()
@@ -181,6 +185,37 @@ class Daemon:
                 # rather than finishing out a wait based on the old state.
                 return
 
+    def _register_workspace(self) -> None:
+        """Say which run_root this daemon owns, so a submission can name it.
+
+        Without this the UI can only offer its own run_root, which is whatever
+        directory the web server happened to be started in -- and with one
+        workspace per project directory that is right for at most one of them.
+        """
+        try:
+            self._workspace = workspaces.register(
+                self.settings.expanded_state_root(),
+                self.options.run_id,
+                self.settings.expanded_run_root(),
+                now=self._started_at)
+            self._last_heartbeat = self._started_at
+        except OSError:
+            self._workspace = None       # a hint, never a requirement
+
+    def _beat(self) -> None:
+        """Refresh the workspace file, at most every HEARTBEAT_SEC."""
+        if self._workspace is None:
+            return
+        now = time.time()
+        if now - self._last_heartbeat < workspaces.HEARTBEAT_SEC:
+            return
+        try:
+            workspaces.heartbeat(self.settings.expanded_state_root(),
+                                 self._workspace, now=now)
+            self._last_heartbeat = now
+        except OSError:
+            pass
+
     def _mark_stopped(self) -> None:
         """Record in state.json that this daemon is gone.
 
@@ -188,6 +223,9 @@ class Daemon:
         it froze at is exactly the moment it was healthy. A stopped daemon has
         to say so, or the display is a lie that gets more wrong by the minute.
         """
+        if self._workspace is not None:
+            workspaces.mark_stopped(self.settings.expanded_state_root(),
+                                    self._workspace)
         try:
             state = self.store.read_state()
             daemon = dict(state.get("daemon") or {})
@@ -302,6 +340,7 @@ class Daemon:
         Nothing here may raise: a bad command is the caller's problem, not a
         reason to stop monitoring.
         """
+        self._beat()
         if not self.options.serve_commands:
             return
         try:

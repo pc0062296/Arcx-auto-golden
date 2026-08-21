@@ -207,7 +207,8 @@ class _Handler(BaseHTTPRequestHandler):
             if state:
                 state.setdefault("run_id", run_id)
                 states.append(state)
-        self._html(pages.render_home(states, self.options.refresh_sec))
+        self._html(pages.render_home(states, self.options.refresh_sec,
+                                     workspaces=self._workspaces()))
 
     def _api_state(self, run_id: str) -> None:
         state = self._load_state(run_id)
@@ -305,6 +306,41 @@ class _Handler(BaseHTTPRequestHandler):
 
         return CommandQueue(self.options.state_root)
 
+    def _workspaces(self):
+        from arcx_auto.services import workspaces
+
+        return workspaces.list_workspaces(self.options.state_root)
+
+    def _draft_run_root(self, draft) -> str:
+        """Which run_root this draft submits into, deciding it if nobody has.
+
+        A workspace is a directory somebody is working in, and the web server
+        is started in exactly one of them. Defaulting to the server's own
+        run_root is right only while there is one workspace; the moment there
+        are two it silently sends the work to the wrong disk. So: if exactly
+        one daemon is alive, that is the answer and nobody is asked. If
+        several are, the draft page asks, and the answer is kept on the draft.
+        """
+        if draft.run_root:
+            return draft.run_root
+        from arcx_auto.services import workspaces
+
+        alive = workspaces.live_workspaces(self.options.state_root)
+        mine = self.options.resolved_settings().expanded_run_root()
+        if len(alive) == 1:
+            return alive[0].run_root
+        if any(w.run_root == mine for w in alive):
+            # `arcx-auto start` in one project directory and bare daemons in
+            # the others: the UI's own root is one of the workspaces, and it
+            # is the one the person is looking at.
+            return mine
+        # Several workspaces and none of them ours. Rather than picking one --
+        # the wrong guess sends the work to another project's disk -- leave it
+        # on a root nobody is watching, which the page says out loud and asks
+        # about. A default that looks plausible and is wrong is worse than one
+        # that is obviously unfinished.
+        return mine
+
     def _submit_get(self, parts: List[str]) -> None:
         store = self._drafts()
         if not parts:
@@ -320,10 +356,27 @@ class _Handler(BaseHTTPRequestHandler):
         return self._html(submit_pages.render_draft(
             draft,
             error=(query.get("error") or [""])[0],
-            notice=(query.get("notice") or [""])[0]))
+            notice=(query.get("notice") or [""])[0],
+            workspaces=self._workspaces(),
+            run_root=self._draft_run_root(draft)))
 
     def _submit_new(self) -> None:
-        draft = self._drafts().create()
+        """Start a submission already pointed at a workspace.
+
+        The picker opening in the directory the daemon is working in is worth
+        more than it sounds: with one workspace per project, the alternative
+        is clicking up out of the web server's own directory and back down
+        again on every single submission.
+        """
+        from arcx_auto.services import workspaces
+
+        store = self._drafts()
+        draft = store.create()
+        draft.run_root = self._draft_run_root(draft)
+        found = workspaces.find(self.options.state_root, draft.run_root)
+        if found is not None and os.path.isdir(found.cwd):
+            draft.last_dir = found.cwd
+        store.save(draft)
         self._redirect("/submit/%s" % draft.id)
 
     def _submit_action(self, draft_id: str, action: str,
@@ -341,6 +394,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._submit_add(store, draft, form)
         if action == "drop":
             return self._submit_drop(store, draft, form)
+        if action == "workspace":
+            return self._submit_workspace(store, draft, form)
         if action == "check":
             return self._submit_check(store, draft, form)
         if action == "go":
@@ -364,9 +419,13 @@ class _Handler(BaseHTTPRequestHandler):
         if not path:
             # Reopen where they were. Starting at home every time makes the
             # picker slower than the text box it replaced.
-            path = (draft.last_dir or self.options.resolved_settings()
-                    .expanded_run_root())
+            path = draft.last_dir or self._draft_run_root(draft)
             if not os.path.isdir(os.path.expanduser(path)):
+                # A workspace whose run_root does not exist yet is normal --
+                # nothing has been submitted into it. The directory it lives
+                # in does exist, and that is where the files are.
+                path = os.path.dirname(os.path.expanduser(path).rstrip("/"))
+            if not os.path.isdir(os.path.expanduser(path or "")):
                 path = os.path.expanduser("~")
 
         listing = list_dir(path)
@@ -477,6 +536,29 @@ class _Handler(BaseHTTPRequestHandler):
             store.save(draft)
         self._redirect("/submit/%s" % draft.id)
 
+    def _submit_workspace(self, store, draft,
+                          form: Dict[str, List[str]]) -> None:
+        """Send this submission to a different workspace."""
+        from arcx_auto.services import workspaces
+
+        chosen = os.path.abspath(os.path.expanduser(_first(form, "run_root")))
+        if not chosen:
+            return self._error(400, "no workspace given")
+        known = {w.run_root for w in self._workspaces()}
+        known.add(self.options.resolved_settings().expanded_run_root())
+        if chosen not in known:
+            # Only somewhere a daemon has actually registered. A free-text
+            # run_root would let the UI create wave directories anywhere on
+            # the disk, which is not a decision a form field should carry.
+            return self._error(400, "not a known workspace: %s" % chosen)
+        draft.run_root = chosen
+        found = workspaces.find(self.options.state_root, chosen)
+        if found is not None and os.path.isdir(found.cwd):
+            draft.last_dir = found.cwd
+        store.save(draft)
+        self._redirect("/submit/%s?notice=%s" % (
+            draft.id, urllib.parse.quote("workspace set to %s" % chosen)))
+
     def _submit_check(self, store, draft, form: Dict[str, List[str]]) -> None:
         """Plan and check. Creates nothing and submits nothing."""
         draft.run_id = _first(form, "run_id") or draft.run_id
@@ -490,8 +572,13 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self._html(submit_pages.render_draft(draft, error=str(exc)))
 
+        from arcx_auto.services import workspaces
+
+        run_root = self._draft_run_root(draft)
+        found = workspaces.find(self.options.state_root, run_root)
         self._html(submit_pages.render_preflight(
-            draft, plan, cfg_result, pre_result, run_dir))
+            draft, plan, cfg_result, pre_result, run_dir,
+            workspace=found, run_root=run_root))
 
     def _plan_draft(self, draft):
         """Turn a draft into a plan plus its check results.
@@ -518,7 +605,7 @@ class _Handler(BaseHTTPRequestHandler):
             max_slots_per_wave=draft.max_slots or settings.plan.max_slots_per_wave,
             mode=PlanMode.AUTO if draft.mode == "auto" else PlanMode.OFF,
         )
-        run_root = settings.expanded_run_root()
+        run_root = self._draft_run_root(draft)
         run_dir = os.path.join(run_root, draft.run_id)
 
         from arcx_auto.adapters.arcx_cfg import parse_arcx_cfg
@@ -544,6 +631,10 @@ class _Handler(BaseHTTPRequestHandler):
             "run_id": draft.run_id,
             "mode": draft.mode,
             "max_slots": draft.max_slots,
+            # The workspace travels with the request. Whichever daemon claims
+            # it, the waves land in the run_root the person was looking at
+            # when they pressed the button.
+            "run_root": self._draft_run_root(draft),
             "groups": [g.as_dict() for g in draft.groups],
         })
         store.delete(draft.id)

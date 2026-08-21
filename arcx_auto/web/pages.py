@@ -35,7 +35,8 @@ def _q(*parts: str) -> str:
 # Home: an overview of every run
 # ---------------------------------------------------------------------------
 
-def render_home(states: Sequence[Dict[str, Any]], refresh: int) -> str:
+def render_home(states: Sequence[Dict[str, Any]], refresh: int,
+                workspaces: Sequence[Any] = ()) -> str:
     rows = []
     total_attention = 0
     for state in states:
@@ -64,6 +65,7 @@ def render_home(states: Sequence[Dict[str, Any]], refresh: int) -> str:
     # and answering it with a table of runs makes them work it out from
     # numbers. Name the cases instead, before anything else.
     body += _attention_across_runs(states)
+    body += _workspaces_section(workspaces)
     body += "<h2>runs</h2>"
     body += table(
         ["run", "progress", "cases", "index", "attention", "issues",
@@ -72,6 +74,43 @@ def render_home(states: Sequence[Dict[str, Any]], refresh: int) -> str:
         empty="no run is being monitored yet; start one with arcx-auto daemon",
     )
     return page("Arcx Auto Golden", body, refresh=refresh)
+
+
+def _workspaces_section(entries: Sequence[Any]) -> str:
+    """Which directory each daemon is working in.
+
+    A workspace is a run_root, and ./arcx_runs beside the data is the normal
+    way to keep them apart. That makes "which daemon owns which directory" a
+    question with a real answer, and one nobody can get at from a process
+    list: two daemons look identical from outside.
+    """
+    hint = ("<p class='doc'>A workspace is a run_root -- normally "
+            "<code>./arcx_runs</code> beside the data. To add one: "
+            "<code>cd &lt;directory&gt; &amp;&amp; arcx-auto daemon</code></p>")
+    if not entries:
+        return "<h2>workspaces</h2>" + hint + (
+            "<div class='empty'>no daemon has registered a workspace</div>")
+
+    rows = []
+    for entry in entries:
+        if entry.alive():
+            health = "<span class='pill good'>watching</span>"
+        elif entry.stopped_at:
+            health = "<span class='pill muted'>stopped</span>"
+        else:
+            health = ("<span class='pill warn'>silent for %s</span>"
+                      % esc(duration(entry.age_sec())))
+        rows.append([
+            esc(entry.run_root),
+            health,
+            "<a href='%s'>%s</a>" % (esc(_q("run", entry.run_id)),
+                                     esc(entry.run_id)),
+            "<span class='muted'>%s</span>" % esc(entry.cwd),
+            "<span class='muted'>%s@%s</span>" % (esc(entry.pid),
+                                                  esc(entry.host)),
+        ])
+    return ("<h2>workspaces</h2>" + hint
+            + table(["run_root", "daemon", "run", "started in", "pid"], rows))
 
 
 ATTENTION_STATES = ("FAILED", "LOST", "STALLED", "SUSPENDED", "UNKNOWN")

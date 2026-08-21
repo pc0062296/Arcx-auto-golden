@@ -56,6 +56,12 @@ class Draft:
     pending: Dict[str, str] = field(default_factory=dict)
     #: Where the picker last was, so it reopens there instead of at home
     last_dir: str = ""
+    #: Which workspace this submission goes to -- the run_root the waves are
+    #: created under. Held on the draft rather than read from settings at
+    #: submit time, because the web server's own run_root is whatever
+    #: directory it happened to be started in, which is the right answer for
+    #: at most one of the workspaces in use.
+    run_root: str = ""
 
     @property
     def total_indices(self) -> int:
@@ -72,6 +78,7 @@ class Draft:
             "groups": [g.as_dict() for g in self.groups],
             "pending": dict(self.pending),
             "last_dir": self.last_dir,
+            "run_root": self.run_root,
         }
 
     @classmethod
@@ -96,6 +103,7 @@ class Draft:
             pending={str(k): str(v)
                      for k, v in (data.get("pending") or {}).items()},
             last_dir=str(data.get("last_dir") or ""),
+            run_root=str(data.get("run_root") or ""),
         )
 
 

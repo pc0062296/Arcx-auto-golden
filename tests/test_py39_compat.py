@@ -93,3 +93,18 @@ class NoRealSharedDiskInTestsTest(unittest.TestCase):
             "the test suite wrote to the real shared disk at %s; a test built "
             "a daemon or an Exporter without redirecting export.shared_root"
             % shared)
+
+    def test_the_default_run_root_is_untouched(self):
+        """run_root defaults to ./arcx_runs, which is the repository itself
+        while the suite runs. A test that builds a workspace without
+        redirecting it leaves wave directories in the source tree.
+        """
+        import os
+
+        from arcx_auto.config.settings import Settings
+
+        run_root = Settings().expanded_run_root()
+        self.assertFalse(
+            os.path.exists(run_root),
+            "the test suite created %s; a test built a workspace, a daemon or "
+            "a submission without redirecting run_root" % run_root)

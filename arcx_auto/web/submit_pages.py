@@ -27,7 +27,15 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Sequence
 
-from arcx_auto.web.html import CSS, cards, esc, page, severity_pill, table
+from arcx_auto.web.html import (
+    CSS,
+    cards,
+    duration,
+    esc,
+    page,
+    severity_pill,
+    table,
+)
 
 _SELECT_JS = """
 function arcxToggleAll(box) {
@@ -78,7 +86,8 @@ def render_new(drafts: Sequence[Any], error: str = "") -> str:
 """ % (_error(error), existing))
 
 
-def render_draft(draft: Any, error: str = "", notice: str = "") -> str:
+def render_draft(draft: Any, error: str = "", notice: str = "",
+                 workspaces: Sequence[Any] = (), run_root: str = "") -> str:
     """The submission being built: its groups, and how to add one."""
     group_rows = []
     for position, group in enumerate(draft.groups, start=1):
@@ -127,6 +136,7 @@ def render_draft(draft: Any, error: str = "", notice: str = "") -> str:
 
     return _page("submission %s" % draft.run_id, """
 %s%s
+%s
 <h2>groups</h2>
 %s
 <h2>add a group</h2>
@@ -136,7 +146,71 @@ def render_draft(draft: Any, error: str = "", notice: str = "") -> str:
   pick the indices on the next page.</p>
 </form>
 %s
-""" % (_error(error), _notice(notice), groups, esc(draft.id), ready))
+""" % (_error(error), _notice(notice),
+       _workspace_block(draft, workspaces, run_root),
+       groups, esc(draft.id), ready))
+
+
+def _workspace_block(draft: Any, entries: Sequence[Any],
+                     run_root: str) -> str:
+    """Where this submission will go, and how to send it somewhere else.
+
+    A workspace is a run_root -- normally ./arcx_runs beside the data being
+    worked on -- and a daemon started in that directory owns it. With one
+    workspace there is nothing to decide and this is a single line. With
+    several, which one the waves land in is the most consequential thing on
+    the page and the least visible, so it is stated before the groups.
+    """
+    live = [w for w in entries if w.alive()]
+    current = run_root or draft.run_root
+
+    if not entries:
+        return (
+            "<div class='card'><div class='n'>workspace</div>"
+            "<div class='l'>%s</div>"
+            "<div class='doc'>No daemon has registered a workspace. Nothing "
+            "will execute this request until one is running: <code>cd &lt;your "
+            "work directory&gt; &amp;&amp; arcx-auto daemon</code></div></div>"
+            % esc(current))
+
+    rows = []
+    for entry in entries:
+        chosen = (entry.run_root == current)
+        if entry.alive():
+            health = "<span class='pill good'>watching</span>"
+        elif entry.stopped_at:
+            health = "<span class='pill muted'>stopped</span>"
+        else:
+            health = ("<span class='pill warn'>silent for %s</span>"
+                      % esc(duration(entry.age_sec())))
+        button = ("<span class='muted'>in use</span>" if chosen else
+                  '<form method="post" action="/submit/%s/workspace" '
+                  'style="margin:0"><input type="hidden" name="run_root" '
+                  'value="%s"><button type="submit" class="link">use this'
+                  '</button></form>' % (esc(draft.id), esc(entry.run_root)))
+        rows.append([
+            ("<strong>%s</strong>" if chosen else "%s") % esc(entry.run_root),
+            health, esc(entry.run_id), esc(entry.cwd), button,
+        ])
+
+    note = ""
+    if not any(w.run_root == current for w in live):
+        note = ("<p class='doc warn'>No daemon is watching this workspace. "
+                "The request will sit in the queue until one is started "
+                "there.</p>")
+    elif len(live) > 1:
+        note = ("<p class='doc'>%d workspaces are being watched. The waves "
+                "are created under the one in use.</p>" % len(live))
+
+    if len(entries) == 1 and not note:
+        return ("<p class='doc'>workspace: <strong>%s</strong></p>"
+                % esc(current))
+
+    return ("<h2>workspace</h2><p class='doc'>waves are created under "
+            "<strong>%s</strong></p>%s%s"
+            % (esc(current), note,
+               table(["run_root", "daemon", "run id", "started in", ""],
+                     rows)))
 
 
 def render_file_picker(listing: Any, field: str, draft_id: str,
@@ -277,7 +351,8 @@ def render_browse(draft: Any, dir_map_path: str, arcx_cfg: str,
 
 
 def render_preflight(draft: Any, plan: Any, cfg_result: Any,
-                     preflight_result: Any, run_dir: str) -> str:
+                     preflight_result: Any, run_dir: str,
+                     workspace: Any = None, run_root: str = "") -> str:
     """The gate. A FATAL means the submit button is not rendered at all."""
     issues = list(getattr(cfg_result, "issues", ()) or ()) + \
         list(getattr(preflight_result, "issues", ()) or ())
@@ -321,6 +396,16 @@ def render_preflight(draft: Any, plan: Any, cfg_result: Any,
 </form>
 """ % (esc(draft.id), esc(draft.id), len(plan.waves))
 
+    unwatched = ""
+    if run_root and (workspace is None or not workspace.alive()):
+        # Not fatal: the request is queued, and starting a daemon later runs
+        # it. But "I pressed submit and nothing happened for an hour" is the
+        # exact experience this sentence exists to prevent.
+        unwatched = (
+            "<p class='doc warn'>No daemon is watching <code>%s</code>. "
+            "The request will be queued and will wait there until one is "
+            "started in that directory.</p>" % esc(run_root))
+
     warn_note = ""
     if blocking and not fatal:
         warn_note = ("<p class='doc warn'>%d check(s) could not be confirmed. "
@@ -330,7 +415,7 @@ def render_preflight(draft: Any, plan: Any, cfg_result: Any,
     return _page("pre-submission checks", """
 <h2>pre-submission checks</h2>
 %s
-%s
+%s%s
 <h2>what would be submitted</h2>
 <p class='doc'>run id: %s<br>into: %s</p>
 %s
@@ -341,7 +426,7 @@ def render_preflight(draft: Any, plan: Any, cfg_result: Any,
                ("cases", plan.total_cases, ""),
                ("slots", plan.total_slots, ""),
                ("fatal", len(fatal), "bad" if fatal else "good")]),
-        warn_note,
+        unwatched, warn_note,
         esc(draft.run_id), esc(run_dir),
         table(["wave", "group", "indices", "cases", "slots", "which"],
               wave_rows),

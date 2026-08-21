@@ -41,10 +41,47 @@ while cases run and 5 minutes when idle. Checking the queue is one `listdir` on
 a local directory, so it costs nothing and happens constantly. **A button press
 is acted on in about two seconds, not at the next scan.**
 
+### Workspaces
+
+A **workspace** is a `run_root`. With the default `./arcx_runs` that is the
+directory the daemon was started in, so one project directory is one workspace
+and you run one daemon in each.
+
+```
+  /proj/chipA  ---- arcx-auto start  ----> daemon A   run_root /proj/chipA/arcx_runs
+  /proj/chipB  ---- arcx-auto daemon ----> daemon B   run_root /proj/chipB/arcx_runs
+                                              |
+     one browser, one state_root  <-----------+
+     ~/.arcx-auto/workspaces/<run_id>.json
+```
+
+Each daemon writes one file saying which root it owns and refreshes it while
+it lives. That file is what lets a single UI serve several directories: the
+submission page lists the workspaces and the chosen `run_root` travels **in
+the command payload**, so the waves land where the person was looking rather
+than wherever the web server happens to have been started.
+
+Any daemon may execute any queued command -- the paths in it are absolute, so
+the result is the same either way, and it means a request is served as long as
+*some* daemon is alive. The daemon that owns the root then discovers the new
+wave on its next scan, because discovery is "what is under my run_root", not
+"what did I create".
+
+The registry is a **hint, not a lock**. A stale file means a daemon that died
+without tidying up; the worst it causes is a workspace offered in the UI that
+nobody is serving, which the page says out loud. What may proceed is still
+decided by the daemon lock and the wave lock.
+
+The daemon's run id is derived from its run_root rather than from the clock,
+so restarting a daemon in the same directory continues the same run page. It
+used to be a timestamp, which made every restart a new run and left the
+previous one on the front page looking abandoned.
+
 ### Who owns what
 
 ```
 ~/.arcx-auto/                 state; only the daemon writes here
+  workspaces/<run_id>.json    which run_root each daemon owns
   runs/<run_id>/
     state.json                what the UI reads
     events.jsonl              state changes

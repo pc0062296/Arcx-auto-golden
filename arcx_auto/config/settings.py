@@ -50,7 +50,7 @@ class LayoutSettings:
     # directly, which is what makes the case roster independent of the
     # directory listing.
     cmd_file_regex: str = r"^cmd_file_(?P<num>\d+)$"
-    cmd_cd_regex: str = r"^\s*cd\s+[\"']?(?P<path>[^\s\"';#]+)"
+    cmd_cd_regex: str = r"""^\s*cd\s+["']?(?P<path>[^\s"';#]+)"""
     cmd_file_head_bytes: int = 16384
 
     # QC_Cc/ QC_Ct/ QC_Spice/ -- reports Arcx assembles, not case dirs
@@ -502,11 +502,14 @@ class Settings:
     """Root settings object."""
 
     state_root: str = "~/.arcx-auto"
-    # Absolute on purpose. A relative run_root follows the shell's working
-    # directory, so wave directories would land somewhere different depending
-    # on where the command happened to be typed -- and the daemon, which finds
-    # waves by scanning run_root, would then silently monitor nothing.
-    run_root: str = "~/arcx_runs"
+    # Relative on purpose: ./arcx_runs means "beside the work I am doing", so
+    # a project directory is a workspace and a daemon started in it owns that
+    # workspace. The danger of a relative root -- waves created from one
+    # directory and a daemon started in another finding none of them -- is
+    # handled by making the resolved root visible everywhere it matters: the
+    # daemon prints it, the workspace registry records it, and a submission
+    # names the workspace it is going to.
+    run_root: str = "./arcx_runs"
     layout: LayoutSettings = field(default_factory=LayoutSettings)
     monitor: MonitorSettings = field(default_factory=MonitorSettings)
     plan: PlanSettings = field(default_factory=PlanSettings)
@@ -627,22 +630,27 @@ def load_settings(
 
 
 def _check_roots(settings: "Settings") -> List[str]:
-    """A relative root is almost always a mistake, so say so rather than obey
-    it silently.
+    """state_root must not be relative. run_root may be.
 
-    It is still obeyed: somebody may genuinely want a run_root relative to a
-    project directory they always work from. But the failure it causes is
-    invisible -- waves created from one directory, and a daemon started from
-    another finding none of them -- so it cannot be silent.
+    They are different kinds of thing. run_root is the work: one per project
+    directory is the normal way to use this, and a relative path is how you
+    say so.
+
+    state_root is the tool's own memory -- the command queue, the drafts, the
+    daemon locks. There has to be exactly one per person, or a request typed
+    in one directory is queued where the daemon in another directory will
+    never look for it.
     """
     warnings: List[str] = []
-    for name in ("state_root", "run_root"):
+    for name in ("state_root",):
         value = str(getattr(settings, name, "") or "")
         if not value or value.startswith("~") or os.path.isabs(value):
             continue
         warnings.append(
             "%s is a relative path (%r), so it follows the directory the "
-            "command is run from. It resolves to %s right now. Use an "
-            "absolute path unless you always run from the same place."
+            "command is run from. It resolves to %s right now. It has to be "
+            "one fixed place per person: the command queue and the daemon "
+            "locks live there, and a request queued in one directory is "
+            "invisible to a daemon started in another."
             % (name, value, os.path.abspath(os.path.expanduser(value))))
     return warnings
