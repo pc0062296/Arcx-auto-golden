@@ -80,6 +80,15 @@ plan:
   # oversizes every wave the index appears in, so raise it if your real
   # O_QCAP_LSF_NUM is commonly above this.
   default_cpu_per_case: 4
+  # Keep indices that share a parent directory in one wave. The directory
+  # structure is already how the work is classified, and a wave boundary
+  # through the middle of one scatters related cases across batches that start
+  # hours apart -- which somebody then has to reassemble to debug.
+  #
+  # A folder is never split, even when it exceeds the cap on its own: over the
+  # cap is preferred to cut in half, and PREFLIGHT_WAVE_OVERSIZED says so
+  # before you submit. Each group can turn this off on the submission page.
+  keep_folders_together: true
 
 # ---------------------------------------------------------------------------
 # Auto select group

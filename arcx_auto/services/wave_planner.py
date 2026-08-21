@@ -26,6 +26,7 @@ def plan_waves(
     max_slots_per_wave: int,
     mode: PlanMode = PlanMode.AUTO,
     now: Optional[float] = None,
+    keep_folders_together: bool = True,
 ) -> WavePlan:
     """Split indices into waves.
 
@@ -39,6 +40,20 @@ def plan_waves(
     ``mode`` only affects how waves are cut, never the output shape: OFF is
     just "a single wave", so nothing downstream (WorkspaceBuilder, Launcher,
     monitoring) needs to branch on it.
+
+    ``keep_folders_together`` makes the **parent directory** the unit instead
+    of the index. The directory structure is already how the work is
+    classified, so a wave boundary through the middle of one scatters related
+    cases across batches that start hours apart, and somebody debugging has to
+    reassemble them by hand. With it on:
+
+      * the priority sort works on folders (a folder is as urgent as its most
+        urgent index), because sorting individual indices is itself one of the
+        things that tears a folder apart;
+      * a folder is never split, **even when it exceeds the cap on its own**.
+        That is a deliberate choice to go over the cap rather than lose the
+        grouping, and it is reported -- as a plan warning and as a PRE check --
+        rather than done quietly.
     """
     now = now if now is not None else time.time()
     warnings: List[str] = []
@@ -69,6 +84,10 @@ def plan_waves(
 
     if mode == PlanMode.OFF:
         waves = (Wave(seq=1, indices=tuple(usable)),)
+    elif keep_folders_together:
+        blocks = _folder_blocks(usable)
+        waves = _fill_waves_by_folder(blocks, max_slots_per_wave)
+        warnings.extend(_folder_warnings(blocks, max_slots_per_wave))
     else:
         ordered = _stable_priority_sort(usable)
         waves = _fill_waves(ordered, max_slots_per_wave)
@@ -108,7 +127,11 @@ def plan_groups(
     warnings: List[str] = []
 
     for group, specs in groups:
-        part = plan_waves(specs, max_slots_per_wave, mode=mode, now=now)
+        # Per group, because only the person who made the selection knows
+        # whether its directory structure means anything.
+        part = plan_waves(
+            specs, max_slots_per_wave, mode=mode, now=now,
+            keep_folders_together=getattr(group, "keep_folders_together", True))
         excluded.extend(part.excluded)
         for warning in part.warnings:
             warnings.append("%s: %s" % (group.label, warning))
@@ -138,6 +161,89 @@ def _stable_priority_sort(specs: Iterable[IndexSpec]) -> List[IndexSpec]:
     Python's sorted is stable, so sorting on priority alone preserves order.
     """
     return sorted(specs, key=lambda s: -s.priority)
+
+
+def _folder_blocks(
+    specs: Sequence[IndexSpec],
+) -> List[Tuple[str, List[IndexSpec]]]:
+    """Group indices by folder, folders in priority then first-seen order.
+
+    A folder is as urgent as its most urgent index. Sorting the indices
+    themselves -- which is what happens without this -- pulls every keyword hit
+    to the front of the batch and out of the folder it came from, which is
+    exactly the scattering this exists to stop.
+    """
+    order: List[str] = []
+    members: Dict[str, List[IndexSpec]] = {}
+    for spec in specs:
+        folder = spec.folder
+        if folder not in members:
+            members[folder] = []
+            order.append(folder)
+        members[folder].append(spec)
+
+    def priority_of(folder: str) -> int:
+        return max(s.priority for s in members[folder])
+
+    ordered = sorted(order, key=lambda f: -priority_of(f))
+    return [(folder, members[folder]) for folder in ordered]
+
+
+def _fill_waves_by_folder(
+    blocks: Sequence[Tuple[str, List[IndexSpec]]], max_slots: int,
+) -> Tuple[Wave, ...]:
+    """Fill waves a whole folder at a time.
+
+    A folder that does not fit in what is left starts the next wave; a folder
+    that does not fit in an empty wave still goes in whole. Small folders
+    therefore still share a wave, which matters more than it looks: the gate
+    releases one wave at a time with a minimum interval between them, so one
+    wave per folder would turn twenty small folders into hours of waiting for
+    work that would fit in a single batch.
+
+    No reordering to fill the gaps. First fit in the order the person chose
+    keeps "why is this index in this wave" answerable, which is worth more
+    than the few percent of slot utilisation a cleverer packing would win
+    (architecture 5.2).
+    """
+    waves: List[Wave] = []
+    current: List[IndexSpec] = []
+    current_slots = 0
+
+    for _folder, members in blocks:
+        block_slots = sum(s.slots for s in members)
+        if current and current_slots + block_slots > max_slots:
+            waves.append(Wave(seq=len(waves) + 1, indices=tuple(current)))
+            current = []
+            current_slots = 0
+        current.extend(members)
+        current_slots += block_slots
+
+    if current:
+        waves.append(Wave(seq=len(waves) + 1, indices=tuple(current)))
+    return tuple(waves)
+
+
+def _folder_warnings(blocks: Sequence[Tuple[str, List[IndexSpec]]],
+                     max_slots: int) -> List[str]:
+    """Name the folders that put a wave over the cap, and why they did.
+
+    The oversize warning alone says a wave is too big, which reads like a bug.
+    This says which folder caused it and that keeping it whole was the
+    instruction -- so the reader can decide between raising the cap and
+    turning the grouping off for that group.
+    """
+    out: List[str] = []
+    for folder, members in blocks:
+        slots = sum(s.slots for s in members)
+        if slots > max_slots:
+            out.append(
+                "folder %s needs %d slots on its own, over the cap of %d; it "
+                "is kept in one wave because this group keeps folders "
+                "together (indices: %s)"
+                % (folder, slots, max_slots,
+                   ", ".join(s.index_key for s in members)))
+    return out
 
 
 def _fill_waves(specs: Sequence[IndexSpec], max_slots: int) -> Tuple[Wave, ...]:

@@ -193,6 +193,18 @@ You do not batch by hand. Ticking fifty indices does not send fifty at once --
 the slot cap splits each group into waves automatically, and the next page shows
 you exactly how.
 
+**Waves are cut between directories, not through them.** Indices sharing a
+parent directory go out in the same wave, because that structure is already how
+the work is classified -- a batch that scatters it is a batch somebody has to
+reassemble to debug. The keyword priority (`sram`, `ro`) moves whole folders for
+the same reason.
+
+A folder bigger than the slot cap is **not** split: the wave goes over the cap
+rather than lose the grouping, and the checks page says so
+(`PREFLIGHT_WAVE_OVERSIZED`) before you submit. If that is not what you want for
+a particular selection, the group table has a **folders** column -- click it to
+switch that group to **split anywhere**.
+
 Your selection is saved as you go. Closing the tab loses nothing.
 
 ## 4. Check, then submit
@@ -334,6 +346,7 @@ first: every case needing a person, across every run.
 | a file will not open | it is outside `run_root` and the run directories; the viewer only reads inside them |
 | everything says `LOST` | LSF is unreachable. Nothing is actually wrong with the jobs |
 | a submission went to the wrong directory | the **workspace** line on the submission page; it names the run_root before you submit |
+| a wave is bigger than the slot cap | a folder is kept whole. Raise `plan.max_slots_per_wave`, select fewer indices, or set that group to **split anywhere** |
 | an index says `special.cfg` cannot be read | it is still selectable and sized at `plan.default_cpu_per_case`. If your config file predates that, check it says 4, not 0 |
 
 To check a cfg without submitting anything:

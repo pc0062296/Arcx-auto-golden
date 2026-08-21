@@ -185,9 +185,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual([s["index_key"] for s in plan["excluded"]], ["1004"])
 
     def test_plan_priority_keyword_first(self):
+        # --no-keep-folders: the demo's index sources share one parent
+        # directory, so with folder grouping on there is one block and the
+        # order inside it is the selection order. That behaviour has its own
+        # tests; this one is about the keyword priority.
         code, out, _ = run_cli(
             ["plan", "--dir-map", self.demo["dir_map"], "--all",
-             "--max-slots", "1000", "--json"])
+             "--max-slots", "1000", "--no-keep-folders", "--json"])
         self.assertEqual(code, 0)
         plan = json.loads(out)
         first_wave_keys = [i["index_key"] for i in plan["waves"][0]["indices"]]

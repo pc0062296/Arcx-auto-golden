@@ -122,6 +122,9 @@ class PlanSettings:
     # sized is still perfectly runnable, so refusing to select it helps nobody;
     # the estimate is used and PREFLIGHT_SLOTS_ESTIMATED says so.
     default_cpu_per_case: int = 4
+    # Default for new groups: keep indices sharing a parent directory in one
+    # wave. A group can still turn it off before the checks are run.
+    keep_folders_together: bool = True
 
 
 @dataclass

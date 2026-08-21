@@ -108,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--max-slots", type=int, help="slot cap per wave")
     plan.add_argument("--mode", choices=["auto", "off"], default="auto",
                       help="auto splits into waves; off submits everything at once")
+    plan.add_argument("--no-keep-folders", action="store_true",
+                      help="let a wave boundary fall inside a directory "
+                           "(default: indices sharing a parent directory stay "
+                           "in one wave)")
     plan.add_argument("--show-command", action="store_true",
                       help="show the Arcx command each wave would run")
     plan.add_argument("--json", action="store_true", help="output JSON")
@@ -124,6 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="use every index in dir_map")
     submit.add_argument("--max-slots", type=int, help="slot cap per wave")
     submit.add_argument("--mode", choices=["auto", "off"], default="auto")
+    submit.add_argument("--no-keep-folders", action="store_true",
+                        help="let a wave boundary fall inside a directory")
     submit.add_argument("--run-id", help="name for this submission "
                         "(defaults to a timestamp)")
     submit.add_argument("--run-root", help="root for wave directories "
@@ -402,6 +408,13 @@ def _load_arcx_cfg(args, settings: Settings) -> Optional[ArcxConfig]:
 # plan
 # --------------------------------------------------------------------------
 
+def _keep_folders(args: argparse.Namespace, settings: Settings) -> bool:
+    """The flag turns it off; the setting decides the default."""
+    if getattr(args, "no_keep_folders", False):
+        return False
+    return settings.plan.keep_folders_together
+
+
 def cmd_plan(args: argparse.Namespace, settings: Settings) -> int:
     arcx = ArcxAdapter(settings.layout, settings.plan)
     dir_map = arcx.parse_dir_map(args.dir_map)
@@ -431,7 +444,8 @@ def cmd_plan(args: argparse.Namespace, settings: Settings) -> int:
 
     max_slots = args.max_slots or settings.plan.max_slots_per_wave
     mode = PlanMode.OFF if args.mode == "off" else PlanMode.AUTO
-    plan = plan_waves(specs, max_slots_per_wave=max_slots, mode=mode)
+    plan = plan_waves(specs, max_slots_per_wave=max_slots, mode=mode,
+                      keep_folders_together=_keep_folders(args, settings))
 
     commands: Dict[str, str] = {}
     if args.show_command:
@@ -483,6 +497,7 @@ def cmd_submit(args: argparse.Namespace, settings: Settings) -> int:
         specs,
         max_slots_per_wave=args.max_slots or settings.plan.max_slots_per_wave,
         mode=PlanMode.OFF if args.mode == "off" else PlanMode.AUTO,
+        keep_folders_together=_keep_folders(args, settings),
     )
 
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")

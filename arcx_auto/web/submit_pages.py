@@ -92,6 +92,7 @@ def render_draft(draft: Any, error: str = "", notice: str = "",
     """The submission being built: its groups, and how to add one."""
     group_rows = []
     for position, group in enumerate(draft.groups, start=1):
+        keep = getattr(group, "keep_folders_together", True)
         group_rows.append([
             str(position),
             esc(group.name),
@@ -101,6 +102,11 @@ def render_draft(draft: Any, error: str = "", notice: str = "",
             esc(", ".join(group.index_keys[:12])
                 + (" +%d" % (len(group.index_keys) - 12)
                    if len(group.index_keys) > 12 else "")),
+            '<form method="post" action="/submit/%s/folders" style="margin:0">'
+            '<input type="hidden" name="group" value="%d">'
+            "<button type='submit' class='link'>%s</button></form>"
+            % (esc(draft.id), position - 1,
+               "one wave per folder" if keep else "split anywhere"),
             '<form method="post" action="/submit/%s/drop" style="margin:0">'
             '<input type="hidden" name="group" value="%d">'
             '<button type="submit" class="link">remove</button></form>'
@@ -108,8 +114,14 @@ def render_draft(draft: Any, error: str = "", notice: str = "",
         ])
 
     groups = (table(
-        ["#", "group", "dir_map", "arcx.cfg", "indices", "which", ""],
+        ["#", "group", "dir_map", "arcx.cfg", "indices", "which", "folders",
+         ""],
         group_rows)
+        + "<p class='doc'>The <strong>folders</strong> column is what a wave "
+          "may be cut through. Kept together, indices sharing a parent "
+          "directory stay in one wave -- your directory structure is already "
+          "how the work is classified, and a batch that scatters it is a "
+          "batch somebody has to reassemble to debug. Click it to change.</p>"
         if group_rows else
         "<div class='empty'>no group yet -- add one below</div>")
 
@@ -492,12 +504,22 @@ def render_preflight(draft: Any, plan: Any, cfg_result: Any,
 
     wave_rows = []
     for wave in plan.waves:
+        folders = wave.folders
+        # Basenames: the full paths are long and identical up to the last
+        # component, which is the part that says what the batch is.
+        shown = ", ".join(os.path.basename(f.rstrip("/")) or f
+                          for f in folders[:4])
+        if len(folders) > 4:
+            shown += " +%d" % (len(folders) - 4)
+        over = wave.total_slots > plan.max_slots_per_wave
         wave_rows.append([
             esc(wave.name),
             esc(wave.group or "-"),
             str(len(wave.indices)),
             str(wave.total_cases),
-            str(wave.total_slots),
+            ("<span class='bad'>%d</span>" if over else "%d")
+            % wave.total_slots,
+            esc(shown or "-"),
             esc(", ".join(wave.index_keys[:10])),
         ])
 
@@ -559,8 +581,8 @@ def render_preflight(draft: Any, plan: Any, cfg_result: Any,
                ("fatal", len(fatal), "bad" if fatal else "good")]),
         unwatched, warn_note,
         esc(draft.run_id), esc(run_dir),
-        table(["wave", "group", "indices", "cases", "slots", "which"],
-              wave_rows),
+        table(["wave", "group", "indices", "cases", "slots", "folders",
+               "which"], wave_rows),
         "checks" if issue_rows else "checks: all clear",
         table(["severity", "id", "what"], issue_rows) if issue_rows
         else "<div class='empty good'>every check passed</div>",

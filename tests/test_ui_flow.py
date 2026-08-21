@@ -38,9 +38,9 @@ from tests.fixtures.fake_run import make_arcx_cfg, make_dir_map, make_index_sour
 # Grouping
 # ---------------------------------------------------------------------------
 
-def spec(key, gds=2, cpu=4):
-    return IndexSpec(index_key=key, path="/src/%s" % key, gds_count=gds,
-                     cpu_per_case=cpu)
+def spec(key, gds=2, cpu=4, folder=None):
+    return IndexSpec(index_key=key, path="/src/%s/%s" % (folder or key, key),
+                     gds_count=gds, cpu_per_case=cpu)
 
 
 class PlanGroupsTest(unittest.TestCase):
@@ -90,6 +90,59 @@ class PlanGroupsTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # The command queue
 # ---------------------------------------------------------------------------
+
+class GroupFolderFlagTest(unittest.TestCase):
+    """The switch travels: draft -> command -> SubmitGroup -> planner."""
+
+    def test_a_group_keeps_folders_together_by_default(self):
+        self.assertTrue(SubmitGroup("g", "/m", "/c").keep_folders_together)
+        self.assertTrue(DraftGroup("g", "/m", "/c").keep_folders_together)
+
+    def test_the_flag_survives_being_written_and_read_back(self):
+        group = DraftGroup("g", "/m", "/c", ["1000"],
+                           keep_folders_together=False)
+        draft = Draft(id="d1", groups=[group])
+        again = Draft.from_dict(draft.as_dict())
+        self.assertFalse(again.groups[0].keep_folders_together)
+
+    def test_an_older_command_without_the_flag_keeps_folders_together(self):
+        """A queued command written before the flag existed should get the
+        behaviour the settings describe, not silently the other one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings()
+            settings.state_root = tmp
+            executor = CommandExecutor(settings)
+            dir_map = make_dir_map(
+                os.path.join(tmp, "dir_map"),
+                {"1000": make_index_source(os.path.join(tmp, "src"), "1000",
+                                           gds_count=1)})
+            cfg = make_arcx_cfg(os.path.join(tmp, "arcx.cfg"))
+            groups = executor._read_groups({"groups": [
+                {"name": "g", "dir_map": dir_map, "arcx_cfg": cfg,
+                 "index_keys": ["1000"]}]})
+        self.assertTrue(groups[0].keep_folders_together)
+
+    def test_each_group_decides_for_itself(self):
+        """Only the person who made a selection knows whether its directory
+        structure means anything.
+        """
+        loose = SubmitGroup("loose", "/m", "/c", keep_folders_together=False)
+        kept = SubmitGroup("kept", "/m", "/c")
+        # One index in its own folder, then two sharing one. 8 slots each,
+        # cap 20: the cut lands in a different place depending on the flag.
+        plan = plan_groups([
+            (loose, [spec("a", folder="one"), spec("b", folder="two"),
+                     spec("c", folder="two")]),
+            (kept, [spec("d", folder="one"), spec("e", folder="two"),
+                    spec("f", folder="two")]),
+        ], max_slots_per_wave=20)
+        by_group = {}
+        for wave in plan.waves:
+            by_group.setdefault(wave.group, []).append(wave.index_keys)
+        self.assertEqual(by_group["loose"], [("a", "b"), ("c",)])
+        self.assertEqual(by_group["kept"], [("d",), ("e", "f")])
+
 
 class CommandQueueTest(unittest.TestCase):
     def setUp(self):
@@ -371,6 +424,29 @@ class WebActionTest(unittest.TestCase):
         page = self._get("/submit/%s" % draft_id)
         self.assertIn("other.cfg", page)
         self.assertIn("g2", page)
+
+    def test_the_folder_switch_is_per_group_and_shown(self):
+        draft_id = self._new_draft()
+        self._post("/submit/%s/add" % draft_id, {
+            "dir_map": self.dir_map, "arcx_cfg": self.cfg,
+            "index_keys": ["1000"], "name": "g1"})
+        page = self._get("/submit/%s" % draft_id)
+        self.assertIn("one wave per folder", page)
+
+        self._post("/submit/%s/folders" % draft_id, {"group": "0"})
+        draft = DraftStore(self.settings.expanded_state_root()).load(draft_id)
+        self.assertFalse(draft.groups[0].keep_folders_together)
+        self.assertIn("split anywhere", self._get("/submit/%s" % draft_id))
+
+        self._post("/submit/%s/folders" % draft_id, {"group": "0"})
+        draft = DraftStore(self.settings.expanded_state_root()).load(draft_id)
+        self.assertTrue(draft.groups[0].keep_folders_together)
+
+    def test_the_folder_switch_needs_a_real_group(self):
+        draft_id = self._new_draft()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/submit/%s/folders" % draft_id, {"group": "7"})
+        self.assertEqual(caught.exception.code, 404)
 
     def test_a_group_can_be_removed(self):
         draft_id = self._new_draft()

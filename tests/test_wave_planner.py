@@ -7,9 +7,15 @@ from arcx_auto.domain.models import IndexSpec
 from arcx_auto.services.wave_planner import plan_waves, regroup_manual
 
 
-def spec(key, gds, cpu, keywords=(), error=None):
+def spec(key, gds, cpu, keywords=(), error=None, folder=None):
+    """One index. By default in a directory of its own.
+
+    ``folder`` puts several indices under one parent, which is what
+    keep_folders_together acts on.
+    """
     return IndexSpec(
-        index_key=key, path="/p/%s" % key, gds_count=gds, cpu_per_case=cpu,
+        index_key=key, path="/p/%s/%s" % (folder or key, key),
+        gds_count=gds, cpu_per_case=cpu,
         keywords=tuple(keywords), priority=1 if keywords else 0, error=error,
     )
 
@@ -62,6 +68,113 @@ class PriorityTest(unittest.TestCase):
             max_slots_per_wave=100,
         )
         self.assertEqual(plan.waves[0].index_keys, ("c", "a", "b"))
+
+
+class FolderGroupingTest(unittest.TestCase):
+    """Indices sharing a parent directory stay in one wave.
+
+    The directory structure is already how the work is classified. A wave
+    boundary through the middle of one scatters related cases across batches
+    that start hours apart, and whoever debugs it has to put them back
+    together by hand.
+    """
+
+    def test_a_folder_is_not_cut_by_the_cap(self):
+        plan = plan_waves(
+            [spec("a", 10, 4, folder="blockA"),
+             spec("b", 10, 4, folder="blockA"),
+             spec("c", 10, 4, folder="blockB")],
+            max_slots_per_wave=100)
+        self.assertEqual(plan.waves[0].index_keys, ("a", "b"))
+        self.assertEqual(plan.waves[1].index_keys, ("c",))
+
+    def test_small_folders_still_share_a_wave(self):
+        """One wave per folder would be worse, not better: the gate releases
+        one wave at a time with a minimum interval, so twenty small folders
+        would become hours of waiting for work that fits in one batch.
+        """
+        plan = plan_waves(
+            [spec("a", 1, 4, folder="blockA"),
+             spec("b", 1, 4, folder="blockB"),
+             spec("c", 1, 4, folder="blockC")],
+            max_slots_per_wave=100)
+        self.assertEqual(len(plan.waves), 1)
+
+    def test_a_folder_over_the_cap_is_kept_whole_and_reported(self):
+        """Deliberate: rather over the cap than split. Deliberate is not the
+        same as invisible, so the plan says which folder did it and why.
+        """
+        plan = plan_waves(
+            [spec("a", 10, 4, folder="huge"),
+             spec("b", 10, 4, folder="huge"),
+             spec("c", 1, 4, folder="small")],
+            max_slots_per_wave=50)
+        self.assertEqual(plan.waves[0].index_keys, ("a", "b"))
+        self.assertEqual(plan.waves[0].total_slots, 80)
+        self.assertTrue(any("kept in one wave" in w for w in plan.warnings),
+                        plan.warnings)
+        self.assertTrue(any("over the cap" in w for w in plan.warnings))
+
+    def test_priority_moves_whole_folders(self):
+        """Sorting individual indices is itself one of the things that tears
+        a folder apart, so the sort works on folders.
+        """
+        plan = plan_waves(
+            [spec("plain_1", 5, 4, folder="plain"),
+             spec("plain_2", 5, 4, folder="plain"),
+             spec("sram_1", 5, 4, ("sram",), folder="sram_blk")],
+            max_slots_per_wave=40)
+        self.assertEqual(plan.waves[0].index_keys, ("sram_1",))
+        self.assertEqual(plan.waves[1].index_keys, ("plain_1", "plain_2"))
+
+    def test_one_keyword_hit_pulls_its_whole_folder_forward(self):
+        plan = plan_waves(
+            [spec("plain_1", 5, 4, folder="plain"),
+             spec("mixed_1", 5, 4, folder="ro_blk"),
+             spec("mixed_2", 5, 4, ("ro",), folder="ro_blk")],
+            max_slots_per_wave=40)
+        self.assertEqual(plan.waves[0].index_keys, ("mixed_1", "mixed_2"))
+
+    def test_folder_order_is_the_selection_order(self):
+        """No reordering to fill the gaps: "why is this index in this wave"
+        stays answerable, which is worth more than the slots a cleverer
+        packing would recover.
+        """
+        plan = plan_waves(
+            [spec("a", 15, 4, folder="big"),      # 60
+             spec("b", 15, 4, folder="mid"),      # 60
+             spec("c", 1, 4, folder="tiny")],     # 4
+            max_slots_per_wave=64)
+        self.assertEqual([w.index_keys for w in plan.waves],
+                         [("a",), ("b", "c")])
+
+    def test_turning_it_off_lets_the_cap_cut_wherever_it_falls(self):
+        """The same three indices, packed two different ways: with grouping
+        on the boundary lands between folders, with it off it lands wherever
+        the arithmetic runs out.
+        """
+        specs = [spec("a", 10, 4, folder="blockA"),      # 40
+                 spec("b", 10, 4, folder="blockB"),      # 40
+                 spec("c", 10, 4, folder="blockB")]      # 40
+        loose = plan_waves(specs, max_slots_per_wave=100,
+                           keep_folders_together=False)
+        self.assertEqual([w.index_keys for w in loose.waves],
+                         [("a", "b"), ("c",)])
+        kept = plan_waves(specs, max_slots_per_wave=100)
+        self.assertEqual([w.index_keys for w in kept.waves],
+                         [("a",), ("b", "c")])
+
+    def test_off_mode_is_still_one_wave(self):
+        plan = plan_waves(
+            [spec("a", 10, 4, folder="x"), spec("b", 10, 4, folder="y")],
+            max_slots_per_wave=8, mode=PlanMode.OFF)
+        self.assertEqual(len(plan.waves), 1)
+
+    def test_the_wave_reports_which_folders_it_draws_from(self):
+        plan = plan_waves(
+            [spec("a", 1, 4, folder="blockA"), spec("b", 1, 4, folder="blockB")],
+            max_slots_per_wave=100)
+        self.assertEqual(plan.waves[0].folders, ("/p/blockA", "/p/blockB"))
 
 
 class OversizeTest(unittest.TestCase):

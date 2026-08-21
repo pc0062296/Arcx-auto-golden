@@ -198,6 +198,51 @@ def index_in_use(ctx: PreflightContext) -> Optional[Issue]:
     )
 
 
+@qa_check(id="PREFLIGHT_WAVE_OVERSIZED", title="a wave is over the slot cap",
+          severity=Severity.WARN, scope=WAVE, stage=PRE)
+def wave_oversized(ctx: PreflightContext) -> Optional[Issue]:
+    """A wave asks for more slots than the cap allows.
+
+    There are two ways to get here and both are deliberate. A single index can
+    exceed the cap on its own, and a folder kept together can exceed it
+    between them: told to keep a directory in one wave, the planner would
+    rather go over the cap than cut the directory in half, because a batch
+    that scatters related cases is one somebody has to reassemble by hand
+    every time they debug it.
+
+    Deliberate is not the same as invisible. Going over the cap means more
+    jobs in the queue at once than the number that was chosen to protect it,
+    and the person pressing submit is the one who should decide whether that
+    is fine here -- by raising the cap, by splitting the selection, or by
+    turning folder grouping off for this group.
+
+    A warning, not a block: it is the outcome of an instruction somebody gave,
+    and refusing it would be the system overruling a decision made on purpose.
+    """
+    plan = ctx.plan
+    if plan is None:
+        return None
+    oversized = plan.oversized_waves
+    if not oversized:
+        return None
+    worst = max(w.total_slots for w in oversized)
+    return ctx.warn(
+        "%d wave(s) are over the cap of %d slots (largest: %d)"
+        % (len(oversized), plan.max_slots_per_wave, worst),
+        evidence={
+            "waves": [
+                {"wave": w.name, "slots": w.total_slots,
+                 "folders": list(w.folders),
+                 "indices": list(w.index_keys)}
+                for w in oversized
+            ],
+            "cap": plan.max_slots_per_wave,
+            "hint": "raise plan.max_slots_per_wave, select fewer indices, or "
+                    "turn off folder grouping for this group",
+        },
+    )
+
+
 @qa_check(id="PREFLIGHT_SLOTS_ESTIMATED", title="wave size is based on a guess",
           severity=Severity.WARN, scope=WAVE, stage=PRE)
 def slots_estimated(ctx: PreflightContext) -> Optional[Issue]:

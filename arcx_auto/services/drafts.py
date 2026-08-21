@@ -33,11 +33,16 @@ class DraftGroup:
     dir_map: str
     arcx_cfg: str
     index_keys: List[str] = field(default_factory=list)
+    #: Keep indices sharing a parent directory in one wave. Per group,
+    #: because only the person who made the selection knows whether its
+    #: directory structure means anything.
+    keep_folders_together: bool = True
 
     def as_dict(self) -> Dict[str, Any]:
         return {"name": self.name, "dir_map": self.dir_map,
                 "arcx_cfg": self.arcx_cfg,
-                "index_keys": list(self.index_keys)}
+                "index_keys": list(self.index_keys),
+                "keep_folders_together": self.keep_folders_together}
 
 
 @dataclass
@@ -96,6 +101,8 @@ class Draft:
                     dir_map=str(g.get("dir_map") or ""),
                     arcx_cfg=str(g.get("arcx_cfg") or ""),
                     index_keys=[str(k) for k in (g.get("index_keys") or [])],
+                    keep_folders_together=bool(
+                        g.get("keep_folders_together", True)),
                 )
                 for g in (data.get("groups") or [])
                 if isinstance(g, dict)

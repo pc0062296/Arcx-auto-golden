@@ -313,6 +313,17 @@ class IndexSpec:
         return self.cpu_per_case * self.gds_count
 
     @property
+    def folder(self) -> str:
+        """The directory this index belongs to: the one above it.
+
+        A dir_map entry points at the index directory itself, so the level
+        above is where the classification lives -- what somebody meant by
+        "these belong together".
+        """
+        path = str(self.path or "").rstrip("/")
+        return os.path.dirname(path) or path
+
+    @property
     def usable(self) -> bool:
         """Complete enough to be placed into a wave."""
         return self.error is None and self.gds_count > 0 and self.cpu_per_case > 0
@@ -336,6 +347,13 @@ class SubmitGroup:
     dir_map: str
     arcx_cfg: str
     index_keys: Tuple[str, ...] = ()
+    #: Keep indices that share a parent directory in one wave. The directory
+    #: structure is already how the work is classified, so cutting a wave
+    #: through the middle of one scatters related cases across batches that
+    #: start hours apart -- which somebody then has to reassemble by hand when
+    #: something fails. Per group, because only the person who made the
+    #: selection knows whether its folders mean anything.
+    keep_folders_together: bool = True
 
     @property
     def label(self) -> str:
@@ -371,6 +389,15 @@ class Wave:
     @property
     def total_cases(self) -> int:
         return sum(i.gds_count for i in self.indices)
+
+    @property
+    def folders(self) -> Tuple[str, ...]:
+        """The directories this wave draws from, in the order they appear."""
+        out = []
+        for index in self.indices:
+            if index.folder not in out:
+                out.append(index.folder)
+        return tuple(out)
 
     @property
     def index_keys(self) -> Tuple[str, ...]:

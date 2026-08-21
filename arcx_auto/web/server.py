@@ -396,6 +396,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._submit_add(store, draft, form)
         if action == "drop":
             return self._submit_drop(store, draft, form)
+        if action == "folders":
+            return self._submit_folders(store, draft, form)
         if action == "workspace":
             return self._submit_workspace(store, draft, form)
         if action == "autoplan":
@@ -660,6 +662,29 @@ class _Handler(BaseHTTPRequestHandler):
         store.save(draft)
         self._redirect("/submit/%s?notice=%s" % (
             draft.id, urllib.parse.quote("workspace set to %s" % chosen)))
+
+    def _submit_folders(self, store, draft,
+                        form: Dict[str, List[str]]) -> None:
+        """Turn folder grouping on or off for one group.
+
+        Before the checks are run, because it changes what the waves are --
+        which is the thing the checks page exists to show.
+        """
+        try:
+            position = int(_first(form, "group"))
+        except ValueError:
+            return self._error(400, "which group?")
+        if not 0 <= position < len(draft.groups):
+            return self._error(404, "no such group")
+        group = draft.groups[position]
+        group.keep_folders_together = not group.keep_folders_together
+        store.save(draft)
+        self._redirect("/submit/%s?notice=%s" % (
+            draft.id, urllib.parse.quote(
+                "%s: folders are %s"
+                % (group.name,
+                   "kept together" if group.keep_folders_together
+                   else "allowed to split across waves"))))
 
     def _submit_check(self, store, draft, form: Dict[str, List[str]]) -> None:
         """Plan and check. Creates nothing and submits nothing."""

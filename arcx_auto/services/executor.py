@@ -202,7 +202,12 @@ class CommandExecutor:
                 raise IntentError("%s selects no index" % name)
             groups.append(SubmitGroup(
                 name=name, dir_map=dir_map, arcx_cfg=arcx_cfg,
-                index_keys=tuple(str(k) for k in keys)))
+                index_keys=tuple(str(k) for k in keys),
+                # Absent means on: an older queued command, or one written by
+                # hand, gets the behaviour the settings describe rather than
+                # silently the other one.
+                keep_folders_together=bool(
+                    entry.get("keep_folders_together", True))))
         return groups
 
     def _build_specs(

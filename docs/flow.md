@@ -226,6 +226,35 @@ out at once. Ticking fifty indices does not send fifty: the slot cap
 (`GDS count x O_QCAP_LSF_NUM`) splits each group, because the person ticking
 boxes has not thought about the queue.
 
+### Where a wave may be cut
+
+```
+  the directory a dir_map entry points at is the index;
+  the level above it is the classification
+
+  /proj/chipA/blockA/index1000  \
+  /proj/chipA/blockA/index1001   |  one folder -> one wave
+  /proj/chipA/blockB/index1002  ---  the cut may land here
+```
+
+Folders are the unit, not indices:
+
+- the priority keywords move a **whole folder** (a folder is as urgent as its
+  most urgent index) -- sorting individual indices is itself one of the things
+  that tears a folder apart;
+- small folders still share a wave. One wave per folder would be worse: the
+  gate releases one wave at a time with a minimum interval, so twenty small
+  folders would become hours of waiting for work that fits in one batch;
+- a folder over the cap is **kept whole anyway**. Over the cap is preferred to
+  cut in half, and `PREFLIGHT_WAVE_OVERSIZED` reports it before submission;
+- no reordering to fill the gaps. First fit in the chosen order keeps "why is
+  this index in this wave" answerable, which is worth more than the few percent
+  of slot utilisation a cleverer packing would win (architecture 5.2).
+
+Per group, because only the person who made the selection knows whether its
+directory structure means anything. Default on, from
+`plan.keep_folders_together`.
+
 Each wave carries **its own** dir_map and cfg, since a wave is one Arcx command
 against one cfg, and they are snapshotted into the wave directory so QA three
 days later reads what actually ran.

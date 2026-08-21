@@ -479,7 +479,12 @@ class PreflightCheckTest(unittest.TestCase):
         self.settings.preflight.min_disk_free_ratio = 0.0
         self.settings.preflight.warn_disk_free_ratio = 0.0
         self.dir_map, self.cfg, self.entries = build_fixture(self.tmp.name)
-        self.plan = make_plan(self.entries, self.settings)
+        # A cap the fixture fits inside. Its index directories share one
+        # parent, so with folder grouping on they are one block and one wave;
+        # at the old cap of 100 that wave is over it, which is a finding in
+        # its own right (PREFLIGHT_WAVE_OVERSIZED) with its own test below.
+        # This fixture is for asking what a plan with nothing wrong reports.
+        self.plan = make_plan(self.entries, self.settings, max_slots=1000)
         self.run_dir = os.path.join(self.tmp.name, "runs", "r1")
 
     def tearDown(self):
@@ -495,6 +500,24 @@ class PreflightCheckTest(unittest.TestCase):
 
     def test_clean_plan_passes(self):
         self.assertEqual(self._ids(), set())
+
+    def test_a_wave_over_the_cap_is_reported(self):
+        """Keeping a folder together can put a wave over the cap. That is the
+        instruction working as asked, and it still has to be visible: more
+        jobs go out at once than the cap was chosen to allow.
+        """
+        plan = make_plan(self.entries, self.settings, max_slots=10)
+        ids = self._ids(plan=plan)
+        self.assertIn("PREFLIGHT_WAVE_OVERSIZED", ids)
+
+    def test_the_oversize_report_does_not_block(self):
+        plan = make_plan(self.entries, self.settings, max_slots=10)
+        result = QaRunner(self.settings).run_preflight(
+            plan, self.run_dir, arcx_config=parse_arcx_cfg(self.cfg),
+            lsf=FakeLsf(), run_root=os.path.dirname(self.run_dir))
+        oversize = [i for i in result.issues
+                    if i.id == "PREFLIGHT_WAVE_OVERSIZED"]
+        self.assertEqual([i.severity.value for i in oversize], ["WARN"])
 
     def test_lsf_missing_is_fatal(self):
         self.assertIn("PREFLIGHT_LSF_UNAVAILABLE",
