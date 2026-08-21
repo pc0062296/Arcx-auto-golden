@@ -167,6 +167,47 @@ you are allowed to press and then told off for is worse than no button.
 included -- otherwise it could say "all clear" and then have the submission
 refused for an unreachable `bsub`.
 
+### Auto select group
+
+```
+   a working directory
+     dir_map                 one, always called that
+     chipA_typical.cfg       the naming prefix is read from this
+     chipA_Cbest_T.cfg       one cfg per corner
+     chipA_Cworst_T.cfg
+          |
+          v
+   for each index in dir_map:
+          |
+          +-- disable_qcap_golden in its directory?  -> out (the owner said so)
+          +-- a path component matching *bak, *_old? -> out
+          +-- unrunnable (no GDS)?                   -> out
+          +-- component after corner_v2g = corner
+          |     corner, and a cfg for it   -> that cfg
+          |     corner, and no cfg for it  -> out (never swept into typical)
+          |     no corner                  -> <naming>_typical.cfg
+          v
+   a proposal: every index, its verdict, and the reason
+          |
+          v
+   a person edits it, then it becomes groups
+```
+
+Corner names are **matched, not constructed**. `Cbest_T` in a path may be
+`cbt` in a file name and nothing can derive that, so the cfgs present are
+discovered and both sides are canonicalised through `corner_aliases`.
+Constructing `<naming>_<corner>.cfg` would also mean parsing that name back
+into a prefix and a corner, which is ambiguous the moment a corner contains an
+underscore -- and they always do.
+
+Every index appears in the proposal, including the ones left out. An automatic
+grouping that silently drops half of them produces a batch that looks complete
+when it finishes, which is the failure this whole system exists to prevent.
+
+The cfg paths come back through a form, so on submit the directory is read
+again and anything not in it is dropped: the cfg a wave runs against is not
+something a form field gets to name.
+
 ### Groups and waves
 
 ```

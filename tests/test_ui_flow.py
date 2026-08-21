@@ -451,6 +451,167 @@ class WebActionTest(unittest.TestCase):
         self.assertIn("no daemon is running", self._get("/commands"))
 
 
+class AutoGroupWebTest(unittest.TestCase):
+    """Auto grouping from the browser: propose, edit, add.
+
+    The proposal is only worth having if it can be overridden, so half of
+    these are about the override.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.settings = Settings()
+        cls.settings.state_root = os.path.join(cls.tmp.name, "state")
+        cls.settings.run_root = os.path.join(cls.tmp.name, "runs")
+        cls.settings.export.shared_root = os.path.join(cls.tmp.name, "shared")
+        cls.settings.auto_group.corner_aliases = {"Cbest_T": ["cbt"]}
+
+        cls.work = os.path.join(cls.tmp.name, "work")
+        os.makedirs(cls.work)
+        make_arcx_cfg(os.path.join(cls.work, "chipA_typical.cfg"))
+        make_arcx_cfg(os.path.join(cls.work, "chipA_cbt.cfg"))
+
+        src = os.path.join(cls.tmp.name, "src")
+        entries = {
+            "1000": make_index_source(
+                os.path.join(src, "corner_v2g", "Cbest_T"), "1000",
+                gds_count=2),
+            "1001": make_index_source(os.path.join(src, "plain"), "1001",
+                                      gds_count=2),
+            "1002": make_index_source(
+                os.path.join(src, "corner_v2g", "Whot_T"), "1002",
+                gds_count=2),
+        }
+        cls.entries = entries
+        make_dir_map(os.path.join(cls.work, "dir_map"), entries)
+
+        cls.ready = _Ready()
+        threading.Thread(
+            target=serve,
+            args=(WebOptions(state_root=cls.settings.expanded_state_root(),
+                             port=0, refresh_sec=0, settings=cls.settings),
+                  cls.ready),
+            daemon=True).start()
+        cls.ready.wait(5)
+        cls.base = "http://127.0.0.1:%d" % cls.ready.port
+
+    @classmethod
+    def tearDownClass(cls):
+        httpd = getattr(cls.ready, "httpd", None)
+        if httpd is not None:
+            httpd.shutdown()
+        cls.tmp.cleanup()
+
+    def _post(self, path, data):
+        payload = urllib.parse.urlencode(data, doseq=True).encode()
+        return urllib.request.urlopen(urllib.request.Request(
+            self.base + path, data=payload), timeout=10)
+
+    def _get(self, path):
+        return urllib.request.urlopen(
+            self.base + path, timeout=10).read().decode()
+
+    def _new_draft(self):
+        return self._post("/submit/new", {}).geturl().rstrip(
+            "/").split("/")[-1].split("?")[0]
+
+    def _plan_page(self, draft_id):
+        return self._post("/submit/%s/autoplan" % draft_id,
+                          {"directory": self.work}).read().decode()
+
+    def test_the_proposal_names_every_index_and_its_reason(self):
+        body = self._plan_page(self._new_draft())
+        for key in ("1000", "1001", "1002"):
+            self.assertIn(key, body)
+        self.assertIn("chipA_cbt.cfg", body)
+        self.assertIn("chipA_typical.cfg", body)
+        self.assertIn("no cfg", body)          # 1002 has no Whot_T cfg
+
+    def test_adding_the_proposal_creates_one_group_per_cfg(self):
+        draft_id = self._new_draft()
+        self._plan_page(draft_id)
+        self._post("/submit/%s/autoadd" % draft_id, {
+            "directory": self.work,
+            "index_keys": ["1000", "1001"],
+            "cfg_1000": os.path.join(self.work, "chipA_cbt.cfg"),
+            "cfg_1001": os.path.join(self.work, "chipA_typical.cfg"),
+        })
+        draft = DraftStore(self.settings.expanded_state_root()).load(draft_id)
+        self.assertEqual(len(draft.groups), 2)
+        by_name = {g.name: g for g in draft.groups}
+        self.assertEqual(by_name["cbt"].index_keys, ["1000"])
+        self.assertEqual(by_name["typical"].index_keys, ["1001"])
+        self.assertTrue(all(g.dir_map.endswith("dir_map")
+                            for g in draft.groups))
+
+    def test_the_proposal_can_be_overridden(self):
+        """An index the tool left out can be put somewhere by hand, and one
+        it proposed can be moved. The proposal is a suggestion.
+        """
+        draft_id = self._new_draft()
+        self._plan_page(draft_id)
+        self._post("/submit/%s/autoadd" % draft_id, {
+            "directory": self.work,
+            "index_keys": ["1002"],
+            "cfg_1002": os.path.join(self.work, "chipA_typical.cfg"),
+        })
+        draft = DraftStore(self.settings.expanded_state_root()).load(draft_id)
+        self.assertEqual([g.index_keys for g in draft.groups], [["1002"]])
+
+    def test_a_cfg_outside_the_directory_is_refused(self):
+        """The cfg a wave runs against cannot be whatever a form field says.
+
+        The directory is read again on submit, and anything not in it is
+        dropped rather than trusted.
+        """
+        draft_id = self._new_draft()
+        self._plan_page(draft_id)
+        body = self._post("/submit/%s/autoadd" % draft_id, {
+            "directory": self.work,
+            "index_keys": ["1000"],
+            "cfg_1000": "/etc/passwd",
+        }).read().decode()
+        draft = DraftStore(self.settings.expanded_state_root()).load(draft_id)
+        self.assertEqual(draft.groups, [])
+        self.assertIn("skip", body)
+
+    def test_an_unknown_index_key_is_dropped(self):
+        draft_id = self._new_draft()
+        self._plan_page(draft_id)
+        self._post("/submit/%s/autoadd" % draft_id, {
+            "directory": self.work,
+            "index_keys": ["9999"],
+            "cfg_9999": os.path.join(self.work, "chipA_typical.cfg"),
+        })
+        draft = DraftStore(self.settings.expanded_state_root()).load(draft_id)
+        self.assertEqual(draft.groups, [])
+
+    def test_a_directory_without_a_dir_map_says_so(self):
+        draft_id = self._new_draft()
+        body = self._post("/submit/%s/autoplan" % draft_id,
+                          {"directory": self.tmp.name}).read().decode()
+        self.assertIn("dir_map", body)
+
+    def test_the_picker_offers_the_directory_that_has_a_dir_map(self):
+        draft_id = self._new_draft()
+        body = self._get("/submit/%s/auto?path=%s"
+                         % (draft_id, urllib.parse.quote(self.work)))
+        self.assertIn("group everything in this directory", body)
+
+    def test_the_picker_says_when_there_is_no_dir_map_here(self):
+        draft_id = self._new_draft()
+        body = self._get("/submit/%s/auto?path=%s"
+                         % (draft_id, urllib.parse.quote(self.tmp.name)))
+        self.assertIn("No <code>dir_map</code> here", body)
+
+    def test_grouping_creates_nothing_on_disk(self):
+        before = sorted(os.listdir(self.work))
+        draft_id = self._new_draft()
+        self._plan_page(draft_id)
+        self.assertEqual(sorted(os.listdir(self.work)), before)
+
+
 class WorkspaceTargetingTest(unittest.TestCase):
     """Two directories, two daemons, one browser.
 

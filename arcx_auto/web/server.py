@@ -351,6 +351,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, "no such draft")
         if len(parts) == 2 and parts[1] == "pending":
             return self._submit_pending(draft)
+        if len(parts) == 2 and parts[1] == "auto":
+            return self._auto_pick(draft)
         query = urllib.parse.parse_qs(
             urllib.parse.urlparse(self.path).query)
         return self._html(submit_pages.render_draft(
@@ -396,6 +398,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._submit_drop(store, draft, form)
         if action == "workspace":
             return self._submit_workspace(store, draft, form)
+        if action == "autoplan":
+            return self._auto_plan(draft, form)
+        if action == "autoadd":
+            return self._auto_add(store, draft, form)
         if action == "check":
             return self._submit_check(store, draft, form)
         if action == "go":
@@ -471,6 +477,102 @@ class _Handler(BaseHTTPRequestHandler):
         form = {"dir_map": [draft.pending.get("dir_map", "")],
                 "arcx_cfg": [draft.pending.get("arcx_cfg", "")]}
         return self._submit_browse(draft, form)
+
+    # -- Auto grouping -------------------------------------------------
+
+    def _auto_pick(self, draft) -> None:
+        """Choose the directory to group from."""
+        from arcx_auto.services.browse import list_dir
+
+        settings = self.options.resolved_settings()
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        path = (query.get("path") or [""])[0]
+        if not path:
+            path = draft.last_dir or self._draft_run_root(draft)
+            if not os.path.isdir(os.path.expanduser(path)):
+                path = os.path.dirname(os.path.expanduser(path).rstrip("/"))
+            if not os.path.isdir(os.path.expanduser(path or "")):
+                path = os.path.expanduser("~")
+
+        listing = list_dir(path)
+        if not listing.error:
+            store = self._drafts()
+            draft.last_dir = listing.path
+            store.save(draft)
+        has_dir_map = os.path.isfile(os.path.join(
+            listing.path, settings.auto_group.dir_map_name))
+        self._html(submit_pages.render_auto_pick(
+            listing, draft.id, has_dir_map=has_dir_map))
+
+    def _auto_plan(self, draft, form: Dict[str, List[str]]) -> None:
+        """Read one directory and show what it would be grouped into."""
+        from arcx_auto.services.autogroup import scan_directory
+
+        directory = os.path.expanduser(_first(form, "directory"))
+        plan = scan_directory(directory, self.options.resolved_settings())
+        if not plan.ok:
+            from arcx_auto.services.browse import list_dir
+
+            listing = list_dir(directory)
+            return self._html(submit_pages.render_auto_pick(
+                listing, draft.id, has_dir_map=False, error=plan.error))
+        self._html(submit_pages.render_auto_plan(draft, plan))
+
+    def _auto_add(self, store, draft, form: Dict[str, List[str]]) -> None:
+        """Turn the proposal, as edited, into groups on the draft.
+
+        The directory is read again rather than trusted from the form: what
+        comes back is a set of index keys and cfg paths, and both have to be
+        ones this directory actually offers. A cfg path taken at face value
+        would let a form field name any file on the disk as the cfg a wave
+        runs against.
+        """
+        from arcx_auto.services.autogroup import scan_directory
+        from arcx_auto.services.drafts import DraftGroup
+
+        directory = os.path.expanduser(_first(form, "directory"))
+        plan = scan_directory(directory, self.options.resolved_settings())
+        if not plan.ok:
+            return self._html(submit_pages.render_draft(
+                draft, error=plan.error,
+                workspaces=self._workspaces(),
+                run_root=self._draft_run_root(draft)))
+
+        known_cfgs = {c.path: c for c in plan.cfgs}
+        known_keys = {a.index_key for a in plan.assignments}
+        chosen = [k for k in (form.get("index_keys") or []) if k in known_keys]
+
+        by_cfg: Dict[str, List[str]] = {}
+        for key in chosen:
+            cfg = _first(form, "cfg_%s" % key)
+            if cfg not in known_cfgs:
+                continue        # "skip", or something this directory has not
+            by_cfg.setdefault(cfg, []).append(key)
+
+        if not by_cfg:
+            return self._html(submit_pages.render_auto_plan(
+                draft, plan,
+                error="nothing was selected, or every selected index was set "
+                      "to skip"))
+
+        added = 0
+        for cfg in (c.path for c in plan.cfgs):
+            keys = by_cfg.get(cfg)
+            if not keys:
+                continue
+            draft.groups.append(DraftGroup(
+                name=known_cfgs[cfg].suffix,
+                dir_map=plan.dir_map,
+                arcx_cfg=cfg,
+                index_keys=keys,
+            ))
+            added += 1
+        draft.pending = {}
+        store.save(draft)
+        self._redirect("/submit/%s?notice=%s" % (
+            draft.id, urllib.parse.quote(
+                "added %d group(s), %d index/indices"
+                % (added, len(chosen)))))
 
     def _submit_browse(self, draft, form: Dict[str, List[str]]) -> None:
         """Read a dir_map and show what each index would cost."""

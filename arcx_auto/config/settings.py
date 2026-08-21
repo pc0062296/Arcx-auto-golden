@@ -125,6 +125,48 @@ class PlanSettings:
 
 
 @dataclass
+class AutoGroupSettings:
+    """Forming the groups from a directory instead of by hand.
+
+    A working directory holds one ``dir_map`` and several arcx cfgs, one per
+    corner. Which index belongs to which cfg is written in the index paths
+    already -- so having a person read it off the screen and tick boxes is
+    transcription, not a decision, and transcription is what a tool is for.
+
+    Everything here is a convention about somebody else's directory layout,
+    which is exactly the kind of thing that must be settings rather than code
+    (architecture 9.3).
+    """
+
+    #: The directory component that announces a corner. The corner is the
+    #: component *after* it, which is not always the last one.
+    corner_marker: str = "corner_v2g"
+    #: <naming>_typical.cfg both names the fallback cfg and is where the
+    #: naming prefix is read from, so no prefix has to be configured.
+    typical_suffix: str = "typical"
+    #: A file the owner of an index directory drops in to opt out. Read only:
+    #: those directories are not ours to write to.
+    disable_flag: str = "disable_qcap_golden"
+    #: The dir_map is found by name, because there is exactly one per
+    #: directory and it is always called this.
+    dir_map_name: str = "dir_map"
+    #: Path components matching any of these exclude the index. Matched
+    #: case-insensitively against every component and against the index key,
+    #: so one pattern covers a directory anywhere above the index.
+    exclude_path_globs: List[str] = field(
+        default_factory=lambda: ["*_old", "*bak", "*backup", "*back"])
+    #: Corner names that mean the same corner. The directory and the cfg do
+    #: not have to spell it the same way, and no rule could derive that cbt
+    #: and Cbest_T are one thing -- so it is stated.
+    #:
+    #:     corner_aliases:
+    #:       Cbest_T: [cbest_t, cbt, c_best_t]
+    #:
+    #: The key is only a label; matching is between the members.
+    corner_aliases: Dict[str, List[str]] = field(default_factory=dict)
+
+
+@dataclass
 class GateSettings:
     """Submission gate (architecture 5.4).
 
@@ -513,6 +555,7 @@ class Settings:
     layout: LayoutSettings = field(default_factory=LayoutSettings)
     monitor: MonitorSettings = field(default_factory=MonitorSettings)
     plan: PlanSettings = field(default_factory=PlanSettings)
+    auto_group: AutoGroupSettings = field(default_factory=AutoGroupSettings)
     gate: GateSettings = field(default_factory=GateSettings)
     lsf: LsfSettings = field(default_factory=LsfSettings)
     qa: QaSettings = field(default_factory=QaSettings)

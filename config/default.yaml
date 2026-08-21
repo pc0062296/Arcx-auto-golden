@@ -82,6 +82,37 @@ plan:
   default_cpu_per_case: 4
 
 # ---------------------------------------------------------------------------
+# Auto select group
+#
+# Forming the groups from a working directory instead of ticking two hundred
+# boxes. The directory holds one dir_map and one cfg family; which index
+# belongs to which cfg is already written in the index paths.
+# ---------------------------------------------------------------------------
+auto_group:
+  # The corner is the path component AFTER this one -- not necessarily the
+  # last, since an index may sit further down.
+  #   /proj/chipA/corner_v2g/Cbest_T/index1000  ->  corner Cbest_T
+  corner_marker: "corner_v2g"
+  # <naming>_typical.cfg is both the fallback cfg and where the naming prefix
+  # is read from, so no prefix has to be configured here.
+  typical_suffix: "typical"
+  # A file the owner of an index directory drops in to opt out. Read only:
+  # those directories are not ours to write to.
+  disable_flag: "disable_qcap_golden"
+  dir_map_name: "dir_map"
+  # Matched case-insensitively against every path component and against the
+  # index key, so one pattern covers a directory anywhere above the index.
+  exclude_path_globs: ["*_old", "*bak", "*backup", "*back"]
+  # Corner names that mean the same corner. The directory and the cfg file do
+  # not have to spell it the same way, and no rule could derive that cbt and
+  # Cbest_T are one thing -- so it is stated. The key is only a label.
+  #
+  #   corner_aliases:
+  #     Cbest_T: [cbest_t, cbt, c_best_t]
+  #     Cworst_T: [cworst_t, cwt]
+  corner_aliases: {}
+
+# ---------------------------------------------------------------------------
 # Submission gate (architecture 5.4)
 #   release = min_interval elapsed AND (NJOBS < threshold OR max_wait elapsed)
 # ---------------------------------------------------------------------------

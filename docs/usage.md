@@ -112,6 +112,57 @@ tool reads them, it never edits them.
 
 ## 2. Pick what to run
 
+### The quick way: auto select group
+
+Press **new submission**, then **auto select group...**, and click to the
+directory that holds your `dir_map`. Everything else is read from that
+directory:
+
+```
+directory: /proj/chipA/run3      naming: chipA
+cfg files: chipA_typical.cfg, chipA_Cbest_T.cfg, chipA_Cworst_T.cfg
+
+    index   corner     cfg                  why
+[x] 1000    Cbest_T    chipA_Cbest_T.cfg    corner Cbest_T -> chipA_Cbest_T.cfg
+[x] 1001    cbt        chipA_Cbest_T.cfg    corner cbt -> chipA_Cbest_T.cfg
+[x] 1002    -          chipA_typical.cfg    no corner -> chipA_typical.cfg
+[ ] 1003    Whot_T     -- skip --           no cfg for this corner (Whot_T)
+[ ] 1004    -          -- skip --           path matches an excluded pattern (*bak)
+[ ] 1005    -          -- skip --           disable flag in the index directory
+```
+
+The rules:
+
+- **The corner is the path component after `corner_v2g`** -- not necessarily
+  the last one, so an index further down still finds its corner.
+- **It goes to the cfg for that corner**, matched by name rather than
+  constructed: `Cbest_T` in a path and `cbt` in a file name are the same corner
+  if you say so in `auto_group.corner_aliases`.
+- **No corner goes to `<naming>_typical.cfg`**, which is also where the naming
+  prefix is read from.
+- **A corner with no cfg is left out**, never swept into typical.
+- **An index directory containing `disable_qcap_golden` is left out.** That
+  file is read, never written -- opting out belongs to whoever owns the data.
+- **Backup-looking paths are left out**: anything under a directory matching
+  `*_old`, `*bak`, `*backup`, `*back`. The list is
+  `auto_group.exclude_path_globs`.
+
+**Every index has a row, including the ones left out, with the reason.**
+Nothing is hidden, and every row can be overridden -- tick one it skipped, or
+move one to a different cfg with the dropdown. **add these groups** then makes
+one group per cfg, and you carry on from step 4 exactly as usual.
+
+Set the corner aliases once, in `~/.arcx-auto/config/default.yaml`:
+
+```yaml
+auto_group:
+  corner_aliases:
+    Cbest_T: [cbest_t, cbt, c_best_t]
+    Cworst_T: [cworst_t, cwt]
+```
+
+### The manual way
+
 Click **new submission**, then **choose a dir_map and an arcx.cfg...** and
 click your way to them. The files that look like a `dir_map` or a cfg in the
 directory you are in are offered as buttons at the top, so it is usually one

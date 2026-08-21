@@ -25,6 +25,7 @@ with it disabled.
 from __future__ import annotations
 
 import os
+import urllib.parse
 from typing import Any, Dict, List, Optional, Sequence
 
 from arcx_auto.web.html import (
@@ -140,15 +141,22 @@ def render_draft(draft: Any, error: str = "", notice: str = "",
 <h2>groups</h2>
 %s
 <h2>add a group</h2>
+<form method="get" action="/submit/%s/auto" style="margin-bottom:10px">
+  <button type="submit">auto select group...</button>
+  <p class='doc'>Point it at a working directory. It reads the
+  <code>dir_map</code> and the cfg family beside it, works out which corner
+  each index belongs to, and proposes the groups -- with every index it left
+  out, and why. You can change any of it before it is added.</p>
+</form>
 <form method="get" action="/pick/%s/dir_map">
   <button type="submit">choose a dir_map and an arcx.cfg...</button>
-  <p class='doc'>Click through to the files; both are read, not copied. You
-  pick the indices on the next page.</p>
+  <p class='doc'>Or do it by hand: click through to the files; both are read,
+  not copied. You pick the indices on the next page.</p>
 </form>
 %s
 """ % (_error(error), _notice(notice),
        _workspace_block(draft, workspaces, run_root),
-       groups, esc(draft.id), ready))
+       groups, esc(draft.id), esc(draft.id), ready))
 
 
 def _workspace_block(draft: Any, entries: Sequence[Any],
@@ -211,6 +219,129 @@ def _workspace_block(draft: Any, entries: Sequence[Any],
             % (esc(current), note,
                table(["run_root", "daemon", "run id", "started in", ""],
                      rows)))
+
+
+def render_auto_pick(listing: Any, draft_id: str,
+                     has_dir_map: bool = False, error: str = "") -> str:
+    """Choose the directory to group from.
+
+    A directory rather than two files: the whole point of auto grouping is
+    that everything needed is already in one place -- one dir_map, one cfg
+    family -- so naming the place is the only thing left for a person to do.
+    """
+    rows = []
+    for entry in listing.entries:
+        if not entry.is_dir:
+            continue
+        rows.append([
+            "<a href='/submit/%s/auto?path=%s'>%s/</a>"
+            % (esc(draft_id), esc(urllib.parse.quote(entry.path)),
+               esc(entry.name)),
+        ])
+
+    files = sorted(e.name for e in listing.entries if not e.is_dir)
+    here = ""
+    if has_dir_map:
+        here = ('<form method="post" action="/submit/%s/autoplan">'
+                '<input type="hidden" name="directory" value="%s">'
+                '<button type="submit">group everything in this directory'
+                '</button></form>' % (esc(draft_id), esc(listing.path)))
+    else:
+        here = ("<p class='doc warn'>No <code>dir_map</code> here. Open the "
+                "directory that holds it -- the cfg files live beside it.</p>")
+
+    crumbs = " / ".join(
+        "<a href='/submit/%s/auto?path=%s'>%s</a>"
+        % (esc(draft_id), esc(urllib.parse.quote(path)), esc(label))
+        for label, path in listing.crumbs)
+
+    return _page("choose a directory", """
+%s
+<h2>auto select group</h2>
+<p class='doc'>%s</p>
+%s
+<h2>directories</h2>
+%s
+<p class='doc'>files here: %s</p>
+<p><a href="/submit/%s">back to the submission</a></p>
+""" % (_error(error or (listing.error or "")), crumbs, here,
+       table(["directory"], rows,
+             empty="nothing to open here"),
+       esc(", ".join(files[:20]) or "none"), esc(draft_id)))
+
+
+def render_auto_plan(draft: Any, plan: Any, error: str = "") -> str:
+    """What the tool proposes, with every reason on the screen.
+
+    Nothing is hidden, including the indices it decided to leave out: an
+    automatic grouping that silently drops half of them produces a batch that
+    looks complete when it finishes, which is the exact failure this system
+    exists to prevent. So every index has a row, a reason, and a control that
+    overrides it.
+    """
+    options = [("", "-- skip --")] + [(c.path, c.name) for c in plan.cfgs]
+
+    rows = []
+    for item in plan.assignments:
+        checked = " checked" if item.include else ""
+        select = ["<select name='cfg_%s'>" % esc(item.index_key)]
+        for value, label in options:
+            chosen = " selected" if value == item.cfg else ""
+            select.append("<option value='%s'%s>%s</option>"
+                          % (esc(value), chosen, esc(label)))
+        select.append("</select>")
+        rows.append([
+            "<input type='checkbox' name='index_keys' value='%s'%s "
+            "onchange='arcxCount(this.form)'>" % (esc(item.index_key), checked),
+            esc(item.index_key),
+            esc(item.corner or "-"),
+            "".join(select),
+            ("<span class='muted'>%s</span>" if item.include
+             else "<span class='warn'>%s</span>") % esc(item.reason),
+            "<span class='muted'>%s</span>" % esc(item.path),
+        ])
+
+    warn = ""
+    if plan.warnings:
+        warn = "<h3>while reading</h3><ul class='doc'>%s</ul>" % "".join(
+            "<li>%s</li>" % esc(w) for w in plan.warnings)
+
+    summary = cards([
+        ("indices", len(plan.assignments), ""),
+        ("proposed", len(plan.included), ""),
+        ("left out", len(plan.assignments) - len(plan.included),
+         "alert" if len(plan.included) < len(plan.assignments) else ""),
+        ("groups", len(plan.groups()), ""),
+    ])
+
+    return _page("auto select group", """
+%s
+<h2>auto select group</h2>
+%s
+<p class='doc'>directory: %s<br>dir_map: %s<br>naming: <strong>%s</strong>
+<br>cfg files: %s</p>
+%s
+<form method="post" action="/submit/%s/autoadd">
+  <input type="hidden" name="directory" value="%s">
+  <p>
+    <label><input type="checkbox" onchange="arcxToggleAll(this)"> select all</label>
+    &nbsp;<span class="arcx-count muted">%d selected</span>
+  </p>
+  %s
+  <button type="submit">add these groups</button>
+  <p class='doc'>One group per cfg. Nothing is created or submitted by this --
+  the groups appear on the submission page and you check them there as
+  usual.</p>
+</form>
+<p><a href="/submit/%s/auto">choose a different directory</a>
+ &middot; <a href="/submit/%s">back to the submission</a></p>
+""" % (_error(error), summary,
+       esc(plan.directory), esc(plan.dir_map), esc(plan.naming),
+       esc(", ".join(c.name for c in plan.cfgs)),
+       warn, esc(draft.id), esc(plan.directory), len(plan.included),
+       table(["", "index", "corner", "cfg", "why", "path"], rows,
+             empty="this dir_map has no index"),
+       esc(draft.id), esc(draft.id)))
 
 
 def render_file_picker(listing: Any, field: str, draft_id: str,
