@@ -133,6 +133,24 @@ class SpecialCfgTest(unittest.TestCase):
         self.assertEqual(spec.cpu_per_case, self.adapter.plan.default_cpu_per_case)
         self.assertTrue(any("special.cfg" in w for w in spec.warnings))
 
+    def test_refusing_to_guess_says_which_setting_did_it(self):
+        """The exclusion is a setting, not a fact about the index.
+
+        A row reading "cannot size the work" sent somebody looking for a
+        missing file for a week. The setting that caused it is one line in a
+        config file, so the message names it.
+        """
+        import copy
+
+        adapter = copy.deepcopy(self.adapter)
+        adapter.plan.default_cpu_per_case = 0
+        path = os.path.join(self.tmp.name, "no_special")
+        os.makedirs(path, exist_ok=True)
+        open(os.path.join(path, "a.gds"), "w").close()
+        spec = adapter.build_index_spec("1006", path)
+        self.assertFalse(spec.usable)
+        self.assertIn("default_cpu_per_case", spec.error)
+
     def test_no_gds_is_still_unusable(self):
         """Sizing can be guessed; work that does not exist cannot."""
         path = os.path.join(self.tmp.name, "empty")

@@ -260,9 +260,20 @@ class ArcxAdapter:
         error: Optional[str] = None
         if gds_count == 0:
             error = "no GDS files, cannot size the work"
+        elif cpu <= 0 and estimated:
+            # Not "the file is missing" -- that is a setting saying to refuse
+            # to guess, and saying so is the difference between a person
+            # editing one line and a person wondering why half their indices
+            # cannot be ticked.
+            error = ("%s is not in %s, and plan.default_cpu_per_case is 0 "
+                     "(refuse to guess). Set it to your usual value to size "
+                     "this index instead of excluding it."
+                     % (self.layout.special_cfg_cpu_key,
+                        self.layout.special_cfg_name))
         elif cpu <= 0:
-            error = ("cannot read %s, cannot size the work"
-                     % self.layout.special_cfg_cpu_key)
+            error = ("%s = %d in %s is not a usable number of CPUs"
+                     % (self.layout.special_cfg_cpu_key, cpu,
+                        self.layout.special_cfg_name))
 
         return IndexSpec(
             index_key=index_key,
