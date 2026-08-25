@@ -145,6 +145,72 @@ def index_incomplete(index: IndexContext) -> Optional[Issue]:
     )
 
 
+@qa_check(id="INDEX_QUEUE_NOT_MOVING", title="cases queued while nothing runs",
+          severity=Severity.WARN, scope=INDEX, stage=LIVE)
+def queue_not_moving(index: IndexContext) -> Optional[Issue]:
+    """Cases are waiting to start and nothing in this index is running.
+
+    A queued case on its own says nothing. The .queue marker is Arcx's own
+    queue, not LSF's -- Arcx runs only so many cases at a time within one
+    index -- so on a large index most cases are queued most of the time, for
+    hours, entirely normally. Reporting on the clock alone would mean
+    reporting the ordinary state of the run.
+
+    What is not ordinary is a queue that has stopped moving: work still
+    waiting while **nothing is running to hold it back**. Nothing is going to
+    start those cases, which is what a dead Arcx parent looks like from the
+    outside -- and the reason it needs saying is that it produces no error
+    anywhere. The index simply stops, and every case in it stays QUEUED
+    looking like it is waiting its turn.
+
+    The measure is how long the index has been idle, not how long a case has
+    been queued: "queued for six hours" is a fact about the size of the index,
+    while "queued for six hours with nothing running" is a fact about the run.
+
+    A warning, not a failure: Arcx does legitimately go quiet between cases
+    while it assembles reports or sets one up, and the threshold cannot know
+    how long that takes here. What it can do is put a number in front of a
+    person.
+    """
+    queued = [case_id for case_id, snap in index.cases.items()
+              if snap.state == CaseState.QUEUED]
+    if not queued:
+        return None
+
+    # Anything actually in flight means the queue has a reason to wait.
+    # SUSPENDED counts -- those jobs still hold their slots -- and so does
+    # STALLED, which is a running case with a quiet log. A finished case does
+    # not: .complete is permanent, so counting it would silence this check
+    # for good on any index that completed one case and then died.
+    busy = [case_id for case_id, snap in index.cases.items()
+            if snap.state in (CaseState.RUNNING, CaseState.STALLED,
+                              CaseState.SUSPENDED)]
+    if busy:
+        return None
+
+    # How long the queue has been standing still: the most recent thing that
+    # happened to any case in this index. A case that entered QUEUED five
+    # minutes ago means the index was doing something five minutes ago.
+    last_change = max(snap.entered_state_at for snap in index.cases.values())
+    idle_for = max(0.0, index.now - last_change)
+    threshold = index.settings.qa.queue.idle_after_sec
+    if idle_for < threshold:
+        return None
+
+    return index.warn(
+        "%d case(s) queued and nothing has run for %.0f minutes"
+        % (len(queued), idle_for / 60.0),
+        evidence={
+            "queued": sorted(queued)[:50],
+            "queued_total": len(queued),
+            "idle_sec": round(idle_for),
+            "threshold_sec": threshold,
+            "hint": "nothing is running to start them; check whether the Arcx "
+                    "job for this directory is still alive",
+        },
+    )
+
+
 @qa_check(id="INDEX_CASE_COUNT_MISMATCH", title="case count differs from the GDS count",
           severity=Severity.WARN, scope=INDEX, stage=POST)
 def case_count_mismatch(index: IndexContext) -> Optional[Issue]:

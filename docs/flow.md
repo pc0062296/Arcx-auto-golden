@@ -353,6 +353,14 @@ absence of evidence either way, and LOST is far too definite a word for that.
 A case only reaches LOST if a job was matched to it at some point and has
 since disappeared.
 
+**A queue that has stopped moving is reported instead.** Waiting cases are
+not watched by the LOST rule any more, so one check covers what that would
+have caught: `INDEX_QUEUE_NOT_MOVING`, when cases are queued and nothing in
+that index is running. Nothing is holding them back and nothing is going to
+start them, which is what a dead Arcx parent looks like from the outside --
+and it produces no error anywhere. The measure is how long the index has been
+idle, never how long a case has been queued.
+
 **The grace period covers the lag inside a normal case.** An LSF job leaves
 `bjobs` the moment it finishes, and Arcx writes the `.complete` marker some
 time afterwards. In that window the markers say running and LSF has nothing,

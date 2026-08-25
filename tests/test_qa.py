@@ -184,6 +184,130 @@ class NoConfigTest(unittest.TestCase):
 # Index level
 # ---------------------------------------------------------------------------
 
+T0 = 2_000_000.0
+
+
+def queue_snapshot(tmp, states, entered_at=T0):
+    """An index run made of states, without touching a filesystem.
+
+    ``states`` is {case_id: CaseState}, or {case_id: (CaseState, entered_at)}
+    when a case has to have moved at a different time from the rest.
+    """
+    from arcx_auto.domain.models import CaseSnapshot, IndexRunSnapshot
+
+    cases = {}
+    for case_id, value in states.items():
+        state, moved_at = value if isinstance(value, tuple) else (value,
+                                                                 entered_at)
+        cases[case_id] = CaseSnapshot(
+            case_id=case_id, state=state, entered_state_at=moved_at,
+            last_progress_at=moved_at, base_state=state)
+    return IndexRunSnapshot(index_key="1000", run_folder=tmp, cases=cases,
+                            updated_at=entered_at)
+
+
+class QueueNotMovingTest(unittest.TestCase):
+    """A queued case is normal. A queue that has stopped moving is not.
+
+    Arcx runs only so many cases at a time within one index, so on a large
+    index most cases are queued most of the time. What that hides is an index
+    that has simply stopped: nothing running, work still waiting, and no error
+    anywhere to say so.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.settings = Settings()
+
+    def ids(self, states, now=T0 + 7200, entered_at=T0):
+        report = QaRunner(self.settings).run_index(
+            queue_snapshot(self.tmp.name, states, entered_at), None, None,
+            now=now)
+        found = set()
+        for result in report.index_results:
+            found.update(i.id for i in result.issues)
+        return found
+
+    def test_queued_while_something_runs_is_normal(self):
+        """The case this check must never fire on: Arcx holding cases back
+        while it works through the index.
+        """
+        self.assertNotIn("INDEX_QUEUE_NOT_MOVING", self.ids({
+            "a": CaseState.RUNNING,
+            "b": CaseState.QUEUED,
+            "c": CaseState.QUEUED,
+        }))
+
+    def test_queued_with_nothing_running_is_reported(self):
+        self.assertIn("INDEX_QUEUE_NOT_MOVING", self.ids({
+            "a": CaseState.DONE,
+            "b": CaseState.QUEUED,
+            "c": CaseState.QUEUED,
+        }))
+
+    def test_nothing_is_said_before_the_threshold(self):
+        """Arcx goes quiet between cases while it assembles reports or sets
+        the next one up, and that is not a fault.
+        """
+        self.assertNotIn("INDEX_QUEUE_NOT_MOVING", self.ids(
+            {"a": CaseState.DONE, "b": CaseState.QUEUED},
+            now=T0 + 60))
+
+    def test_the_clock_starts_at_the_last_thing_that_happened(self):
+        """Idle time, not queued time: "queued for six hours" is a fact about
+        the size of the index, "six hours with nothing running" is a fact
+        about the run.
+        """
+        states = {"a": (CaseState.DONE, T0), "b": (CaseState.QUEUED, T0)}
+        self.assertIn("INDEX_QUEUE_NOT_MOVING", self.ids(states, now=T0 + 7200))
+        # the same long-queued case, but something moved a minute ago
+        states["c"] = (CaseState.DONE, T0 + 7140)
+        self.assertNotIn("INDEX_QUEUE_NOT_MOVING",
+                         self.ids(states, now=T0 + 7200))
+
+    def test_a_suspended_job_still_counts_as_running(self):
+        """It holds its slot, so the queue is waiting for a reason."""
+        self.assertNotIn("INDEX_QUEUE_NOT_MOVING", self.ids({
+            "a": CaseState.SUSPENDED, "b": CaseState.QUEUED}))
+
+    def test_a_stalled_case_still_counts_as_running(self):
+        self.assertNotIn("INDEX_QUEUE_NOT_MOVING", self.ids({
+            "a": CaseState.STALLED, "b": CaseState.QUEUED}))
+
+    def test_a_finished_case_does_not_count_as_running(self):
+        """.complete is permanent. Counting it would silence this check for
+        good on any index that completed one case and then died.
+        """
+        self.assertIn("INDEX_QUEUE_NOT_MOVING", self.ids({
+            "a": CaseState.COMPLETED_MARKER, "b": CaseState.QUEUED}))
+
+    def test_an_index_with_nothing_queued_says_nothing(self):
+        self.assertNotIn("INDEX_QUEUE_NOT_MOVING", self.ids({
+            "a": CaseState.DONE, "b": CaseState.FAILED}))
+
+    def test_an_index_that_never_started_anything_is_reported(self):
+        """Submitted, and Arcx never ran a single case."""
+        self.assertIn("INDEX_QUEUE_NOT_MOVING", self.ids({
+            "a": CaseState.QUEUED, "b": CaseState.QUEUED}))
+
+    def test_the_threshold_is_configurable(self):
+        self.settings.qa.queue.idle_after_sec = 100000.0
+        self.assertNotIn("INDEX_QUEUE_NOT_MOVING", self.ids({
+            "a": CaseState.DONE, "b": CaseState.QUEUED}))
+
+    def test_the_evidence_names_the_waiting_cases(self):
+        report = QaRunner(self.settings).run_index(
+            queue_snapshot(self.tmp.name,
+                           {"a": CaseState.DONE, "b": CaseState.QUEUED}),
+            None, None, now=T0 + 7200)
+        issue = [i for result in report.index_results for i in result.issues
+                 if i.id == "INDEX_QUEUE_NOT_MOVING"][0]
+        self.assertEqual(issue.severity.value, "WARN")
+        self.assertEqual(issue.evidence["queued"], ["b"])
+        self.assertEqual(issue.evidence["idle_sec"], 7200)
+
+
 class ReportCheckTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

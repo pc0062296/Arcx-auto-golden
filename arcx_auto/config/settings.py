@@ -93,8 +93,6 @@ class MonitorSettings:
     stall_threshold_sec: float = 28800.0
     # How long a PEND is worth noticing (informational only)
     long_pend_warn_sec: float = 7200.0
-    # How long to wait after an LSF job disappears before declaring it LOST.
-    # Gives NFS attribute caching and Arcx's own tidy-up some slack.
     # How long a job we have seen must stay gone before the case reads LOST.
     # It covers the lag inside a normal case: an LSF job leaves bjobs the
     # moment it finishes, and Arcx writes the .complete marker some time
@@ -331,6 +329,30 @@ class QuietSettings:
 
 
 @dataclass
+class QueueSettings:
+    """When a queued case stops being normal.
+
+    A .queue marker is Arcx's own queue, not LSF's: Arcx runs only so many
+    cases at a time within one index, so waiting -- for hours, on a big index
+    -- is the ordinary state of most cases and says nothing at all.
+
+    What is not ordinary is a queue that is not moving: cases waiting while
+    **nothing in that index is running**. Nothing is holding them back and
+    nothing is going to start them, which is what a dead Arcx parent looks
+    like from the outside.
+
+    The threshold is against an idle index rather than against the clock,
+    because "queued for six hours" is a fact about the size of the index and
+    "queued for six hours while nothing ran" is a fact about the run.
+    """
+
+    #: How long the index may be idle with work still queued before it is
+    #: reported. Long enough to cover Arcx assembling reports or setting up
+    #: the next case between two runs.
+    idle_after_sec: float = 3600.0
+
+
+@dataclass
 class QaSettings:
     """QA checks."""
 
@@ -341,6 +363,7 @@ class QaSettings:
     min_netlist_bytes: int = 1
     reports: ReportSettings = field(default_factory=ReportSettings)
     quiet: QuietSettings = field(default_factory=QuietSettings)
+    queue: QueueSettings = field(default_factory=QueueSettings)
     netlist_signature: NetlistSignatureSettings = field(
         default_factory=NetlistSignatureSettings)
     summary_table: SummaryTableSettings = field(

@@ -307,6 +307,12 @@ The **LSF** column says one of three things, and they mean different things:
 **`not matched` is never `LOST`.** Never having found a job is not evidence
 that one is gone.
 
+The one thing that *is* worth reporting about waiting cases is a queue that
+has stopped moving: `INDEX_QUEUE_NOT_MOVING` fires when cases are queued and
+nothing in that index has been running for an hour
+(`qa.queue.idle_after_sec`). Being queued for six hours is a fact about the
+size of the index; six hours with nothing running is a fact about the run.
+
 On a big index, filter the table with the buttons above it:
 
 ```
@@ -399,6 +405,7 @@ first: every case needing a person, across every run.
 | a file will not open | it is outside `run_root` and the run directories; the viewer only reads inside them |
 | everything says `LOST` | LSF is unreachable. Nothing is actually wrong with the jobs |
 | a case says **not matched** under LSF | no job has been found for it yet. Normal while Arcx is holding it back -- it runs only so many cases at a time within one index |
+| `INDEX_QUEUE_NOT_MOVING` | cases are waiting and **nothing in that index is running**. Nothing is going to start them -- check whether the Arcx job for that directory is still alive |
 | a submission went to the wrong directory | the **workspace** line on the submission page; it names the run_root before you submit |
 | a wave is bigger than the slot cap | a folder is kept whole. Raise `plan.max_slots_per_wave`, select fewer indices, or set that group to **split anywhere** |
 | an index says `special.cfg` cannot be read | it is still selectable and sized at `plan.default_cpu_per_case`. If your config file predates that, check it says 4, not 0 |

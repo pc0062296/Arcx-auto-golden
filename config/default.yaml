@@ -227,6 +227,17 @@ qa:
   # Thresholds for "the log has not grown in a while".
   # Graded rather than binary: a case can take ten minutes or three days, and
   # a log can legitimately go quiet because the artifacts are already written.
+  # When a queued case stops being normal. A .queue marker is Arcx's own
+  # queue, not LSF's -- Arcx runs only so many cases at a time within one
+  # index, so on a large index most cases are queued most of the time. What
+  # is not normal is a queue that has stopped moving: work still waiting
+  # while nothing in that index is running to hold it back.
+  queue:
+    # How long the index may be idle with work still queued before
+    # INDEX_QUEUE_NOT_MOVING reports it. Long enough to cover Arcx assembling
+    # reports or setting up the next case between two runs.
+    idle_after_sec: 3600
+
   quiet:
     warn_after_sec: 14400               # 4h   uncommon, worth a look
     stalled_after_sec: 28800            # 8h   effectively stuck
