@@ -28,6 +28,7 @@ from arcx_auto.services.workspace import (
     WorkspaceError,
     sha256,
 )
+from arcx_auto.util.atomic import read_json
 from tests.fixtures.fake_run import make_dir_map, make_index_source
 
 CFG_TEMPLATE = """\
@@ -470,6 +471,186 @@ class SubmitterTest(unittest.TestCase):
             self.plan, os.path.join(self.settings.run_root, "r1"), self.cfg)
         self.assertFalse(outcome.blocked)
         self.assertFalse(os.path.exists(self.settings.run_root))
+
+
+class BatchLayoutTest(unittest.TestCase):
+    """One directory per source folder inside the wave.
+
+    Arcx creates its run folders relative to the directory it was started in,
+    so keeping two source folders' cases apart on disk means starting Arcx
+    twice. These tests are about the directories that split makes, and about
+    not mixing two folders into one of them.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.settings = Settings()
+        self.settings.state_root = os.path.join(self.tmp.name, "state")
+        self.settings.run_root = os.path.join(self.tmp.name, "runs")
+        self.settings.gate.min_interval_sec = 0
+        self.settings.preflight.min_disk_free_ratio = 0.0
+        self.settings.preflight.warn_disk_free_ratio = 0.0
+
+        src = os.path.join(self.tmp.name, "src", "corner_v2g")
+        self.entries = {
+            "1000": make_index_source(os.path.join(src, "Cbest_T", "blockA"),
+                                      "1000", gds_count=2),
+            "1001": make_index_source(os.path.join(src, "Cbest_T", "blockA"),
+                                      "1001", gds_count=2),
+            "1002": make_index_source(os.path.join(src, "Cworst_T", "blockA"),
+                                      "1002", gds_count=2),
+        }
+        self.dir_map = make_dir_map(os.path.join(self.tmp.name, "dir_map"),
+                                    self.entries)
+        qtf = os.path.join(self.tmp.name, "tech.qtf")
+        with open(qtf, "w") as handle:
+            handle.write("")
+        self.cfg = os.path.join(self.tmp.name, "arcx.cfg")
+        with open(self.cfg, "w") as handle:
+            handle.write(CFG_TEMPLATE.format(qtf=qtf))
+
+        self.plan = make_plan(self.entries, self.settings, max_slots=1000)
+        self.lsf = FakeLsf()
+
+    def _submit(self, **kwargs):
+        submitter = Submitter(
+            self.settings, lsf=self.lsf,
+            launcher=Launcher(self.settings, lsf=self.lsf),
+            sleep=lambda _s: None)
+        kwargs.setdefault("run_id", "r1")
+        kwargs.setdefault("run_root", self.settings.run_root)
+        kwargs.setdefault("dry_run", False)
+        return submitter.submit(
+            plan=self.plan, arcx_cfg=self.cfg, dir_map=self.dir_map, **kwargs)
+
+    def wave_dir(self):
+        return os.path.join(self.settings.run_root, "r1", "wave_001")
+
+    def test_one_directory_per_source_folder(self):
+        self._submit()
+        made = sorted(n for n in os.listdir(self.wave_dir())
+                      if os.path.isdir(os.path.join(self.wave_dir(), n))
+                      and not n.startswith("."))
+        self.assertEqual(made, ["Cbest_T_blockA", "Cworst_T_blockA"])
+
+    def test_the_name_carries_the_level_above(self):
+        """blockA exists under every corner. The last component alone would
+        put unrelated cases in one directory.
+        """
+        self._submit()
+        self.assertTrue(os.path.isdir(
+            os.path.join(self.wave_dir(), "Cbest_T_blockA")))
+
+    def test_each_batch_gets_its_own_cfg_and_dir_map(self):
+        self._submit()
+        for name in ("Cbest_T_blockA", "Cworst_T_blockA"):
+            path = os.path.join(self.wave_dir(), name)
+            self.assertTrue(os.path.isfile(os.path.join(path, "arcx.cfg")),
+                            path)
+            self.assertTrue(os.path.isfile(os.path.join(path, "dir_map")),
+                            path)
+
+    def test_arcx_is_started_once_per_folder_in_its_own_directory(self):
+        self._submit()
+        self.assertEqual(len(self.lsf.cwds), 2)
+        self.assertEqual(
+            sorted(os.path.basename(c) for c in self.lsf.cwds),
+            ["Cbest_T_blockA", "Cworst_T_blockA"])
+
+    def test_each_command_names_only_its_own_indices(self):
+        self._submit()
+        by_cwd = {os.path.basename(cwd): cmd
+                  for cwd, cmd in zip(self.lsf.cwds, self.lsf.commands)}
+        best = " ".join(by_cwd["Cbest_T_blockA"])
+        worst = " ".join(by_cwd["Cworst_T_blockA"])
+        self.assertIn("1000", best)
+        self.assertIn("1001", best)
+        self.assertNotIn("1002", best)
+        self.assertIn("1002", worst)
+        self.assertNotIn("1000", worst)
+
+    def test_the_cfg_used_is_the_copy_in_the_batch_directory(self):
+        """Not the original, and not the wave's: the directory Arcx ran in
+        holds everything the run used.
+        """
+        self._submit()
+        for cwd, command in zip(self.lsf.cwds, self.lsf.commands):
+            self.assertIn(os.path.join(cwd, "arcx.cfg"), " ".join(command))
+
+    def test_the_batch_manifest_records_the_folder_it_came_from(self):
+        self._submit()
+        manifest = read_json(os.path.join(
+            self.wave_dir(), "Cbest_T_blockA", ".arcx_auto", "manifest.json"))
+        self.assertEqual(manifest["index_keys"], ["1000", "1001"])
+        self.assertTrue(manifest["folder"].endswith("Cbest_T/blockA"))
+        self.assertEqual(manifest["batch"], "Cbest_T_blockA")
+
+    def test_the_wave_manifest_lists_its_batches(self):
+        self._submit()
+        manifest = read_json(os.path.join(
+            self.wave_dir(), ".arcx_auto", "manifest.json"))
+        self.assertEqual([b["name"] for b in manifest["batches"]],
+                         ["Cbest_T_blockA", "Cworst_T_blockA"])
+
+    def test_every_batch_gets_its_own_launch_record(self):
+        """A rerun reads the parent job id from it, and now there is one
+        parent per folder.
+        """
+        self._submit()
+        for name in ("Cbest_T_blockA", "Cworst_T_blockA"):
+            launch = read_launch(os.path.join(self.wave_dir(), name))
+            self.assertTrue(launch.get("arcx_job_id"))
+            self.assertEqual(launch.get("batch"), name)
+
+    def test_a_dry_run_previews_every_batch_and_writes_nothing(self):
+        outcome = self._submit(dry_run=True)
+        self.assertFalse(os.path.exists(self.settings.run_root))
+        self.assertEqual(self.lsf.commands, [])
+        self.assertEqual(len(outcome.launches), 2)
+
+    def test_the_monitor_finds_cases_inside_the_batch_directories(self):
+        """The run folders are a level deeper than they used to be. Nothing
+        is being monitored if this does not hold.
+        """
+        from arcx_auto.adapters.fs import FsAdapter
+
+        self._submit()
+        batch = os.path.join(self.wave_dir(), "Cbest_T_blockA")
+        os.makedirs(os.path.join(batch, "1000_run"))
+        os.makedirs(os.path.join(
+            self.wave_dir(), "Cworst_T_blockA", "1002_run"))
+        found = FsAdapter(self.settings.layout).list_index_run_folders(
+            self.wave_dir())
+        self.assertEqual(sorted(os.path.basename(p) for _k, p in found),
+                         ["1000_run", "1002_run"])
+
+    def test_a_batch_directory_is_not_mistaken_for_a_case(self):
+        """A source folder called something_run gives a batch directory whose
+        name matches the run folder pattern. Its own .arcx_auto/ is what tells
+        them apart -- the pattern cannot.
+        """
+        from arcx_auto.adapters.fs import FsAdapter
+
+        src = os.path.join(self.tmp.name, "src", "corner_v2g")
+        self.entries["1003"] = make_index_source(
+            os.path.join(src, "Cbest_T", "blockB_run"), "1003", gds_count=1)
+        self.dir_map = make_dir_map(os.path.join(self.tmp.name, "dir_map"),
+                                    self.entries)
+        self.plan = make_plan(self.entries, self.settings, max_slots=1000)
+        self._submit()
+
+        batch = os.path.join(self.wave_dir(), "Cbest_T_blockB_run")
+        self.assertTrue(os.path.isdir(batch))
+        found = FsAdapter(self.settings.layout).list_index_run_folders(
+            self.wave_dir())
+        self.assertEqual(found, [])
+
+        os.makedirs(os.path.join(batch, "1003_run"))
+        found = FsAdapter(self.settings.layout).list_index_run_folders(
+            self.wave_dir())
+        self.assertEqual([os.path.basename(p) for _k, p in found],
+                         ["1003_run"])
 
 
 class PreflightCheckTest(unittest.TestCase):

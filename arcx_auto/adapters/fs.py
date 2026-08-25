@@ -384,11 +384,26 @@ class FsAdapter:
         result: List[Tuple[str, str]] = []
         if not os.path.isdir(wave_dir):
             return result
+        # The wave itself, for the flat layout waves had before batches, and
+        # then one level down for the batch directories. Two levels and no
+        # more: anything deeper belongs to Arcx.
+        result.extend(self._scan_run_folders(wave_dir))
+        for batch in self._batch_dirs(wave_dir):
+            result.extend(self._scan_run_folders(batch))
+        return sorted(result)
+
+    def _batch_dirs(self, wave_dir: str) -> List[str]:
+        """The per-folder directories inside a wave.
+
+        Recognised by their own .arcx_auto/, which is the thing only this tool
+        creates -- so nothing Arcx or anybody else leaves in a wave directory
+        can be mistaken for one.
+        """
+        found: List[str] = []
         try:
             entries = list(os.scandir(wave_dir))
         except OSError:
-            return result
-        by_folder = self._index_keys_by_folder(wave_dir)
+            return found
         for entry in entries:
             if entry.name.startswith("."):
                 continue
@@ -397,12 +412,38 @@ class FsAdapter:
                     continue
             except OSError:
                 continue
+            if os.path.isfile(os.path.join(entry.path, ".arcx_auto",
+                                           "manifest.json")):
+                found.append(entry.path)
+        return sorted(found)
+
+    def _scan_run_folders(self, directory: str) -> List[Tuple[str, str]]:
+        """Index run folders directly inside one directory."""
+        result: List[Tuple[str, str]] = []
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return result
+        by_folder = self._index_keys_by_folder(directory)
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
+                continue
+            if os.path.isdir(os.path.join(entry.path, ".arcx_auto")):
+                # A batch directory, not a case. Its name can match the run
+                # folder pattern by accident -- a source folder called
+                # something_run gives a batch called that too.
+                continue
             match = self._index_run_re.match(entry.name)
             if not match:
                 continue
             result.append((by_folder.get(entry.name) or _group_or(
                 match, "index", entry.name), entry.path))
-        return sorted(result)
+        return result
 
     def index_key_for(self, run_folder: str) -> str:
         """The dir_map key for a run folder, given only its path.

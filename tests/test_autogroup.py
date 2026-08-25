@@ -13,6 +13,7 @@ import unittest
 from arcx_auto.config.settings import AutoGroupSettings, Settings
 from arcx_auto.services.autogroup import (
     CornerCfg,
+    find_disable_flag,
     IndexFacts,
     canonical_corner,
     corner_from_path,
@@ -23,6 +24,11 @@ from arcx_auto.services.autogroup import (
     scan_directory,
 )
 from tests.fixtures.fake_run import make_arcx_cfg, make_dir_map, make_index_source
+
+
+def write(path, text=""):
+    with open(path, "w") as handle:
+        handle.write(text)
 
 
 def cfg(path, suffix, canonical=None):
@@ -196,7 +202,7 @@ class PlanTest(unittest.TestCase):
                                     disabled_by_flag=True)])
         got = plan.assignments[0]
         self.assertFalse(got.include)
-        self.assertIn("disable flag", got.reason)
+        self.assertIn("disabled by flag", got.reason)
 
     def test_an_excluded_path_is_not_described_as_missing_a_cfg(self):
         """A backup directory reported as "no cfg for this corner" sounds
@@ -296,7 +302,7 @@ class ScanDirectoryTest(unittest.TestCase):
         self.assertFalse(verdicts["1002"].include)   # no Whot_T cfg
         self.assertFalse(verdicts["1003"].include)   # run_bak
         self.assertFalse(verdicts["1004"].include)   # disable flag
-        self.assertIn("disable flag", verdicts["1004"].reason)
+        self.assertIn("disabled by flag", verdicts["1004"].reason)
 
     def test_a_directory_with_no_dir_map_says_so(self):
         plan = scan_directory(self.tmp.name, self.settings)
@@ -315,6 +321,76 @@ class ScanDirectoryTest(unittest.TestCase):
         before = sorted(os.listdir(self.work))
         scan_directory(self.work, self.settings)
         self.assertEqual(sorted(os.listdir(self.work)), before)
+
+
+class DisableFlagTest(unittest.TestCase):
+    """The flag takes out the directory it is in and everything under it.
+
+    Otherwise opting a hundred related indices out means a hundred files, and
+    the one that gets missed is the one that runs.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tree = os.path.join(self.tmp.name, "proj", "corner_v2g")
+        self.inside = os.path.join(self.tree, "Cbest_T", "blockA", "index1000")
+        self.outside = os.path.join(self.tmp.name, "proj", "other", "index1001")
+        for path in (self.inside, self.outside):
+            os.makedirs(path)
+
+    def flag(self, directory):
+        write(os.path.join(directory, "disable_qcap_golden"), "")
+
+    def test_the_flag_in_the_index_directory_disables_it(self):
+        self.flag(self.inside)
+        self.assertEqual(
+            find_disable_flag(self.inside, "disable_qcap_golden"), self.inside)
+
+    def test_a_flag_above_disables_the_whole_subtree(self):
+        self.flag(self.tree)
+        self.assertEqual(
+            find_disable_flag(self.inside, "disable_qcap_golden"), self.tree)
+
+    def test_a_sibling_tree_is_untouched(self):
+        self.flag(self.tree)
+        self.assertEqual(
+            find_disable_flag(self.outside, "disable_qcap_golden"), "")
+
+    def test_no_flag_anywhere_is_no_flag(self):
+        self.assertEqual(
+            find_disable_flag(self.inside, "disable_qcap_golden"), "")
+
+    def test_the_nearest_flag_is_the_one_reported(self):
+        self.flag(self.tree)
+        nearer = os.path.dirname(self.inside)
+        self.flag(nearer)
+        self.assertEqual(
+            find_disable_flag(self.inside, "disable_qcap_golden"), nearer)
+
+    def test_directories_are_only_looked_at_once(self):
+        """Indices in one tree share almost all of their ancestors, and this
+        runs over NFS.
+        """
+        cache = {}
+        for _ in range(5):
+            find_disable_flag(self.inside, "disable_qcap_golden", cache)
+        walked = len(cache)
+        find_disable_flag(self.inside, "disable_qcap_golden", cache)
+        self.assertEqual(len(cache), walked)
+        self.assertGreater(walked, 1)
+
+    def test_the_reason_names_the_directory_that_did_it(self):
+        self.flag(self.tree)
+        facts = read_facts({"1000": self.inside}, "disable_qcap_golden")
+        plan = plan_auto_groups(facts, [cfg("/d/x_typical.cfg", "typical")],
+                                AutoGroupSettings())
+        self.assertFalse(plan.assignments[0].include)
+        self.assertIn(self.tree, plan.assignments[0].reason)
+
+    def test_an_empty_flag_name_disables_the_check(self):
+        self.flag(self.inside)
+        self.assertEqual(find_disable_flag(self.inside, ""), "")
 
 
 class ReadFactsTest(unittest.TestCase):

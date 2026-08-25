@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # Reasons, as constants, so the UI and the tests agree on the wording
-REASON_DISABLED = "disable flag in the index directory"
+REASON_DISABLED = "disabled by flag"
 REASON_EXCLUDED_PATH = "path matches an excluded pattern"
 REASON_UNUSABLE = "cannot run"
 REASON_NO_CFG = "no cfg for this corner"
@@ -70,6 +70,10 @@ class IndexFacts:
     index_key: str
     path: str
     disabled_by_flag: bool = False
+    #: Where the flag was found. Usually the index directory itself, but a
+    #: flag higher up disables everything beneath it, and then saying which
+    #: directory did it is the difference between an answer and a mystery.
+    disable_flag_dir: str = ""
     error: str = ""          # from IndexSpec: no GDS, unsizable, ...
 
 
@@ -238,16 +242,63 @@ def discover_cfgs(directory: str, typical_suffix: str = "typical",
     return naming, cfgs, warnings
 
 
+def find_disable_flag(path: str, flag: str,
+                      cache: Optional[Dict[str, bool]] = None) -> str:
+    """The directory holding the opt-out flag for this index, or "".
+
+    The index directory **or any directory above it**: dropping one file at
+    the top of a tree has to take the whole tree out, or opting a hundred
+    related indices out means a hundred files -- and the one that gets missed
+    is the one that runs.
+
+    Every directory checked is remembered, because indices in one tree share
+    almost all of their ancestors. Without that this is a stat per level per
+    index over NFS; with it, a stat per directory in the tree.
+    """
+    if not flag:
+        return ""
+    cache = cache if cache is not None else {}
+    current = os.path.abspath(os.path.expanduser(path or "."))
+    walked: List[str] = []
+    found = ""
+    while True:
+        if current in cache:
+            found = current if cache[current] else ""
+            break
+        walked.append(current)
+        try:
+            here = os.path.exists(os.path.join(current, flag))
+        except OSError:
+            here = False
+        if here:
+            cache[current] = True
+            found = current
+            break
+        parent = os.path.dirname(current)
+        if parent == current:                 # reached the root
+            cache[current] = False
+            break
+        current = parent
+
+    # Only the directory that actually holds the flag is a hit. The ones
+    # walked through on the way up did not have it, and recording that is
+    # what makes the next index in the same tree cheap.
+    for directory in walked:
+        cache.setdefault(directory, directory == found)
+    return found
+
+
 def read_facts(entries: Dict[str, str], disable_flag: str,
                errors: Optional[Dict[str, str]] = None) -> List[IndexFacts]:
     """Turn a dir_map into facts: what is on disk, before any judgement."""
     facts: List[IndexFacts] = []
+    cache: Dict[str, bool] = {}
     for key in sorted(entries, key=_natural):
         path = entries[key]
-        flagged = bool(disable_flag) and os.path.exists(
-            os.path.join(os.path.expanduser(path), disable_flag))
+        flag_dir = find_disable_flag(path, disable_flag, cache)
         facts.append(IndexFacts(index_key=key, path=path,
-                                disabled_by_flag=flagged,
+                                disabled_by_flag=bool(flag_dir),
+                                disable_flag_dir=flag_dir,
                                 error=(errors or {}).get(key, "")))
     return facts
 
@@ -291,9 +342,12 @@ def plan_auto_groups(facts: Sequence[IndexFacts], cfgs: Sequence[CornerCfg],
         canonical = canonical_corner(corner, aliases) if corner else ""
 
         if fact.disabled_by_flag:
+            where = fact.disable_flag_dir
+            reason = REASON_DISABLED
+            if where and os.path.abspath(where) != os.path.abspath(fact.path):
+                reason = "%s, set on %s" % (REASON_DISABLED, where)
             assignments.append(Assignment(
-                fact.index_key, fact.path, corner, canonical,
-                reason=REASON_DISABLED))
+                fact.index_key, fact.path, corner, canonical, reason=reason))
             continue
 
         pattern = excluded_by_glob(fact.index_key, fact.path, globs)

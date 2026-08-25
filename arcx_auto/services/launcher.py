@@ -7,9 +7,11 @@ Two details that are easy to get wrong and expensive to debug:
   * **The Arcx invocation is one shell string**, not separate argv entries.
     That is how it is written by hand, and bsub treats the trailing argument
     as the command to run.
-  * **bsub must be executed from inside the wave directory.** LSF records the
-    submission directory and Arcx creates its per-index run folders relative
-    to it, so wave isolation depends entirely on the cwd.
+  * **bsub must be executed from inside the directory the run belongs to.**
+    LSF records the submission directory and Arcx creates its per-index run
+    folders relative to it, so isolation depends entirely on the cwd. That is
+    also why one wave is several submissions: each source folder has its own
+    directory, and a directory is one Arcx command.
 
 Why Arcx itself is submitted rather than spawned (architecture decision A1c):
 our daemon can then be restarted, crash, or be killed without touching work
@@ -44,6 +46,8 @@ _JOB_ID_RE = re.compile(r"Job\s+<(?P<job_id>\d+)>")
 class LaunchResult:
     wave_name: str
     ok: bool
+    #: Which directory inside the wave this was, when the wave has batches.
+    batch_name: str = ""
     job_id: Optional[str] = None
     command: tuple = ()
     cwd: Optional[str] = None
@@ -85,8 +89,10 @@ class Launcher:
             # its output on top of the previous attempt's.
             argv.extend(["-oo", launch.output_file])
         if launch.job_name_template:
+            # The batch, when there is one: several Arcx parents belong to one
+            # wave now, and identical job names in bjobs help nobody.
             argv.extend(["-J", launch.job_name_template.format(
-                run_id=run_id or "run", wave=workspace.wave_name)])
+                run_id=run_id or "run", wave=workspace.label)])
         argv.extend(launch.bsub_args)
 
         arcx_argv = self.arcx.build_run_command(
@@ -111,6 +117,7 @@ class Launcher:
 
         if dry_run:
             return LaunchResult(wave_name=workspace.wave_name, ok=True,
+                                batch_name=workspace.batch_name,
                                 command=tuple(argv), cwd=workspace.path,
                                 dry_run=True)
 
@@ -120,6 +127,7 @@ class Launcher:
             error = result.error or result.stderr.strip() or "bsub failed"
             self._record(workspace, run_id, argv, None, error, now, rerun)
             return LaunchResult(wave_name=workspace.wave_name, ok=False,
+                                batch_name=workspace.batch_name,
                                 command=tuple(argv), cwd=workspace.path,
                                 stdout=result.stdout, error=error)
 
@@ -130,6 +138,7 @@ class Launcher:
         self._record(workspace, run_id, argv, job_id, error, now, rerun)
         return LaunchResult(
             wave_name=workspace.wave_name, ok=job_id is not None, job_id=job_id,
+            batch_name=workspace.batch_name,
             command=tuple(argv), cwd=workspace.path, stdout=result.stdout,
             error=error,
         )
@@ -158,6 +167,8 @@ class Launcher:
         atomic_write_json(workspace.launch_json, {
             "run_id": run_id,
             "wave": workspace.wave_name,
+            "batch": workspace.batch_name,
+            "folder": workspace.folder,
             "index_keys": list(workspace.index_keys),
             "arcx_job_id": job_id or existing.get("arcx_job_id"),
             "attempts": attempts,

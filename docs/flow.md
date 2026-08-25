@@ -91,11 +91,13 @@ previous one on the front page looking abandoned.
   drafts/<id>.json            a selection being built (the UI writes these)
   commands/{pending,running,done}/
 
-<run_root>/<run_id>/wave_001/     what Arcx actually runs in
+<run_root>/<run_id>/wave_001/     the unit the gate releases
   arcx.cfg  dir_map               snapshots, taken at submit time
-  .arcx_auto/
-    manifest.json  launch.json  lock  special_cfg/  attempts/
-  <index>_run/                    Arcx creates these
+  .arcx_auto/manifest.json  lock  special_cfg/
+  <Cbest_T_blockA>/               one per source folder -- Arcx runs here
+    arcx.cfg  dir_map               its own copies
+    .arcx_auto/manifest.json  launch.json  lock  special_cfg/  attempts/
+    <index>_run/                  Arcx creates these
 
 /tmp1/.auto_golden/<user>/    derived; delete it and it rebuilds
 ```
@@ -226,6 +228,36 @@ out at once. Ticking fifty indices does not send fifty: the slot cap
 (`GDS count x O_QCAP_LSF_NUM`) splits each group, because the person ticking
 boxes has not thought about the queue.
 
+### One wave, one directory per folder
+
+A wave is what the gate releases. A **batch** is where Arcx is started, and
+there is one per source folder:
+
+```
+  wave_001  (released once, by the gate)
+    |
+    +-- Cbest_T_blockA/    Arcx -p arcx.cfg -d 1000 1001 ... --run
+    +-- Cbest_T_blockB/    Arcx -p arcx.cfg -d 1005      ... --run
+    +-- Cworst_T_blockA/   Arcx -p arcx.cfg -d 1002 1003 ... --run
+```
+
+Arcx creates its run folders relative to the directory it was started in, so
+keeping two source folders' cases apart on disk means starting Arcx twice.
+Each batch directory holds its own copy of the cfg and the dir_map, so the
+directory a run happened in contains everything that run used.
+
+The name is **two** components of the source path (`Cbest_T_blockA`), because
+the last one alone collides -- `blockA` exists under every corner, and one
+directory holding two different `blockA`s is the mixing this exists to
+prevent. A collision that survives that gets a suffix derived from the path,
+so the same plan always produces the same names.
+
+A batch directory has the same shape as a wave directory -- manifest, launch
+record, lock, attempts -- which is why the launcher, the rerun planner and the
+remediator work on one without knowing batches exist. It is also why a rerun
+is now per folder: the button points at the directory the failing index ran
+in, and that is the smallest thing that can be redone on its own.
+
 ### Where a wave may be cut
 
 ```
@@ -290,6 +322,8 @@ Every tick, for every wave under `run_root`:
         |                         RUNNING + quiet too long   -> STALLED
         v
    write state.json  ->  the UI reads it
+        |  each index run carries the cfg and source folder it came from,
+        |  read from its batch manifest, so the run page can group them
    write events.jsonl / audit.jsonl
    policy engine (shadow)  ->  policy.jsonl
    publish to the shared disk (every 60s)
@@ -351,7 +385,7 @@ blocks, so a 400MB netlist costs the same as a log.
    `arcx-auto policy --review <run_id>`  <- the evidence for whether
         |                                   automation would have been right
         v
-   YOU press "rerun this wave..."
+   YOU press "rerun this folder..."   (one source folder, not the wave)
         |
         v
    confirmation page: exactly which run dirs move aside, and why

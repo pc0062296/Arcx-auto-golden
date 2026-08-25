@@ -52,9 +52,11 @@ def build_state_payload(
 
     observations = {o.run_folder: o for o in result.observations}
 
+    context_cache: Dict[str, Dict[str, str]] = {}
     indexes = [
         _index_payload(snapshot, observations.get(snapshot.run_folder),
-                       issues_by_case, result.scanned_at)
+                       issues_by_case, result.scanned_at,
+                       _run_context(snapshot.run_folder, context_cache))
         for snapshot in result.snapshots
     ]
 
@@ -80,11 +82,47 @@ def _case_key(index_key: str, case_id: str) -> str:
     return "%s\x00%s" % (index_key, case_id)
 
 
+def _run_context(run_folder: str,
+                 cache: Dict[str, Dict[str, str]]) -> Dict[str, str]:
+    """Which cfg and which source folder this index run belongs to.
+
+    Read from the manifest of the directory Arcx ran in -- the batch, or the
+    wave itself for a run made before batches existed. The UI needs it to say
+    more than "here are two hundred indices": in one submission they come from
+    several cfgs and several source folders, and which one an index is under is
+    the first thing anybody wants when they are looking at a failure.
+
+    Cached per directory: one manifest serves every index in it.
+    """
+    from arcx_auto.util.atomic import read_json
+
+    directory = os.path.dirname(os.path.abspath(run_folder or ""))
+    if directory in cache:
+        return cache[directory]
+
+    manifest = read_json(
+        os.path.join(directory, ".arcx_auto", "manifest.json"), default=None)
+    context: Dict[str, str] = {}
+    if isinstance(manifest, dict):
+        cfg = ((manifest.get("snapshots") or {}).get("arcx_cfg")
+               or (manifest.get("sources") or {}).get("arcx_cfg") or "")
+        context = {
+            "wave": str(manifest.get("wave") or ""),
+            "batch": str(manifest.get("batch") or ""),
+            "folder": str(manifest.get("folder") or ""),
+            "group": str(manifest.get("group") or ""),
+            "cfg": os.path.basename(cfg) if cfg else "",
+        }
+    cache[directory] = context
+    return context
+
+
 def _index_payload(
     snapshot: IndexRunSnapshot,
     observation: Optional[IndexRunObservation],
     issues_by_case: Dict[str, List[Issue]],
     now: float,
+    context: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     cases = []
     for case_id, case in snapshot.cases.items():
@@ -123,6 +161,13 @@ def _index_payload(
     return {
         "index_key": snapshot.index_key,
         "run_folder": snapshot.run_folder,
+        # Where this run came from: which cfg, which source folder. Empty for
+        # a run folder this tool did not create.
+        "wave": (context or {}).get("wave", ""),
+        "batch": (context or {}).get("batch", ""),
+        "folder": (context or {}).get("folder", ""),
+        "group": (context or {}).get("group", ""),
+        "cfg": (context or {}).get("cfg", ""),
         "updated_at": snapshot.updated_at,
         "error": snapshot.error,
         "counts": _count_states(snapshot),

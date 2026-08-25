@@ -582,11 +582,29 @@ def render_preflight(draft: Any, plan: Any, cfg_result: Any,
         unwatched, warn_note,
         esc(draft.run_id), esc(run_dir),
         table(["wave", "group", "indices", "cases", "slots", "folders",
-               "which"], wave_rows),
+               "which"], wave_rows) + _commands_note(plan),
         "checks" if issue_rows else "checks: all clear",
         table(["severity", "id", "what"], issue_rows) if issue_rows
         else "<div class='empty good'>every check passed</div>",
     ) + action)
+
+
+def _commands_note(plan: Any) -> str:
+    """How many Arcx runs this actually is.
+
+    One per source folder, not one per wave -- Arcx creates its run folders
+    relative to where it was started, so keeping folders apart on disk means
+    starting it once per folder. They go out together when the gate releases
+    the wave, so the number is worth seeing next to the wave count rather than
+    discovering in bjobs.
+    """
+    commands = sum(len(w.folders) or 1 for w in plan.waves)
+    if commands <= len(plan.waves):
+        return ""
+    return ("<p class='doc'>%d wave(s), %d Arcx run(s): one per source folder, "
+            "each in its own directory with its own copy of the cfg and the "
+            "dir_map. The ones in a wave are started together.</p>"
+            % (len(plan.waves), commands))
 
 
 def render_rerun_confirm(run_id: str, wave_dir: str, plan: Any,

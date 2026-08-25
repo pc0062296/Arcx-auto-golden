@@ -8,7 +8,15 @@
         special_cfg/<index>.cfg   snapshot of each index's special.cfg
         lock                      stops the same wave running twice
         attempts/                 where a rerun backs up the failed state
-      <index run folders>/        created by Arcx itself
+      <Cbest_T_blockA>/           one per source folder -- the same shape
+        arcx.cfg  dir_map           again, so the directory Arcx ran in holds
+        .arcx_auto/...              everything the run used
+        <index run folders>/      created by Arcx itself
+
+**Why a directory per source folder**: Arcx creates its run folders relative
+to the directory it was started in, so keeping two source folders' cases apart
+on disk means starting Arcx twice. The folder structure is how the work is
+classified, and a run directory that mirrors it is one somebody can read.
 
 **Why snapshot instead of using the originals**: doing QA or debugging three
 days later has to read the cfg the run actually used. The original being edited
@@ -31,7 +39,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 from arcx_auto.config.settings import LayoutSettings, Settings
-from arcx_auto.domain.models import Wave, WavePlan
+from arcx_auto.domain.models import Wave, WaveBatch, WavePlan
 from arcx_auto.util.atomic import atomic_write_json, read_json
 
 META_DIR = ".arcx_auto"
@@ -45,7 +53,17 @@ class WorkspaceError(Exception):
 
 @dataclass(frozen=True)
 class WaveWorkspace:
-    """A wave directory that has been created."""
+    """A directory Arcx runs in.
+
+    Both a wave directory and a batch directory inside it are described by
+    this: they have the same shape -- snapshots, a manifest, a launch record,
+    a lock, an attempts directory -- because they are the same kind of thing.
+    A batch is where Arcx is actually started; the wave above it is the unit
+    the gate releases.
+
+    Keeping one type is what lets the launcher, the rerun planner and the
+    remediator work on a batch without knowing batches exist.
+    """
 
     wave_name: str
     path: str
@@ -53,6 +71,22 @@ class WaveWorkspace:
     dir_map: str
     meta_dir: str
     index_keys: tuple
+    #: One per source folder. Empty for a batch, and for the flat layout that
+    #: waves used before batches existed.
+    batches: tuple = ()
+    #: Set on a batch: its directory name, and the folder it came from.
+    batch_name: str = ""
+    folder: str = ""
+
+    @property
+    def label(self) -> str:
+        """What to call this in a message: the batch if it is one."""
+        return self.batch_name or self.wave_name
+
+    @property
+    def runnable(self) -> tuple:
+        """The directories Arcx is started in, one command each."""
+        return self.batches or (self,)
 
     @property
     def launch_json(self) -> str:
@@ -133,11 +167,12 @@ class WorkspaceBuilder:
         shutil.copy2(arcx_cfg, cfg_dest)
         shutil.copy2(dir_map, map_dest)
 
-        specials = self._snapshot_special_cfgs(wave, special_dir)
+        specials = self._snapshot_special_cfgs(wave.indices, special_dir)
 
         manifest: Dict[str, Any] = {
             "run_id": run_id,
             "wave": wave.name,
+            "group": wave.group,
             "created_at": now,
             "index_keys": list(wave.index_keys),
             "total_cases": wave.total_cases,
@@ -165,7 +200,17 @@ class WorkspaceBuilder:
                 for spec in wave.indices
             ],
         }
+        manifest["batches"] = [
+            {"name": batch.name, "folder": batch.folder,
+             "index_keys": list(batch.index_keys)}
+            for batch in wave.batches
+        ]
         atomic_write_json(os.path.join(meta_dir, "manifest.json"), manifest)
+
+        batches = tuple(
+            self._build_batch(wave, batch, path, arcx_cfg, dir_map, run_id, now)
+            for batch in wave.batches
+        )
 
         return WaveWorkspace(
             wave_name=wave.name,
@@ -174,9 +219,79 @@ class WorkspaceBuilder:
             dir_map=map_dest,
             meta_dir=meta_dir,
             index_keys=wave.index_keys,
+            batches=batches,
         )
 
-    def _snapshot_special_cfgs(self, wave: Wave,
+    def _build_batch(self, wave: Wave, batch: WaveBatch, wave_path: str,
+                     arcx_cfg: str, dir_map: str, run_id: str,
+                     now: float) -> WaveWorkspace:
+        """One folder's directory inside the wave.
+
+        It gets its own copy of the cfg and the dir_map rather than reaching
+        up to the wave's: Arcx is started here, and a run directory that
+        contains everything the run used is what makes reading it three days
+        later possible without reconstructing where it came from.
+        """
+        path = os.path.join(wave_path, batch.name)
+        if os.path.isdir(path) and os.listdir(path):
+            raise WorkspaceError(
+                "batch directory already exists and is not empty: %s" % path)
+
+        meta_dir = os.path.join(path, META_DIR)
+        special_dir = os.path.join(meta_dir, "special_cfg")
+        os.makedirs(special_dir, exist_ok=True)
+        os.makedirs(os.path.join(meta_dir, "attempts"), exist_ok=True)
+
+        cfg_dest = os.path.join(path, os.path.basename(arcx_cfg))
+        map_dest = os.path.join(path, os.path.basename(dir_map))
+        shutil.copy2(arcx_cfg, cfg_dest)
+        shutil.copy2(dir_map, map_dest)
+
+        specials = self._snapshot_special_cfgs(batch.indices, special_dir)
+
+        atomic_write_json(os.path.join(meta_dir, "manifest.json"), {
+            "run_id": run_id,
+            "wave": wave.name,
+            "batch": batch.name,
+            "folder": batch.folder,
+            "group": wave.group,
+            "created_at": now,
+            "index_keys": list(batch.index_keys),
+            "total_cases": batch.total_cases,
+            "total_slots": batch.total_slots,
+            "sources": {"arcx_cfg": arcx_cfg, "dir_map": dir_map},
+            "snapshots": {
+                "arcx_cfg": cfg_dest,
+                "arcx_cfg_sha256": sha256(cfg_dest),
+                "dir_map": map_dest,
+                "dir_map_sha256": sha256(map_dest),
+                "special_cfg": specials,
+            },
+            "indexes": [
+                {
+                    "index_key": spec.index_key,
+                    "path": spec.path,
+                    "gds_count": spec.gds_count,
+                    "cpu_per_case": spec.cpu_per_case,
+                    "slots": spec.slots,
+                    "keywords": list(spec.keywords),
+                }
+                for spec in batch.indices
+            ],
+        })
+
+        return WaveWorkspace(
+            wave_name=wave.name,
+            path=path,
+            arcx_cfg=cfg_dest,
+            dir_map=map_dest,
+            meta_dir=meta_dir,
+            index_keys=batch.index_keys,
+            batch_name=batch.name,
+            folder=batch.folder,
+        )
+
+    def _snapshot_special_cfgs(self, indices: Sequence[Any],
                                special_dir: str) -> Dict[str, Any]:
         """Snapshot each index's special.cfg as well.
 
@@ -185,7 +300,7 @@ class WorkspaceBuilder:
         moment.
         """
         result: Dict[str, Any] = {}
-        for spec in wave.indices:
+        for spec in indices:
             source = os.path.join(spec.path, self.layout.special_cfg_name)
             if not os.path.isfile(source):
                 result[spec.index_key] = {"error": "%s not found" % source}
@@ -209,6 +324,14 @@ def load_workspace(wave_dir: str) -> Optional[WaveWorkspace]:
     if not manifest:
         return None
     snapshots = manifest.get("snapshots") or {}
+    batches = []
+    for entry in manifest.get("batches") or []:
+        name = str(entry.get("name") or "")
+        if not name:
+            continue
+        loaded = load_workspace(os.path.join(wave_dir, name))
+        if loaded is not None:
+            batches.append(loaded)
     return WaveWorkspace(
         wave_name=manifest.get("wave") or os.path.basename(wave_dir),
         path=wave_dir,
@@ -216,6 +339,9 @@ def load_workspace(wave_dir: str) -> Optional[WaveWorkspace]:
         dir_map=snapshots.get("dir_map") or os.path.join(wave_dir, "dir_map"),
         meta_dir=meta_dir,
         index_keys=tuple(manifest.get("index_keys") or ()),
+        batches=tuple(batches),
+        batch_name=str(manifest.get("batch") or ""),
+        folder=str(manifest.get("folder") or ""),
     )
 
 

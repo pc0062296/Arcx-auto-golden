@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from arcx_auto.adapters.arcx_cfg import ArcxConfig, parse_arcx_cfg
@@ -204,17 +204,23 @@ class Submitter:
                     "reason": decision.reason,
                 })
 
-            result = self._launch_one(
+            results = self._launch_one(
                 wave.wave_name, workspaces.get(wave.wave_name), run_id,
                 plan, dry_run, store, say)
-            outcome.launches.append(result)
+            outcome.launches.extend(results)
 
-            if result.ok:
-                controller.mark_submitted(wave.wave_name, result.job_id)
+            failed = next((r for r in results if not r.ok), None)
+            if failed is None:
+                # One wave, several Arcx parents -- one per source folder.
+                # The gate released them together, so they count as one
+                # release, and every job id is recorded rather than the first.
+                controller.mark_submitted(
+                    wave.wave_name,
+                    ",".join(r.job_id for r in results if r.job_id) or None)
             else:
                 controller.mark_failed(
-                    wave.wave_name, result.error or "submission failed")
-                outcome.error = result.error
+                    wave.wave_name, failed.error or "submission failed")
+                outcome.error = failed.error
                 break
             done += 1
 
@@ -226,32 +232,51 @@ class Submitter:
 
     def _launch_one(self, wave_name: str, workspace: Optional[WaveWorkspace],
                     run_id: str, plan: WavePlan, dry_run: bool,
-                    store: RunStore, say) -> LaunchResult:
+                    store: RunStore, say) -> List[LaunchResult]:
+        """Submit one wave: one Arcx command per source folder in it.
+
+        They go out together because the gate released the wave, not each
+        batch -- otherwise a wave of twenty small folders would wait the
+        minimum gate interval twenty times over for work that was sized to go
+        at once.
+
+        The first failure stops the rest. A wave half submitted is bad, but a
+        wave half submitted while the reason for the failure is still true is
+        worse.
+        """
         if workspace is None:
             if not dry_run:
-                return LaunchResult(wave_name=wave_name, ok=False,
-                                    error="no workspace found")
+                return [LaunchResult(wave_name=wave_name, ok=False,
+                                     error="no workspace found")]
             # dry run: a stand-in workspace, only to assemble the command
             workspace = _preview_workspace(wave_name, plan, run_id, self.settings)
 
-        result = self.launcher.launch(workspace, run_id, dry_run=dry_run)
-        if dry_run:
-            say("%s (dry-run): %s" % (wave_name, " ".join(result.command)))
-            return result
+        results: List[LaunchResult] = []
+        for target in workspace.runnable:
+            result = self.launcher.launch(target, run_id, dry_run=dry_run)
+            results.append(result)
+            if dry_run:
+                say("%s (dry-run): %s"
+                    % (target.label, " ".join(result.command)))
+                continue
 
-        store.append_audit({
-            "action": "wave_submitted" if result.ok else "wave_submit_failed",
-            "run_id": run_id,
-            "wave": wave_name,
-            "job_id": result.job_id,
-            "command": list(result.command),
-            "reason": "user submission",
-            "error": result.error,
-        })
-        say("%s submitted, job id = %s" % (wave_name, result.job_id or "?")
-            if result.ok else "%s submission failed: %s"
-            % (wave_name, result.error))
-        return result
+            store.append_audit({
+                "action": "wave_submitted" if result.ok else "wave_submit_failed",
+                "run_id": run_id,
+                "wave": wave_name,
+                "batch": target.batch_name,
+                "folder": target.folder,
+                "job_id": result.job_id,
+                "command": list(result.command),
+                "reason": "user submission",
+                "error": result.error,
+            })
+            say("%s submitted, job id = %s" % (target.label, result.job_id or "?")
+                if result.ok else "%s submission failed: %s"
+                % (target.label, result.error))
+            if not result.ok:
+                break
+        return results
 
     def _njobs(self) -> Optional[int]:
         value, _error = self.lsf.current_njobs()
@@ -280,11 +305,25 @@ def _preview_workspace(wave_name: str, plan: WavePlan, run_id: str,
     wave = next((w for w in plan.waves if w.name == wave_name), None)
     keys = wave.index_keys if wave else ()
     base = os.path.join(settings.expanded_run_root(), run_id, wave_name)
-    return WaveWorkspace(
-        wave_name=wave_name,
-        path=base,
-        arcx_cfg=os.path.join(base, "arcx.cfg"),
-        dir_map=os.path.join(base, "dir_map"),
-        meta_dir=os.path.join(base, ".arcx_auto"),
-        index_keys=keys,
+
+    def at(path: str, index_keys, batch_name: str = "", folder: str = ""):
+        return WaveWorkspace(
+            wave_name=wave_name,
+            path=path,
+            arcx_cfg=os.path.join(path, "arcx.cfg"),
+            dir_map=os.path.join(path, "dir_map"),
+            meta_dir=os.path.join(path, ".arcx_auto"),
+            index_keys=index_keys,
+            batch_name=batch_name,
+            folder=folder,
+        )
+
+    # The preview has to show what would really happen, which is one command
+    # per source folder rather than one per wave.
+    batches = tuple(
+        at(os.path.join(base, batch.name), batch.index_keys, batch.name,
+           batch.folder)
+        for batch in (wave.batches if wave else ())
     )
+    workspace = at(base, keys)
+    return replace(workspace, batches=batches) if batches else workspace

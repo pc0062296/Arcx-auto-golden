@@ -141,8 +141,10 @@ The rules:
 - **No corner goes to `<naming>_typical.cfg`**, which is also where the naming
   prefix is read from.
 - **A corner with no cfg is left out**, never swept into typical.
-- **An index directory containing `disable_qcap_golden` is left out.** That
-  file is read, never written -- opting out belongs to whoever owns the data.
+- **An index directory containing `disable_qcap_golden` is left out**, and so
+  is everything under a directory containing it -- drop one file at the top of
+  a tree and the whole tree is out. The row says which directory did it. That
+  file is read, never written: opting out belongs to whoever owns the data.
 - **Backup-looking paths are left out**: anything under a directory matching
   `*_old`, `*bak`, `*backup`, `*back`. The list is
   `auto_group.exclude_path_globs`.
@@ -231,6 +233,30 @@ through; the queueing is not a delay, it is what lets you carry on.
 Changed your mind before the daemon picks it up? **queue** (top right) has a
 **cancel** next to anything still waiting.
 
+### Where it lands on disk
+
+One directory per source folder, inside the wave:
+
+```
+<run_root>/<run_id>/wave_001/
+    chipA_typical.cfg   dir_map          the wave's snapshot
+    Cbest_T_blockA/                      one per source folder
+        chipA_typical.cfg   dir_map      its own copies
+        1000_run/  1001_run/             Arcx creates these
+    Cworst_T_blockA/
+        chipA_typical.cfg   dir_map
+        1002_run/
+```
+
+The name carries **two** levels of the source path, because `blockA` exists
+under every corner and one directory holding two different `blockA`s would be
+exactly the mixing this avoids.
+
+Arcx is started once per directory -- it creates its run folders relative to
+where it was started, so this is what keeps folders apart on disk. They all go
+out together when the gate releases the wave; the checks page tells you how
+many Arcx runs a submission actually is.
+
 ## 5. Watch it
 
 Go to **/** (the arcx-auto link, top left). The run appears there on its own --
@@ -241,6 +267,20 @@ any of the run tables. If it says "nothing needs a person right now", that is
 the whole answer.
 
 The page refreshes itself every 30 seconds.
+
+A run page groups its indices the way the submission was built:
+
+```
+v chipA_typical.cfg        12 index, 240 case(s)   [3 need a person]
+    v corner_v2g/Cbest_T/blockA    4 index, 80 case(s)  [3 need a person]
+          <the index table>
+    > corner_v2g/Cbest_T/blockB    4 index, 80 case(s)
+> chipA_cworst.cfg          8 index, 160 case(s)
+```
+
+Click to open and close. Anything with a case needing a person is **already
+open**; the rest stays shut, because the point is to stop having to read
+everything.
 
 ## 6. Read the states
 
@@ -286,8 +326,10 @@ netlist reads `FAILED`, not `DONE`.
 
 ## 7. Decide about the failures
 
-On an index with anything needing attention there is a **rerun this wave...**
-link. It shows you, before any button:
+On an index with anything needing attention there is a **rerun this folder...**
+link. Its scope is the directory Arcx ran in -- one source folder, not the
+whole wave -- so rerunning one leaves the rest alone. It shows you, before any
+button:
 
 - which case run dirs would be moved aside, and why
 - which would be kept

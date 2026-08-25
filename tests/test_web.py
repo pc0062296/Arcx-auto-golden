@@ -240,6 +240,99 @@ class WebTest(unittest.TestCase):
         self.assertEqual(_tree(self.demo["wave_dir"]), before)
 
 
+def _index(key, group="", folder="", attention=0, done=1, cfg=""):
+    counts = {"DONE": done}
+    if attention:
+        counts["FAILED"] = attention
+    return {"index_key": key, "run_folder": "/runs/w/b/%s_run" % key,
+            "group": group, "folder": folder, "cfg": cfg,
+            "counts": counts, "attention": attention, "cases": [],
+            "anomalies": {}}
+
+
+class IndexGroupingTest(unittest.TestCase):
+    """One submission carries several cfgs and several source folders.
+
+    Flattened into one table that structure is invisible, and "which corner
+    was this" becomes a question about a path.
+    """
+
+    def render(self, indexes):
+        return pages._index_sections("r1", indexes)
+
+    def test_a_run_without_the_metadata_keeps_the_flat_table(self):
+        """Runs made before the batch layout carry none of it, and must not
+        end up inside a container called "".
+        """
+        body = self.render([_index("1000"), _index("1001")])
+        self.assertNotIn("<details", body)
+        self.assertIn("1000", body)
+
+    def test_cfgs_become_the_outer_level(self):
+        body = self.render([
+            _index("1000", group="typical", folder="/p/corner_v2g/typ/blkA"),
+            _index("1002", group="cworst", folder="/p/corner_v2g/cw/blkA"),
+        ])
+        self.assertIn("typical", body)
+        self.assertIn("cworst", body)
+        self.assertEqual(body.count("<summary"), 4)   # 2 cfgs, 1 folder each
+
+    def test_folders_are_the_inner_level(self):
+        body = self.render([
+            _index("1000", group="typical", folder="/p/corner_v2g/typ/blkA"),
+            _index("1001", group="typical", folder="/p/corner_v2g/typ/blkB"),
+        ])
+        self.assertIn("typ/blkA", body)
+        self.assertIn("typ/blkB", body)
+        self.assertEqual(body.count("<summary"), 3)   # 1 cfg, 2 folders
+
+    def test_the_index_table_is_unchanged_inside(self):
+        body = self.render([
+            _index("1000", group="typical", folder="/p/a/blkA")])
+        self.assertIn("/run/r1/index/1000", body)
+        for column in ("progress", "cases", "done", "attention"):
+            self.assertIn(column, body)
+
+    def test_a_container_with_something_wrong_is_open(self):
+        body = self.render([
+            _index("1000", group="typical", folder="/p/a/blkA"),
+            _index("1002", group="cworst", folder="/p/a/blkB", attention=2),
+        ])
+        opened = [block for block in body.split("<details")
+                  if block.startswith(" open")]
+        self.assertTrue(any("cworst" in block for block in opened))
+        self.assertFalse(any("typical" in block and "cworst" not in block
+                             for block in opened))
+
+    def test_the_only_container_is_open(self):
+        """Nothing is gained by making somebody click once to see everything
+        there is.
+        """
+        body = self.render([_index("1000", group="typical", folder="/p/a/b")])
+        self.assertNotIn("<details>", body)
+        self.assertIn("<details open", body)
+
+    def test_the_closed_line_says_enough_to_skip_it(self):
+        body = self.render([
+            _index("1000", group="typical", folder="/p/a/blkA", done=7),
+            _index("1002", group="cworst", folder="/p/a/blkB", attention=2),
+        ])
+        self.assertIn("1 index, 7 case(s)", body)
+        self.assertIn("2 need a person", body)
+
+    def test_an_index_with_no_folder_recorded_still_appears(self):
+        body = self.render([_index("1000", group="typical"),
+                            _index("1001", group="typical",
+                                   folder="/p/a/blkA")])
+        self.assertIn("no source folder recorded", body)
+        self.assertIn("1000", body)
+
+    def test_the_cfg_name_stands_in_for_a_missing_group_name(self):
+        body = self.render([_index("1000", cfg="chipA_cbt.cfg",
+                                   folder="/p/a/blkA")])
+        self.assertIn("chipA_cbt.cfg", body)
+
+
 class PageRenderTest(unittest.TestCase):
     """Page rendering is pure, so it can be tested by feeding it data."""
 

@@ -205,8 +205,22 @@ def render_run(state: Dict[str, Any], refresh: int) -> str:
 
     body += "<h2>issue summary</h2>" + _issue_summary(state, run_id)
 
+    body += "<h2>index</h2>" + _index_sections(
+        run_id, state.get("indexes") or [])
+
+    return page("run %s" % run_id, body, refresh=refresh,
+                crumbs=[("/", "all runs"), (_q("run", run_id), run_id)],
+                meta="updated %s" % timestamp(state.get("updated_at")))
+
+
+_INDEX_COLUMNS = ["index", "progress", "cases", "done", "attention",
+                  "scan anomalies", "run folder"]
+
+
+def _index_rows(run_id: str,
+                indexes: Sequence[Dict[str, Any]]) -> List[List[str]]:
     rows = []
-    for index in state.get("indexes") or []:
+    for index in indexes:
         counts = index.get("counts") or {}
         attention = index.get("attention", 0)
         rows.append([
@@ -220,14 +234,101 @@ def render_run(state: Dict[str, Any], refresh: int) -> str:
             _anomaly_cell(index),
             "<span class='muted'>%s</span>" % esc(index.get("run_folder")),
         ])
-    body += "<h2>index</h2>" + table(
-        ["index", "progress", "cases", "done", "attention", "scan anomalies",
-         "run folder"],
-        rows, numeric=[2, 3, 4])
+    return rows
 
-    return page("run %s" % run_id, body, refresh=refresh,
-                crumbs=[("/", "all runs"), (_q("run", run_id), run_id)],
-                meta="updated %s" % timestamp(state.get("updated_at")))
+
+def _index_table(run_id: str, indexes: Sequence[Dict[str, Any]]) -> str:
+    return table(_INDEX_COLUMNS, _index_rows(run_id, indexes),
+                 numeric=[2, 3, 4])
+
+
+def _index_sections(run_id: str, indexes: Sequence[Dict[str, Any]]) -> str:
+    """The index table, inside the structure the submission actually had.
+
+    One submission can carry several cfgs and, under each, several source
+    folders. Flattened into one table of two hundred rows that structure is
+    invisible, and "which corner was this one" becomes a question about a
+    path. Nested, the shape of the run is the shape of the page:
+
+        typical  (3 folders, 40 index, 2 need a person)
+          corner_v2g/Cbest_T/blockA   (12 index)
+            <the same index table as before>
+
+    Open where something needs a person, closed where nothing does -- the
+    point is to stop having to read everything, so everything cannot be open.
+
+    A run made before the batch layout carries none of this, and gets the flat
+    table it always had rather than a container called "".
+    """
+    if not indexes:
+        return _index_table(run_id, indexes)
+    if not any(i.get("group") or i.get("cfg") or i.get("folder")
+               for i in indexes):
+        return _index_table(run_id, indexes)
+
+    groups: List[Tuple[str, List[Dict[str, Any]]]] = []
+    seen: Dict[str, int] = {}
+    for index in indexes:
+        key = index.get("group") or index.get("cfg") or "(no cfg recorded)"
+        position = seen.get(key)
+        if position is None:
+            seen[key] = len(groups)
+            groups.append((key, [index]))
+        else:
+            groups[position][1].append(index)
+
+    out = []
+    for name, members in groups:
+        inner = []
+        folders: List[Tuple[str, List[Dict[str, Any]]]] = []
+        by_folder: Dict[str, int] = {}
+        for index in members:
+            key = index.get("folder") or ""
+            position = by_folder.get(key)
+            if position is None:
+                by_folder[key] = len(folders)
+                folders.append((key, [index]))
+            else:
+                folders[position][1].append(index)
+
+        for folder, items in folders:
+            inner.append(_container(
+                _folder_label(folder), items, _index_table(run_id, items),
+                only_one=len(folders) == 1))
+        out.append(_container("<strong>%s</strong>" % esc(name), members,
+                              "".join(inner), only_one=len(groups) == 1))
+    return "".join(out)
+
+
+def _folder_label(folder: str) -> str:
+    """The last two components, which is what tells two folders apart.
+
+    The full path is on every row already; a heading repeating sixty
+    characters of shared prefix says nothing.
+    """
+    if not folder:
+        return "<span class='muted'>no source folder recorded</span>"
+    parts = [p for p in folder.rstrip("/").split("/") if p]
+    tail = "/".join(parts[-2:]) if len(parts) > 1 else parts[-1]
+    return "%s <span class='muted'>%s</span>" % (esc(tail), esc(folder))
+
+
+def _container(label: str, indexes: Sequence[Dict[str, Any]],
+               inner: str, only_one: bool = False) -> str:
+    """One collapsible level, with enough on the closed line to skip it."""
+    attention = sum(i.get("attention", 0) for i in indexes)
+    cases = sum(sum((i.get("counts") or {}).values()) for i in indexes)
+    summary = ("%s <span class='muted'>%d index, %d case(s)</span>"
+               % (label, len(indexes), cases))
+    if attention:
+        summary += " <span class='pill bad'>%d need a person</span>" % attention
+    # Open when there is something to act on, or when it is the only one.
+    # Everything open is the flat table again.
+    is_open = " open" if (attention or only_one) else ""
+    return ("<details%s style='margin:6px 0;padding:4px 0 4px 10px;"
+            "border-left:3px solid rgba(128,128,128,.35)'>"
+            "<summary style='cursor:pointer'>%s</summary>%s</details>"
+            % (is_open, summary, inner))
 
 
 def _finished_banner(state: Dict[str, Any]) -> str:
@@ -478,8 +579,13 @@ def rerun_link(state: Dict[str, Any], index: Dict[str, Any]) -> str:
     """Offer a rerun where the problem is visible, not on a separate page.
 
     Only when something is actually wrong: a button that is always there
-    invites a rerun of a wave that did not need one, and a rerun is the one
+    invites a rerun of work that did not need one, and a rerun is the one
     operation that moves directories.
+
+    The scope is the directory Arcx ran in -- one source folder, not the whole
+    wave -- because that is the directory this index's cases live in. Since
+    each folder has its own Arcx parent, its own launch record and its own
+    lock, rerunning one leaves the rest of the wave alone.
     """
     if not index.get("attention"):
         return ""
@@ -490,7 +596,7 @@ def rerun_link(state: Dict[str, Any], index: Dict[str, Any]) -> str:
     run_id = state.get("run_id", "")
     return (
         "<p><a class='pill bad' href=\"/rerun?wave_dir=%s&amp;run_id=%s"
-        "&amp;back=%s\">rerun this wave...</a> "
+        "&amp;back=%s\">rerun this folder...</a> "
         "<span class='muted'>shows what would be moved aside before "
         "anything happens</span></p>"
         % (urllib.parse.quote(wave_dir), urllib.parse.quote(run_id),

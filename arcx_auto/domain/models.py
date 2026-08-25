@@ -360,6 +360,57 @@ class SubmitGroup:
         return self.name or os.path.basename(self.arcx_cfg or "group")
 
 
+def batch_dir_name(folder: str) -> str:
+    """The directory name a folder's indices are run in.
+
+    Two components, not one. The last component alone collides constantly --
+    ``blockA`` exists under every corner in the tree -- and two different
+    folders sharing one directory would run unrelated cases in the same place,
+    which is the one thing wave isolation exists to prevent. The level above
+    is what tells them apart:
+
+        /proj/chipA/corner_v2g/Cbest_T/blockA  ->  Cbest_T_blockA
+        /proj/chipA/corner_v2g/Cworst_T/blockA ->  Cworst_T_blockA
+    """
+    parts = [p for p in str(folder or "").replace("\\", "/").split("/") if p]
+    if not parts:
+        return "batch"
+    tail = parts[-1]
+    parent = parts[-2] if len(parts) > 1 else ""
+    name = "%s_%s" % (parent, tail) if parent else tail
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in name)
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_.") or "batch"
+
+
+@dataclass(frozen=True)
+class WaveBatch:
+    """One folder's worth of a wave: its own directory, its own Arcx command.
+
+    A wave is what the gate releases at once. A batch is where Arcx actually
+    runs, and there is one per source folder, because Arcx creates its run
+    folders relative to the directory it was started in -- so keeping two
+    folders' cases apart on disk means starting Arcx twice.
+    """
+
+    name: str
+    folder: str
+    indices: Tuple[IndexSpec, ...]
+
+    @property
+    def index_keys(self) -> Tuple[str, ...]:
+        return tuple(i.index_key for i in self.indices)
+
+    @property
+    def total_slots(self) -> int:
+        return sum(i.slots for i in self.indices)
+
+    @property
+    def total_cases(self) -> int:
+        return sum(i.gds_count for i in self.indices)
+
+
 @dataclass(frozen=True)
 class Wave:
     """A batch of indices submitted together: one Arcx command, one directory.
@@ -398,6 +449,44 @@ class Wave:
             if index.folder not in out:
                 out.append(index.folder)
         return tuple(out)
+
+    @property
+    def batches(self) -> Tuple[WaveBatch, ...]:
+        """This wave split by source folder, one directory each.
+
+        Deterministic: the folders in the order they appear, and a name built
+        from the folder path. A name that two folders in one wave would share
+        gets a suffix from the path itself rather than a counter, so the same
+        wave planned twice produces the same directory names -- which a rerun,
+        and anybody comparing two runs by eye, both depend on.
+        """
+        import hashlib
+
+        grouped: List[Tuple[str, List[IndexSpec]]] = []
+        seen: Dict[str, int] = {}
+        for index in self.indices:
+            position = seen.get(index.folder)
+            if position is None:
+                seen[index.folder] = len(grouped)
+                grouped.append((index.folder, [index]))
+            else:
+                grouped[position][1].append(index)
+
+        names: Dict[str, str] = {}
+        taken: set = set()
+        for folder, _members in grouped:
+            name = batch_dir_name(folder)
+            if name in taken:
+                digest = hashlib.sha1(folder.encode("utf-8")).hexdigest()[:6]
+                name = "%s_%s" % (name, digest)
+            taken.add(name)
+            names[folder] = name
+
+        return tuple(
+            WaveBatch(name=names[folder], folder=folder,
+                      indices=tuple(members))
+            for folder, members in grouped
+        )
 
     @property
     def index_keys(self) -> Tuple[str, ...]:
