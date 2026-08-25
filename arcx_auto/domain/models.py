@@ -75,6 +75,10 @@ class LsfJobView:
     output_file: Optional[str] = None
     exec_host: Optional[str] = None
     job_name: Optional[str] = None
+    #: bjobs cut a path short to fit its column. A truncated path is still a
+    #: usable prefix, but it can never be compared for equality -- and doing
+    #: so anyway is how a job stops being found at all.
+    truncated: bool = False
 
     def belongs_to(self, path_prefix: str) -> bool:
         """Whether this job lives under a path prefix."""
@@ -184,8 +188,14 @@ class CaseSnapshot:
     last_progress_at: float
     last_progress_size: int = 0
     last_seen_at: float = 0.0
+    #: The last job id ever matched to this case. Sticky: it survives ticks
+    #: where nothing matched, because "which job was this" is still the most
+    #: useful thing to show.
     lsf_job_id: Optional[str] = None
     lsf_state: Optional[LsfState] = None
+    #: Whether a job is matched to this case **right now**. Without this,
+    #: a stale job id is indistinguishable from a live one on the page.
+    lsf_job_matched: bool = False
     # When we first saw "there should be an LSF job but there is none".
     # LOST needs a grace period, or the visibility lag between markers and LSF
     # produces false positives.

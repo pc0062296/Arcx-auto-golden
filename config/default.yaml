@@ -61,7 +61,11 @@ monitor:
   # keep this equal to qa.quiet.stalled_after_sec or the shorter clock wins.
   stall_threshold_sec: 28800     # 8h; log unchanged this long -> STALLED
   long_pend_warn_sec: 7200
-  lost_grace_sec: 300            # wait this long after an LSF job vanishes
+  # Wait this long after a job we have seen disappears from bjobs before
+  # calling the case LOST. It covers the lag inside a normal case: the job
+  # leaves bjobs the moment it finishes and Arcx writes .complete some time
+  # afterwards. A case whose job was never found is never called LOST at all.
+  lost_grace_sec: 1800
   log_head_bytes: 8192
   poll_active_sec: 30
   poll_idle_sec: 300
@@ -144,6 +148,10 @@ lsf:
   command_timeout_sec: 60
 
   arcx_cmd: "Arcx"
+  # Column width for the path fields of `bjobs -o`. bjobs truncates anything
+  # that does not fit, and a truncated path matches no case -- which looks
+  # like a missing job rather than like an error.
+  bjobs_path_width: 512
   arcx_fixed_args: ["-lsf0", "-nt", "50"]
   arcx_rerun_args: ["-keep_dir"]
 

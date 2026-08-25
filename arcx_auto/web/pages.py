@@ -8,6 +8,7 @@ entirely without disturbing the daemon (architecture decision 1).
 from __future__ import annotations
 
 import os
+import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -482,7 +483,7 @@ def render_index(state: Dict[str, Any], index: Dict[str, Any],
                        "case", case["case_id"])),
                 esc(case["case_id"])),
             state_pill(case["state"]),
-            esc(case.get("lsf_state") or "-"),
+            _lsf_cell(case),
             esc(duration(case.get("in_state_sec"))),
             _silent_cell(case),
             esc(size(case.get("log_size"))),
@@ -605,6 +606,15 @@ def rerun_link(state: Dict[str, Any], index: Dict[str, Any]) -> str:
     )
 
 
+def _lsf_cell(case: Dict[str, Any]) -> str:
+    """One column's worth of the same distinction."""
+    if case.get("lsf_job_matched") and case.get("lsf_state"):
+        return esc(case["lsf_state"])
+    if case.get("lsf_job_id"):
+        return "<span class='warn'>gone</span>"
+    return "<span class='muted'>not matched</span>"
+
+
 def _silent_cell(case: Dict[str, Any]) -> str:
     """Quiet time escalates visually as it grows: the system states the
     number, the judgement stays human.
@@ -664,8 +674,7 @@ def render_case(state: Dict[str, Any], index: Dict[str, Any],
     facts = [
         ("structural state", case.get("base_state") or "-"),
         ("reason", case.get("note") or "-"),
-        ("LSF", "%s (job %s)" % (case.get("lsf_state") or "-",
-                                 case.get("lsf_job_id") or "-")),
+        ("LSF", _lsf_fact(case)),
         ("case run dir", case.get("case_dir") or "-"),
         ("cmd_file exec path", case.get("exec_path") or "-"),
         ("log", case.get("log_path") or "-"),
@@ -686,6 +695,27 @@ def render_case(state: Dict[str, Any], index: Dict[str, Any],
                         (_q("run", run_id, "index", index_key), index_key),
                         (_q("run", run_id, "index", index_key,
                             "case", case_id), case_id)])
+
+
+def _lsf_fact(case: Dict[str, Any]) -> str:
+    """What LSF says about this case, in words that mean what they say.
+
+    Three different situations used to render as the same "- (job -)":
+    a live job, a job that has gone, and a case no job was ever matched to.
+    The third is the common one and the least alarming -- Arcx runs only so
+    many cases at a time within an index, so a case waiting its turn has no
+    LSF job yet -- and it must not read like the second.
+    """
+    job_id = case.get("lsf_job_id")
+    state = case.get("lsf_state")
+    if case.get("lsf_job_matched") and job_id:
+        return "%s (job %s)" % (state or "?", job_id)
+    if job_id:
+        since = case.get("lsf_missing_since")
+        gone = (" for %s" % duration(time.time() - since)) if since else ""
+        return "job %s is no longer listed by bjobs%s" % (job_id, gone)
+    return ("no LSF job has been matched to this case "
+            "(it may still be waiting its turn inside Arcx)")
 
 
 def _case_issues(case: Dict[str, Any], back: str = "/") -> str:

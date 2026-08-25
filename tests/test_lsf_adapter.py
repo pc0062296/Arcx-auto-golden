@@ -41,6 +41,55 @@ class BjobsParseTest(unittest.TestCase):
         self.assertEqual(jobs, [])
 
 
+class BjobsTruncationTest(unittest.TestCase):
+    """A path bjobs cut short matches nothing, and looks like a missing job.
+
+    This is a false alarm produced entirely by a display width, which is the
+    worst kind: nothing is wrong, nothing reports an error, and the case says
+    its job has disappeared.
+    """
+
+    def test_the_path_columns_are_given_a_width(self):
+        spec = LsfAdapter()._bjobs_format()
+        self.assertIn("exec_cwd:512", spec)
+        self.assertIn("output_file:512", spec)
+        self.assertIn("jobid", spec)
+        self.assertNotIn("jobid:", spec)
+
+    def test_the_width_is_configurable(self):
+        from arcx_auto.config.settings import LsfSettings
+
+        settings = LsfSettings()
+        settings.bjobs_path_width = 64
+        self.assertIn("sub_cwd:64", LsfAdapter(settings)._bjobs_format())
+
+    def test_a_width_of_zero_asks_for_no_widths_at_all(self):
+        from arcx_auto.config.settings import LsfSettings
+
+        settings = LsfSettings()
+        settings.bjobs_path_width = 0
+        spec = LsfAdapter(settings)._bjobs_format()
+        self.assertNotIn(":", spec)
+
+    def test_a_truncated_path_is_marked_and_the_marker_removed(self):
+        jobs = LsfAdapter._parse_bjobs(
+            "104 RUN /work/run/wave_001/1000/ca* /work/sub - host01 j\n")
+        self.assertEqual(jobs[0].exec_cwd, "/work/run/wave_001/1000/ca")
+        self.assertTrue(jobs[0].truncated)
+
+    def test_an_untruncated_line_is_not_marked(self):
+        jobs = LsfAdapter._parse_bjobs(BJOBS_OUTPUT)
+        self.assertFalse(any(j.truncated for j in jobs))
+
+    def test_a_truncated_path_still_says_which_wave_it_belongs_to(self):
+        """Shortened, it is still a prefix -- enough for ownership, never
+        enough for equality.
+        """
+        job = LsfJobView(job_id="1", state=LsfState.RUN,
+                         exec_cwd="/work/run/wave_001/1000/ca", truncated=True)
+        self.assertTrue(job.belongs_to("/work/run/wave_001"))
+
+
 class BusersParseTest(unittest.TestCase):
     def test_njobs_column_located_by_header(self):
         """Locate the column by name, not by position: the busers column

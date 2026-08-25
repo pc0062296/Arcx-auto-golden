@@ -112,7 +112,10 @@ class Collector:
         by_log: Dict[str, LsfJobView] = {}
         by_dir: List[Tuple[str, LsfJobView]] = []
         for job in candidates:
-            if job.output_file:
+            # A path bjobs cut short is a prefix, not a value: comparing it
+            # for equality can only ever fail, and matching on a prefix could
+            # attach the job to the wrong case.
+            if job.output_file and not job.truncated:
                 by_log[os.path.abspath(job.output_file)] = job
             for cwd in (job.exec_cwd, job.sub_cwd):
                 if cwd:

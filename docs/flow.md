@@ -329,6 +329,41 @@ Every tick, for every wave under `run_root`:
    publish to the shared disk (every 60s)
 ```
 
+### Why a case is LOST -- and why it usually is not
+
+```
+   .run marker present
+        |
+        +-- was an LSF job ever matched to this case?
+        |        no  -> RUNNING, "no LSF job has been matched to it"
+        |               (Arcx runs only so many cases at a time in one
+        |                index; the rest are waiting their turn)
+        |        yes -> is it still listed by bjobs?
+        |                 yes -> RUNNING / STALLED / SUSPENDED
+        |                 no  -> gone for how long?
+        |                          < lost_grace_sec  -> RUNNING
+        |                          >= lost_grace_sec -> LOST
+        v
+```
+
+Two rules keep this honest.
+
+**Never having found a job is not evidence that one is gone.** It is the
+absence of evidence either way, and LOST is far too definite a word for that.
+A case only reaches LOST if a job was matched to it at some point and has
+since disappeared.
+
+**The grace period covers the lag inside a normal case.** An LSF job leaves
+`bjobs` the moment it finishes, and Arcx writes the `.complete` marker some
+time afterwards. In that window the markers say running and LSF has nothing,
+and the case is neither finished nor lost.
+
+A job is matched to a case by path -- the child jobs Arcx submits carry no
+identifiable name -- so `bjobs -o` is asked for wide path columns. Truncated
+to fit a display width, a path matches nothing, and every case then looks
+like one whose job has disappeared: a false alarm produced entirely by a
+column width.
+
 ### Why a case is DONE
 
 `DONE` is not "Arcx wrote `.complete`". That is `COMPLETED_MARKER`, and it is

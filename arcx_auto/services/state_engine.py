@@ -34,6 +34,11 @@ class TransitionContext:
     queried (a dev box, or bjobs having a bad day) a case must never be called
     LOST just because no job was found. Better to leave it RUNNING and visible
     than to raise a false alarm across the board.
+
+    ``lost_grace_sec`` covers the other lag, the one inside a normal case: an
+    LSF job leaves bjobs the moment it finishes, and Arcx writes the .complete
+    marker some time afterwards. In that window the markers say running and
+    LSF has nothing, and the case is neither finished nor lost.
     """
 
     now: float
@@ -101,16 +106,27 @@ def transition_case(
     lsf_state = obs.lsf.state if obs.lsf else None
     lsf_job_id = obs.lsf.job_id if obs.lsf else (prev.lsf_job_id if prev else None)
 
-    expects_job = obs.has_run_marker or obs.has_queue_marker
+    # A .queue marker is Arcx's own queue, not LSF's. Arcx submits only so
+    # many cases at a time within an index, so a queued case has no LSF job
+    # yet **by design** -- and calling that LOST says something false about
+    # the most normal situation there is.
+    expects_job = obs.has_run_marker
+    # Sticky: once a job has been matched, its id survives ticks where nothing
+    # matched. That is also the evidence that a job ever existed.
+    ever_seen = bool(lsf_job_id)
     job_absent = ctx.lsf_data_available and expects_job and (
         obs.lsf is None or not lsf_state.is_active  # type: ignore[union-attr]
     )
-    if job_absent:
+    # Only start the clock for a case whose job we have actually seen. Never
+    # having found one is not evidence that one is gone: it is the absence of
+    # evidence either way, and LOST is far too definite a word for that.
+    if job_absent and ever_seen:
         lsf_missing_since = (
             prev.lsf_missing_since if prev and prev.lsf_missing_since else now
         )
     else:
         lsf_missing_since = None
+    never_matched = job_absent and not ever_seen
 
     # --- 3. Decide the state ---------------------------------------------
     state, reason = _decide_state(
@@ -119,6 +135,7 @@ def transition_case(
         lsf_state=lsf_state,
         lsf_missing_since=lsf_missing_since,
         last_progress_at=last_progress_at,
+        never_matched=never_matched,
     )
 
     # Compare base against base, not against the resolved state: `state` may
@@ -138,6 +155,7 @@ def transition_case(
         last_seen_at=now,
         lsf_job_id=lsf_job_id,
         lsf_state=lsf_state,
+        lsf_job_matched=obs.lsf is not None,
         lsf_missing_since=lsf_missing_since,
         case_dir=obs.case_dir or (prev.case_dir if prev else None),
         log_path=obs.log_path or (prev.log_path if prev else None),
@@ -174,6 +192,7 @@ def _decide_state(
     lsf_state: Optional[LsfState],
     lsf_missing_since: Optional[float],
     last_progress_at: float,
+    never_matched: bool = False,
 ) -> Tuple[CaseState, str]:
     """State precedence.
 
@@ -196,7 +215,9 @@ def _decide_state(
     if lsf_state is not None and lsf_state.is_suspended:
         return (CaseState.SUSPENDED, "LSF reports %s" % lsf_state.value)
 
-    # 3.3 A job should exist but LSF has none -- only LOST past the grace period
+    # 3.3 A job we have seen is gone -- and only LOST past the grace period.
+    #     lsf_missing_since is None unless a job was matched at some point, so
+    #     "we never found one" cannot reach here.
     if lsf_missing_since is not None:
         missing_for = now - lsf_missing_since
         if missing_for >= ctx.lost_grace_sec:
@@ -216,6 +237,13 @@ def _decide_state(
                 ".run marker present but the log has not grown for %.0f minutes"
                 % (silent / 60.0),
             )
+        if never_matched:
+            # Running as far as the markers are concerned, and no LSF job has
+            # ever been matched to it. Said plainly rather than dressed up as
+            # LOST: the case may simply be waiting its turn inside Arcx, which
+            # runs only so many at a time within one index.
+            return (CaseState.RUNNING,
+                    ".run marker present; no LSF job has been matched to it")
         return (CaseState.RUNNING, ".run marker present")
 
     # 3.5 Queued

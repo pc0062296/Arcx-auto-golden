@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -331,6 +332,40 @@ class IndexGroupingTest(unittest.TestCase):
         body = self.render([_index("1000", cfg="chipA_cbt.cfg",
                                    folder="/p/a/blkA")])
         self.assertIn("chipA_cbt.cfg", body)
+
+
+class LsfWordingTest(unittest.TestCase):
+    """Three different situations that used to render identically.
+
+    "- (job -)" was shown for a live job with no state, for a job that had
+    gone, and for a case no job was ever matched to. The third is the common
+    one and the least alarming, and it must not read like the second.
+    """
+
+    def fact(self, **case):
+        return pages._lsf_fact(case)
+
+    def test_a_matched_job_shows_its_state_and_id(self):
+        self.assertEqual(
+            self.fact(lsf_job_matched=True, lsf_state="RUN", lsf_job_id="12"),
+            "RUN (job 12)")
+
+    def test_a_job_that_has_gone_says_so(self):
+        text = self.fact(lsf_job_matched=False, lsf_job_id="12",
+                         lsf_missing_since=time.time() - 120)
+        self.assertIn("12", text)
+        self.assertIn("no longer listed", text)
+
+    def test_a_case_with_no_job_ever_says_that_instead(self):
+        text = self.fact(lsf_job_matched=False)
+        self.assertIn("no LSF job", text)
+        self.assertIn("waiting its turn", text)
+
+    def test_the_table_cell_matches(self):
+        self.assertIn("not matched", pages._lsf_cell({}))
+        self.assertIn("gone", pages._lsf_cell({"lsf_job_id": "12"}))
+        self.assertIn("RUN", pages._lsf_cell(
+            {"lsf_job_id": "12", "lsf_job_matched": True, "lsf_state": "RUN"}))
 
 
 class PageRenderTest(unittest.TestCase):

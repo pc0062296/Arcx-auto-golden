@@ -141,6 +141,11 @@ def _index_payload(
             "exec_path": case.exec_path,
             "lsf_job_id": case.lsf_job_id,
             "lsf_state": case.lsf_state.value if case.lsf_state else None,
+            # Whether that job id is live or a memory. Without this the page
+            # cannot tell "no job was ever found" from "the job is gone",
+            # and those call for completely different reactions.
+            "lsf_job_matched": case.lsf_job_matched,
+            "lsf_missing_since": case.lsf_missing_since,
             "marker_inconsistent": case.marker_inconsistent,
             "issues": [_issue_payload(i) for i in issues],
             "worst_severity": _worst(issues),

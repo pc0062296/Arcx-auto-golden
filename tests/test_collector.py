@@ -89,6 +89,31 @@ class AttachLsfTest(unittest.TestCase):
         obs = self.collector.collect_index_run(self.folder, "1000", lsf_jobs=[job])
         self.assertIsNone(obs.cases["NDIO_1"].lsf)
 
+    def test_a_truncated_output_file_is_not_matched_by_equality(self):
+        """bjobs cut the path short, so it can only ever be a prefix.
+
+        Comparing it for equality fails; matching on the prefix would attach
+        the job to whichever case happened to sort first. Not matching is the
+        honest answer, and it no longer produces a false LOST.
+        """
+        log = os.path.join(self.folder, "submit_bjob_cmd_file_1.log")
+        job = LsfJobView(job_id="777", state=LsfState.RUN,
+                         output_file=log[:-6], truncated=True)
+        obs = self.collector.collect_index_run(self.folder, "1000",
+                                               lsf_jobs=[job])
+        self.assertIsNone(obs.cases["NDIO_1"].lsf)
+
+    def test_a_truncated_cwd_still_matches_its_case(self):
+        """The directory match is a prefix comparison already, so a path cut
+        short after the case directory still lands on the right case.
+        """
+        job = LsfJobView(job_id="888", state=LsfState.RUN,
+                         exec_cwd=os.path.join(self.folder, "PDIO_1", "wo"),
+                         truncated=True)
+        obs = self.collector.collect_index_run(self.folder, "1000",
+                                               lsf_jobs=[job])
+        self.assertEqual(obs.cases["PDIO_1"].lsf.job_id, "888")
+
     def test_no_jobs_is_harmless(self):
         obs = self.collector.collect_index_run(self.folder, "1000", lsf_jobs=[])
         self.assertEqual(len(obs.cases), 2)

@@ -95,7 +95,12 @@ class MonitorSettings:
     long_pend_warn_sec: float = 7200.0
     # How long to wait after an LSF job disappears before declaring it LOST.
     # Gives NFS attribute caching and Arcx's own tidy-up some slack.
-    lost_grace_sec: float = 300.0
+    # How long a job we have seen must stay gone before the case reads LOST.
+    # It covers the lag inside a normal case: an LSF job leaves bjobs the
+    # moment it finishes, and Arcx writes the .complete marker some time
+    # afterwards -- often more than five minutes later, which is what the old
+    # value turned into a page full of false LOST.
+    lost_grace_sec: float = 1800.0
     # How many bytes of a log to read when inferring case ownership
     log_head_bytes: int = 8192
     # Tiered polling
@@ -202,6 +207,11 @@ class LsfSettings:
 
     # Arcx invocation. These are fixed by convention.
     arcx_cmd: str = "Arcx"
+    # Column width for the path fields of `bjobs -o`. bjobs truncates a value
+    # that does not fit its column, and a truncated path matches nothing --
+    # which shows up as jobs that cannot be found rather than as an error.
+    # Wide enough for a real NFS path plus the wave and batch directories.
+    bjobs_path_width: int = 512
     arcx_fixed_args: List[str] = field(default_factory=lambda: ["-lsf0", "-nt", "50"])
     arcx_rerun_args: List[str] = field(default_factory=lambda: ["-keep_dir"])
 

@@ -290,11 +290,22 @@ everything.
 | `DONE` | finished **and** every QA check passed |
 | `FAILED` | finished, and QA found something wrong -- or could not confirm it was right |
 | `STALLED` | the log has not grown for a long time |
-| `LOST` | the marker says it is running, but LSF has no such job |
+| `LOST` | a job we **had seen** for this case has been gone from `bjobs` for half an hour, and the marker still says running |
 | `SUSPENDED` | LSF suspended it |
 
 Click an index for the case table, and a case for the evidence behind its
 verdict.
+
+The **LSF** column says one of three things, and they mean different things:
+
+| Shown | Meaning |
+|---|---|
+| `RUN`, `PEND`, ... | a job is matched to this case right now |
+| `gone` | a job we had seen is no longer listed by `bjobs`. After `lost_grace_sec` this becomes `LOST` |
+| `not matched` | no job has ever been found for this case. Usually it is waiting its turn inside Arcx, which runs only so many cases at a time in one index |
+
+**`not matched` is never `LOST`.** Never having found a job is not evidence
+that one is gone.
 
 On a big index, filter the table with the buttons above it:
 
@@ -387,6 +398,7 @@ first: every case needing a person, across every run.
 | an index cannot be selected | it has no GDS files; the reason is on the row |
 | a file will not open | it is outside `run_root` and the run directories; the viewer only reads inside them |
 | everything says `LOST` | LSF is unreachable. Nothing is actually wrong with the jobs |
+| a case says **not matched** under LSF | no job has been found for it yet. Normal while Arcx is holding it back -- it runs only so many cases at a time within one index |
 | a submission went to the wrong directory | the **workspace** line on the submission page; it names the run_root before you submit |
 | a wave is bigger than the slot cap | a folder is kept whole. Raise `plan.max_slots_per_wave`, select fewer indices, or set that group to **split anywhere** |
 | an index says `special.cfg` cannot be read | it is still selectable and sized at `plan.default_cpu_per_case`. If your config file predates that, check it says 4, not 0 |

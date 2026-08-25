@@ -131,14 +131,28 @@ class ProgressTest(unittest.TestCase):
         not running at all.
         """
         c = ctx(now=T0, grace=300.0, stall=3600.0)
+        job = LsfJobView(job_id="7", state=LsfState.RUN)
         first, _ = transition_case(
-            None, obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0), c)
+            None,
+            obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0, lsf=job),
+            c)
+        # The job is gone and the log is still. The grace period has only just
+        # started, so this reads STALLED for now.
         second, _ = transition_case(
             first,
             obs(markers=[MarkerKind.RUN], log_size=100),
             ctx(now=T0 + 3700, grace=300.0, stall=3600.0),
         )
-        self.assertEqual(second.state, CaseState.LOST)
+        self.assertEqual(second.state, CaseState.STALLED)
+        # Once the job has been gone long enough, LOST wins: it is the more
+        # precise diagnosis, and STALLED would send somebody looking for why
+        # it is slow when it is not running at all.
+        third, _ = transition_case(
+            second,
+            obs(markers=[MarkerKind.RUN], log_size=100),
+            ctx(now=T0 + 4100, grace=300.0, stall=3600.0),
+        )
+        self.assertEqual(third.state, CaseState.LOST)
 
     def test_first_observation_seeds_silence_from_mtime(self):
         """Key: the first observation (and every daemon restart) must seed
@@ -175,11 +189,15 @@ class LsfTest(unittest.TestCase):
 
     def test_lost_requires_grace_period(self):
         """A vanished LSF job is not immediately LOST: markers and LSF have
-        different visibility lag.
+        different visibility lag. An LSF job leaves bjobs the moment it
+        finishes, and Arcx writes .complete some time afterwards.
         """
         c = ctx(now=T0, grace=300.0)
+        job = LsfJobView(job_id="7", state=LsfState.RUN)
         first, _ = transition_case(
-            None, obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0), c)
+            None,
+            obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0, lsf=job),
+            c)
         # the job is gone, but still inside the grace period
         mid, _ = transition_case(
             first, obs(markers=[MarkerKind.RUN], log_size=100),
@@ -207,8 +225,11 @@ class LsfTest(unittest.TestCase):
 
     def test_lost_clears_when_job_reappears(self):
         c = ctx(now=T0, grace=300.0)
+        seen = LsfJobView(job_id="7", state=LsfState.RUN)
         first, _ = transition_case(
-            None, obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0), c)
+            None,
+            obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0, lsf=seen),
+            c)
         gone, _ = transition_case(
             first, obs(markers=[MarkerKind.RUN], log_size=100),
             ctx(now=T0 + 100, grace=300.0))
@@ -227,19 +248,54 @@ class LsfTest(unittest.TestCase):
         self.assertEqual(snap.state, CaseState.COMPLETED_MARKER)
 
 
-    def test_queued_case_also_goes_lost_when_job_never_appears(self):
-        """A .queue marker with no LSF job ever means it was never submitted.
+    def test_a_queued_case_is_never_lost(self):
+        """A .queue marker is Arcx's own queue, not LSF's.
 
-        The grace period covers the gap between Arcx writing the marker and
-        calling bsub.
+        Arcx runs only so many cases at a time within one index, so a queued
+        case has no LSF job yet **by design**. This used to be reported as
+        LOST, which said something false about the most normal situation
+        there is -- and said it about every case waiting its turn.
         """
         c = ctx(now=T0, grace=300.0)
         first, _ = transition_case(None, obs(markers=[MarkerKind.QUEUE]), c)
         self.assertEqual(first.state, CaseState.QUEUED)
         later, _ = transition_case(
             first, obs(markers=[MarkerKind.QUEUE]),
-            ctx(now=T0 + 400, grace=300.0))
-        self.assertEqual(later.state, CaseState.LOST)
+            ctx(now=T0 + 100000, grace=300.0))
+        self.assertEqual(later.state, CaseState.QUEUED)
+
+    def test_a_running_case_whose_job_was_never_matched_is_not_lost(self):
+        """Never having found a job is not evidence that one is gone.
+
+        It is the absence of evidence either way, and LOST is far too
+        definite a word for that. The case says so instead.
+        """
+        c = ctx(now=T0, grace=300.0, stall=1e9)
+        first, _ = transition_case(
+            None, obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0), c)
+        later, _ = transition_case(
+            first, obs(markers=[MarkerKind.RUN], log_size=100),
+            ctx(now=T0 + 100000, grace=300.0, stall=1e9))
+        self.assertEqual(later.state, CaseState.RUNNING)
+        self.assertIn("no LSF job", later.note)
+        self.assertIsNone(later.lsf_missing_since)
+
+    def test_a_job_seen_once_is_remembered(self):
+        """The id stays on the page after the job leaves bjobs, but the page
+        has to be able to say it is no longer matched.
+        """
+        c = ctx(now=T0, grace=300.0)
+        job = LsfJobView(job_id="7", state=LsfState.RUN)
+        first, _ = transition_case(
+            None,
+            obs(markers=[MarkerKind.RUN], log_size=100, log_mtime=T0, lsf=job),
+            c)
+        self.assertTrue(first.lsf_job_matched)
+        gone, _ = transition_case(
+            first, obs(markers=[MarkerKind.RUN], log_size=100),
+            ctx(now=T0 + 60, grace=300.0))
+        self.assertEqual(gone.lsf_job_id, "7")
+        self.assertFalse(gone.lsf_job_matched)
 
 
 class EventTest(unittest.TestCase):

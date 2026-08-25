@@ -29,6 +29,10 @@ from arcx_auto.domain.models import LsfJobView
 _BJOBS_FIELDS = ["jobid", "stat", "exec_cwd", "sub_cwd", "output_file",
                  "exec_host", "job_name"]
 
+#: The fields that hold paths. bjobs truncates a value that does not fit its
+#: column, and these are the ones long enough for that to happen.
+_BJOBS_PATH_FIELDS = ("exec_cwd", "sub_cwd", "output_file")
+
 # bjobs_manage.py -jp prints a summary, not a job list:
 #     grep all jobs...
 #     finished, total 304 jobs
@@ -130,7 +134,7 @@ class LsfAdapter:
         argv = [
             self.settings.bjobs_cmd,
             "-u", self.user,
-            "-o", " ".join(_BJOBS_FIELDS),
+            "-o", self._bjobs_format(),
             "-noheader",
         ]
         result = self._run(argv)
@@ -140,6 +144,24 @@ class LsfAdapter:
                 return ([], None)
             return ([], result.error or result.stderr.strip() or "bjobs failed")
         return (self._parse_bjobs(result.stdout), None)
+
+    def _bjobs_format(self) -> str:
+        """The -o spec, with the path columns made wide enough to survive.
+
+        Without an explicit width bjobs uses its own, which is far narrower
+        than a real NFS path once a run id, a wave and a batch directory are
+        in it. A truncated path matches no case, and the case then looks like
+        one whose job has disappeared -- which is a false alarm produced
+        entirely by a display width.
+        """
+        width = max(0, int(getattr(self.settings, "bjobs_path_width", 0) or 0))
+        parts = []
+        for field in _BJOBS_FIELDS:
+            if width and field in _BJOBS_PATH_FIELDS:
+                parts.append("%s:%d" % (field, width))
+            else:
+                parts.append(field)
+        return " ".join(parts)
 
     @staticmethod
     def _parse_bjobs(text: str) -> List[LsfJobView]:
@@ -156,15 +178,22 @@ class LsfAdapter:
                 state = LsfState(values["stat"].upper())
             except ValueError:
                 state = LsfState.UNKWN
+            paths = {}
+            truncated = False
+            for field in _BJOBS_PATH_FIELDS:
+                value, was_cut = _untruncate(values[field])
+                paths[field] = value
+                truncated = truncated or was_cut
             jobs.append(
                 LsfJobView(
                     job_id=values["jobid"],
                     state=state,
-                    exec_cwd=_none_if_dash(values["exec_cwd"]),
-                    sub_cwd=_none_if_dash(values["sub_cwd"]),
-                    output_file=_none_if_dash(values["output_file"]),
+                    exec_cwd=paths["exec_cwd"],
+                    sub_cwd=paths["sub_cwd"],
+                    output_file=paths["output_file"],
                     exec_host=_none_if_dash(values["exec_host"]),
                     job_name=_none_if_dash(values["job_name"]),
+                    truncated=truncated,
                 )
             )
         return jobs
@@ -300,6 +329,22 @@ def _current_user() -> str:
         return getpass.getuser()
     except Exception:  # pragma: no cover - rare environments without a pwd entry
         return os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
+
+
+def _untruncate(value: str) -> Tuple[Optional[str], bool]:
+    """A path from bjobs, and whether bjobs cut it short.
+
+    bjobs marks a value it had to shorten with a trailing asterisk. What is
+    left is still a valid prefix -- good enough to say which wave a job
+    belongs to -- but it can never be compared for equality again, and doing
+    so anyway is how a job silently stops being matched to its case.
+    """
+    cleaned = _none_if_dash(value)
+    if cleaned is None:
+        return (None, False)
+    if cleaned.endswith("*"):
+        return (cleaned[:-1] or None, True)
+    return (cleaned, False)
 
 
 def _none_if_dash(value: str) -> Optional[str]:
