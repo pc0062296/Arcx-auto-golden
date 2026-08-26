@@ -121,13 +121,21 @@ def cards(items: Sequence[Tuple[str, Any, str]]) -> str:
 
 
 def table(headers: Sequence[str], rows: Sequence[Sequence[str]],
-          numeric: Sequence[int] = (), empty: str = "no data") -> str:
-    """Row cells are already HTML; the caller is responsible for esc()."""
+          numeric: Sequence[int] = (), empty: str = "no data",
+          header_html: Sequence[str] = ()) -> str:
+    """Row cells are already HTML; the caller is responsible for esc().
+
+    ``header_html`` replaces the escaped headers with markup the caller has
+    built -- a column heading that is a sort link, and nothing else so far.
+    It must line up one-to-one with ``headers``, which stays the plain-text
+    version.
+    """
     if not rows:
         return "<div class='empty'>%s</div>" % esc(empty)
+    labels = list(header_html) if header_html else [esc(h) for h in headers]
     head = "".join(
-        "<th%s>%s</th>" % (" class='num'" if i in numeric else "", esc(h))
-        for i, h in enumerate(headers))
+        "<th%s>%s</th>" % (" class='num'" if i in numeric else "", label)
+        for i, label in enumerate(labels))
     body = []
     for row in rows:
         cells = "".join(

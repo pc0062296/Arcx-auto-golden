@@ -8,6 +8,7 @@ entirely without disturbing the daemon (architecture decision 1).
 from __future__ import annotations
 
 import os
+import re
 import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -36,8 +37,20 @@ def _q(*parts: str) -> str:
 # Home: an overview of every run
 # ---------------------------------------------------------------------------
 
+#: The columns of the runs table that can be sorted on, and which way round
+#: they start. Counts and times start at the interesting end -- most
+#: attention, most recent -- because that is what somebody sorting by them is
+#: looking for; names start at A.
+_RUN_SORTS: Dict[str, str] = {
+    "run": "asc", "attention": "desc", "cases": "desc",
+    "index": "desc", "issues": "desc", "updated": "desc",
+}
+
+
 def render_home(states: Sequence[Dict[str, Any]], refresh: int,
-                workspaces: Sequence[Any] = ()) -> str:
+                workspaces: Sequence[Any] = (),
+                sort: str = "", direction: str = "") -> str:
+    states = _sorted_runs(states, sort, direction)
     rows = []
     total_attention = 0
     for state in states:
@@ -67,14 +80,62 @@ def render_home(states: Sequence[Dict[str, Any]], refresh: int,
     # numbers. Name the cases instead, before anything else.
     body += _attention_across_runs(states)
     body += _workspaces_section(workspaces)
+    columns = ["run", "progress", "cases", "index", "attention", "issues",
+               "updated", "daemon"]
     body += "<h2>runs</h2>"
     body += table(
-        ["run", "progress", "cases", "index", "attention", "issues",
-         "updated", "daemon"],
-        rows, numeric=[2, 3, 4, 5],
+        columns, rows, numeric=[2, 3, 4, 5],
         empty="no run is being monitored yet; start one with arcx-auto daemon",
+        header_html=[_sort_header(name, sort, direction) for name in columns],
     )
     return page("Arcx Auto Golden", body, refresh=refresh)
+
+
+def _sorted_runs(states: Sequence[Dict[str, Any]], sort: str,
+                 direction: str) -> List[Dict[str, Any]]:
+    """Order the runs table.
+
+    Sorting is a link, not JavaScript, so a sorted view is a URL somebody can
+    send -- and the auto refresh reloads into the same order instead of
+    jumping back. An unrecognised sort key leaves the order alone rather than
+    rearranging it in some third way.
+    """
+    if sort not in _RUN_SORTS:
+        return list(states)
+
+    def totals(state: Dict[str, Any]) -> Dict[str, Any]:
+        return state.get("totals") or {}
+
+    keys = {
+        "run": lambda s: _natural_key(s.get("run_id", "")),
+        "attention": lambda s: totals(s).get("attention", 0),
+        "cases": lambda s: totals(s).get("cases", 0),
+        "index": lambda s: totals(s).get("indexes", 0),
+        "issues": lambda s: totals(s).get("issues", 0),
+        "updated": lambda s: s.get("updated_at") or 0,
+    }
+    chosen = direction if direction in ("asc", "desc") else _RUN_SORTS[sort]
+    return sorted(states, key=keys[sort], reverse=(chosen == "desc"))
+
+
+def _sort_header(name: str, sort: str, direction: str) -> str:
+    """One column heading: a link that sorts, and an arrow when it is the
+    one in force.
+
+    Clicking the column already sorted on reverses it, which is what every
+    table anybody has used does.
+    """
+    if name not in _RUN_SORTS:
+        return esc(name)
+    active = (name == sort)
+    current = direction if direction in ("asc", "desc") else _RUN_SORTS[name]
+    nxt = ("asc" if current == "desc" else "desc") if active else _RUN_SORTS[name]
+    arrow = ""
+    if active:
+        arrow = " <span class='muted'>%s</span>" % (
+            "&uarr;" if current == "asc" else "&darr;")
+    href = "/?" + urllib.parse.urlencode({"sort": name, "dir": nxt})
+    return "<a href='%s'>%s</a>%s" % (esc(href), esc(name), arrow)
 
 
 def _workspaces_section(entries: Sequence[Any]) -> str:
@@ -423,20 +484,73 @@ def _issue_summary(state: Dict[str, Any], run_id: str) -> str:
                         -len(kv[1]), kv[0]),
     ):
         first = group[0]
-        targets = sorted({(i.get("case_id") or i.get("index_key") or "-")
-                          for i in group})
-        shown = ", ".join(esc(t) for t in targets[:6])
-        if len(targets) > 6:
-            shown += " <span class='muted'>... (+%d)</span>" % (len(targets) - 6)
         rows.append([
             severity_pill(first["severity"]),
             esc(issue_id),
             esc(len(group)),
             esc(first.get("title") or ""),
-            shown,
+            _issue_targets(run_id, group),
         ])
     return table(["severity", "issue id", "count", "description", "targets"],
                  rows, numeric=[2])
+
+
+#: How many targets are listed before the rest go behind a disclosure. High
+#: enough that most rows show everything, low enough that one issue hitting
+#: two hundred cases does not push the rest of the table off the screen.
+_TARGETS_SHOWN = 12
+
+
+def _issue_targets(run_id: str, group: Sequence[Dict[str, Any]]) -> str:
+    """The cases and indices an issue hit, each a link to its own page.
+
+    This column is where an investigation starts, and it used to be plain
+    text: the reader had to carry a case id in their head, find the index it
+    belonged to, open that, and find the row. Every one of those steps is
+    already known here.
+
+    Nothing is dropped either. It used to stop at six with "(+194)", which
+    hides exactly the list somebody needs when a problem is widespread; the
+    overflow now goes behind a disclosure they can open.
+    """
+    seen: List[Tuple[str, str]] = []
+    for issue in group:
+        target = (str(issue.get("index_key") or ""),
+                  str(issue.get("case_id") or ""))
+        if target not in seen:
+            seen.append(target)
+    seen.sort(key=lambda t: (_natural_key(t[0]), _natural_key(t[1])))
+
+    links = [_target_link(run_id, index_key, case_id)
+             for index_key, case_id in seen]
+    if not links:
+        return "<span class='muted'>-</span>"
+    if len(links) <= _TARGETS_SHOWN:
+        return ", ".join(links)
+    head = ", ".join(links[:_TARGETS_SHOWN])
+    rest = ", ".join(links[_TARGETS_SHOWN:])
+    return ("%s <details style='display:inline'>"
+            "<summary style='display:inline;cursor:pointer' class='muted'>"
+            "+%d more</summary> %s</details>"
+            % (head, len(links) - _TARGETS_SHOWN, rest))
+
+
+def _target_link(run_id: str, index_key: str, case_id: str) -> str:
+    """A link to the page that shows this target, and its label."""
+    if index_key and case_id:
+        return "<a href='%s'>%s</a>" % (
+            esc(_q("run", run_id, "index", index_key, "case", case_id)),
+            esc(case_id))
+    if index_key:
+        return "<a href='%s'>%s</a>" % (
+            esc(_q("run", run_id, "index", index_key)), esc(index_key))
+    return "<span class='muted'>%s</span>" % esc(case_id or "-")
+
+
+def _natural_key(text: str):
+    """Sort ids the way people read numbers: 2 before 10."""
+    return [int(part) if part.isdigit() else part.lower()
+            for part in re.split(r"(\d+)", str(text or ""))]
 
 
 def _anomaly_cell(index: Dict[str, Any]) -> str:

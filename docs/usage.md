@@ -266,6 +266,11 @@ The front page names **every case needing a person, across every run**, before
 any of the run tables. If it says "nothing needs a person right now", that is
 the whole answer.
 
+The runs table sorts by any column -- click the heading, click again to
+reverse. Counts and times start at the interesting end (most attention, most
+recent), names start at A. It is a link, so a sorted view is a URL you can
+send, and the auto refresh keeps the order instead of jumping back.
+
 The page refreshes itself every 30 seconds.
 
 A run page groups its indices the way the submission was built:
@@ -292,6 +297,11 @@ everything.
 | `STALLED` | the log has not grown for a long time |
 | `LOST` | a job we **had seen** for this case has been gone from `bjobs` for half an hour, and the marker still says running |
 | `SUSPENDED` | LSF suspended it |
+
+The **issue summary** on a run page groups by issue id -- `NETLIST_MISSING x
+200`, not two hundred identical lines -- and every target in it is a link
+straight to that case or index. Nothing is hidden: when a problem hits more
+than twelve, the rest are behind a **+N more** you can open.
 
 Click an index for the case table, and a case for the evidence behind its
 verdict.

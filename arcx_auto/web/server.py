@@ -207,8 +207,12 @@ class _Handler(BaseHTTPRequestHandler):
             if state:
                 state.setdefault("run_id", run_id)
                 states.append(state)
-        self._html(pages.render_home(states, self.options.refresh_sec,
-                                     workspaces=self._workspaces()))
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        self._html(pages.render_home(
+            states, self.options.refresh_sec,
+            workspaces=self._workspaces(),
+            sort=(query.get("sort") or [""])[0],
+            direction=(query.get("dir") or [""])[0]))
 
     def _api_state(self, run_id: str) -> None:
         state = self._load_state(run_id)

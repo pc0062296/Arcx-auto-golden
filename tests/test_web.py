@@ -251,6 +251,83 @@ def _index(key, group="", folder="", attention=0, done=1, cfg=""):
             "anomalies": {}}
 
 
+def _run_state(run_id, attention=0, cases=0, indexes=0, issues=0, updated=0):
+    return {"run_id": run_id, "updated_at": updated, "daemon": {},
+            "totals": {"states": {}, "cases": cases, "indexes": indexes,
+                       "attention": attention, "issues": issues},
+            "lsf": {"available": True}, "indexes": [], "issues": []}
+
+
+class HomeSortTest(unittest.TestCase):
+    """Sorting the front page. Links, not JavaScript, so a sorted view is a
+    URL somebody can send and the auto refresh keeps the order.
+    """
+
+    STATES = [
+        _run_state("chipB-1", attention=0, cases=30, updated=300),
+        _run_state("chipA-2", attention=5, cases=10, updated=100),
+        _run_state("chipC-3", attention=2, cases=20, updated=200),
+    ]
+
+    def order(self, sort="", direction=""):
+        body = pages.render_home(self.STATES, refresh=0, sort=sort,
+                                 direction=direction)
+        found = []
+        for state in self.STATES:
+            run_id = state["run_id"]
+            found.append((body.index(">%s</a>" % run_id), run_id))
+        return [run_id for _position, run_id in sorted(found)]
+
+    def test_no_sort_leaves_the_order_alone(self):
+        self.assertEqual(self.order(), ["chipB-1", "chipA-2", "chipC-3"])
+
+    def test_an_unknown_sort_key_leaves_the_order_alone(self):
+        """A stale or hand-edited URL should not rearrange the page in some
+        third way.
+        """
+        self.assertEqual(self.order(sort="nonsense"),
+                         ["chipB-1", "chipA-2", "chipC-3"])
+
+    def test_attention_starts_at_the_interesting_end(self):
+        """Somebody sorting by attention wants the worst first, and should
+        not have to click twice to get it.
+        """
+        self.assertEqual(self.order(sort="attention"),
+                         ["chipA-2", "chipC-3", "chipB-1"])
+
+    def test_the_direction_can_be_reversed(self):
+        self.assertEqual(self.order(sort="attention", direction="asc"),
+                         ["chipB-1", "chipC-3", "chipA-2"])
+
+    def test_names_start_at_a(self):
+        self.assertEqual(self.order(sort="run"),
+                         ["chipA-2", "chipB-1", "chipC-3"])
+
+    def test_sorting_by_a_count(self):
+        self.assertEqual(self.order(sort="cases"),
+                         ["chipB-1", "chipC-3", "chipA-2"])
+
+    def test_sorting_by_when_it_was_updated(self):
+        self.assertEqual(self.order(sort="updated"),
+                         ["chipB-1", "chipC-3", "chipA-2"])
+
+    def test_the_active_column_shows_which_way_it_is_sorted(self):
+        body = pages.render_home(self.STATES, refresh=0, sort="attention")
+        self.assertIn("&darr;", body)
+        self.assertIn("sort=attention&amp;dir=asc", body)
+
+    def test_clicking_the_active_column_reverses_it(self):
+        body = pages.render_home(self.STATES, refresh=0, sort="attention",
+                                 direction="asc")
+        self.assertIn("&uarr;", body)
+        self.assertIn("sort=attention&amp;dir=desc", body)
+
+    def test_a_column_that_cannot_be_sorted_is_not_a_link(self):
+        body = pages.render_home(self.STATES, refresh=0)
+        self.assertIn("<th>progress</th>", body)
+        self.assertIn("sort=run", body)
+
+
 class IndexGroupingTest(unittest.TestCase):
     """One submission carries several cfgs and several source folders.
 
@@ -410,23 +487,64 @@ class PageRenderTest(unittest.TestCase):
         body = pages.render_run(state, refresh=0)
         self.assertIn("the last scan failed", body)
 
-    def test_issue_summary_groups_by_id(self):
-        """When 200 cases hit one problem, show the aggregate, not 200 lines."""
-        issues = [
-            {"id": "NETLIST_MISSING", "severity": "FATAL", "title": "missing",
-             "case_id": "C%d" % i, "index_key": "1000"}
-            for i in range(12)
-        ]
-        state = {
+    @staticmethod
+    def _run_state(issues):
+        return {
             "run_id": "r", "updated_at": 0, "daemon": {},
-            "totals": {"states": {}, "cases": 12, "indexes": 1,
-                       "attention": 12, "issues": 12,
-                       "severities": {"FATAL": 12}},
+            "totals": {"states": {}, "cases": len(issues), "indexes": 1,
+                       "attention": len(issues), "issues": len(issues),
+                       "severities": {"FATAL": len(issues)}},
             "lsf": {"available": True}, "indexes": [], "issues": issues,
         }
-        body = pages.render_run(state, refresh=0)
+
+    @staticmethod
+    def _issues(count, **extra):
+        base = {"id": "NETLIST_MISSING", "severity": "FATAL",
+                "title": "missing", "index_key": "1000"}
+        base.update(extra)
+        return [dict(base, case_id="C%d" % i) for i in range(count)]
+
+    def test_issue_summary_groups_by_id(self):
+        """When 200 cases hit one problem, show the aggregate, not 200 lines."""
+        body = pages.render_run(self._run_state(self._issues(12)), refresh=0)
         self.assertEqual(body.count("NETLIST_MISSING"), 1)
-        self.assertIn("(+6)", body)
+
+    def test_every_target_is_a_link_to_its_own_page(self):
+        """This column is where an investigation starts. As plain text the
+        reader had to carry a case id in their head, find its index, open
+        that, and find the row -- all of which is known here already.
+        """
+        body = pages.render_run(self._run_state(self._issues(3)), refresh=0)
+        for case_id in ("C0", "C1", "C2"):
+            self.assertIn("/run/r/index/1000/case/%s" % case_id, body)
+
+    def test_an_index_scope_issue_links_to_the_index(self):
+        issue = {"id": "INDEX_QUEUE_NOT_MOVING", "severity": "WARN",
+                 "title": "queued", "index_key": "1000", "case_id": None}
+        body = pages.render_run(self._run_state([issue]), refresh=0)
+        self.assertIn("/run/r/index/1000'", body)
+        self.assertNotIn("/case/", body)
+
+    def test_nothing_is_dropped_when_a_problem_is_widespread(self):
+        """It used to stop at six with "(+194)", which hides exactly the list
+        somebody needs when a problem is everywhere.
+        """
+        body = pages.render_run(self._run_state(self._issues(40)), refresh=0)
+        for case_id in ("C0", "C20", "C39"):
+            self.assertIn("case/%s'" % case_id, body)
+        self.assertIn("+28 more", body)
+        self.assertIn("<details", body)
+
+    def test_a_short_list_needs_no_disclosure(self):
+        body = pages.render_run(self._run_state(self._issues(4)), refresh=0)
+        self.assertNotIn("more</summary>", body)
+
+    def test_targets_are_sorted_the_way_people_read_numbers(self):
+        issues = [dict(id="X", severity="WARN", title="t", index_key="1000",
+                       case_id=case) for case in ("C10", "C2", "C1")]
+        body = pages.render_run(self._run_state(issues), refresh=0)
+        order = [body.index(">%s</a>" % c) for c in ("C1", "C2", "C10")]
+        self.assertEqual(order, sorted(order))
 
     def test_silent_time_escalates_visually(self):
         """The longer the quiet, the louder the marker: the system states the
