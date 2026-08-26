@@ -175,7 +175,14 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, "no such run: %s" % run_id)
 
         if len(parts) == 1:
-            return self._html(pages.render_run(state, self.options.refresh_sec))
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query)
+            return self._html(pages.render_run(
+                state, self.options.refresh_sec,
+                view=(query.get("view") or [""])[0],
+                show=(query.get("show") or [""])[0],
+                sort=(query.get("sort") or [""])[0],
+                direction=(query.get("dir") or [""])[0]))
 
         if len(parts) >= 3 and parts[1] == "index":
             index = _find(state.get("indexes") or [], "index_key", parts[2])

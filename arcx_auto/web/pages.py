@@ -19,6 +19,7 @@ from arcx_auto.web.html import (
     esc,
     page,
     progress_bar,
+    progress_legend,
     severity_pill,
     size,
     state_pill,
@@ -78,6 +79,7 @@ def render_home(states: Sequence[Dict[str, Any]], refresh: int,
     # The first question anybody opening this page has is "is anything wrong",
     # and answering it with a table of runs makes them work it out from
     # numbers. Name the cases instead, before anything else.
+    body += _progress_block(_all_case_counts(states))
     body += _attention_across_runs(states)
     body += _workspaces_section(workspaces)
     columns = ["run", "progress", "cases", "index", "attention", "issues",
@@ -89,6 +91,16 @@ def render_home(states: Sequence[Dict[str, Any]], refresh: int,
         header_html=[_sort_header(name, sort, direction) for name in columns],
     )
     return page("Arcx Auto Golden", body, refresh=refresh)
+
+
+def _all_case_counts(states: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    """Every case being monitored anywhere, by state."""
+    counts: Dict[str, int] = {}
+    for state in states:
+        for name, number in ((state.get("totals") or {}).get("states")
+                             or {}).items():
+            counts[name] = counts.get(name, 0) + number
+    return counts
 
 
 def _sorted_runs(states: Sequence[Dict[str, Any]], sort: str,
@@ -118,23 +130,29 @@ def _sorted_runs(states: Sequence[Dict[str, Any]], sort: str,
     return sorted(states, key=keys[sort], reverse=(chosen == "desc"))
 
 
-def _sort_header(name: str, sort: str, direction: str) -> str:
+def _sort_header(name: str, sort: str, direction: str,
+                 defaults: Optional[Dict[str, str]] = None,
+                 base: str = "/",
+                 extra: Optional[Dict[str, str]] = None) -> str:
     """One column heading: a link that sorts, and an arrow when it is the
     one in force.
 
     Clicking the column already sorted on reverses it, which is what every
     table anybody has used does.
     """
-    if name not in _RUN_SORTS:
+    defaults = _RUN_SORTS if defaults is None else defaults
+    if name not in defaults:
         return esc(name)
     active = (name == sort)
-    current = direction if direction in ("asc", "desc") else _RUN_SORTS[name]
-    nxt = ("asc" if current == "desc" else "desc") if active else _RUN_SORTS[name]
+    current = direction if direction in ("asc", "desc") else defaults[name]
+    nxt = ("asc" if current == "desc" else "desc") if active else defaults[name]
     arrow = ""
     if active:
         arrow = " <span class='muted'>%s</span>" % (
             "&uarr;" if current == "asc" else "&darr;")
-    href = "/?" + urllib.parse.urlencode({"sort": name, "dir": nxt})
+    params = dict(extra or {})
+    params.update({"sort": name, "dir": nxt})
+    href = base + "?" + urllib.parse.urlencode(params)
     return "<a href='%s'>%s</a>%s" % (esc(href), esc(name), arrow)
 
 
@@ -247,10 +265,12 @@ def _daemon_health(daemon: Dict[str, Any], updated_at: Optional[float]) -> str:
 # Run detail
 # ---------------------------------------------------------------------------
 
-def render_run(state: Dict[str, Any], refresh: int) -> str:
+def render_run(state: Dict[str, Any], refresh: int, view: str = "",
+               show: str = "", sort: str = "", direction: str = "") -> str:
     run_id = state.get("run_id", "?")
     totals = state.get("totals") or {}
     severities = totals.get("severities") or {}
+    indexes = state.get("indexes") or []
 
     body = cards([
         ("needs your decision", totals.get("attention", 0),
@@ -261,14 +281,15 @@ def render_run(state: Dict[str, Any], refresh: int) -> str:
         ("WARN", severities.get("WARN", 0), ""),
     ])
 
+    body += _progress_block(_case_counts(state))
     body += _finished_banner(state)
     body += _lsf_banner(state)
     body += _daemon_banner(state)
 
     body += "<h2>issue summary</h2>" + _issue_summary(state, run_id)
 
-    body += "<h2>index</h2>" + _index_sections(
-        run_id, state.get("indexes") or [])
+    body += "<h2>index</h2>" + _index_view(run_id, indexes, view, show,
+                                           sort, direction)
 
     return page("run %s" % run_id, body, refresh=refresh,
                 crumbs=[("/", "all runs"), (_q("run", run_id), run_id)],
@@ -277,6 +298,69 @@ def render_run(state: Dict[str, Any], refresh: int) -> str:
 
 _INDEX_COLUMNS = ["index", "progress", "cases", "done", "attention",
                   "scan anomalies", "run folder"]
+
+#: Sortable columns of the index table, and which way round they start.
+_INDEX_SORTS: Dict[str, str] = {
+    "index": "asc", "cases": "desc", "done": "desc", "attention": "desc",
+}
+
+#: What the filter chips select. Each takes one index's payload and says
+#: whether it belongs. Named for what somebody is looking for, not for the
+#: state machine: "unfinished" is the question people actually ask.
+_INDEX_FILTERS: Tuple[Tuple[str, str], ...] = (
+    ("attention", "needs a person"),
+    ("unfinished", "unfinished"),
+    ("running", "running"),
+    ("queued", "queued"),
+    ("done", "done"),
+)
+
+
+def _index_matches(index: Dict[str, Any], name: str) -> bool:
+    counts = index.get("counts") or {}
+    total = sum(counts.values())
+    if name == "attention":
+        return bool(index.get("attention"))
+    if name == "unfinished":
+        return total > counts.get("DONE", 0)
+    if name == "running":
+        return bool(counts.get("RUNNING") or counts.get("STALLED"))
+    if name == "queued":
+        return bool(counts.get("QUEUED") or counts.get("PENDING"))
+    if name == "done":
+        return total > 0 and total == counts.get("DONE", 0)
+    return True
+
+
+def _case_counts(state: Dict[str, Any]) -> Dict[str, int]:
+    """Every case in the run, by state.
+
+    Summed from the indices rather than read from totals: the same function
+    then works for one cfg, one folder, or the whole run, and one of those
+    cannot go stale relative to the others.
+    """
+    counts: Dict[str, int] = {}
+    for index in state.get("indexes") or []:
+        for name, number in (index.get("counts") or {}).items():
+            counts[name] = counts.get(name, 0) + number
+    return counts
+
+
+def _counts_of(indexes: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    return _case_counts({"indexes": list(indexes)})
+
+
+def _progress_block(counts: Dict[str, int]) -> str:
+    """How far along the whole thing is, in one glance.
+
+    The bar answers "how much is left" and the legend answers "how much is
+    that", and neither is any use without the other: a bar that is nearly
+    full reads the same whether two cases remain or two hundred.
+    """
+    if not sum(counts.values()):
+        return ""
+    return ("<div style='margin:10px 0 4px'>%s%s</div>"
+            % (progress_bar(counts, big=True), progress_legend(counts)))
 
 
 def _index_rows(run_id: str,
@@ -302,6 +386,85 @@ def _index_rows(run_id: str,
 def _index_table(run_id: str, indexes: Sequence[Dict[str, Any]]) -> str:
     return table(_INDEX_COLUMNS, _index_rows(run_id, indexes),
                  numeric=[2, 3, 4])
+
+
+def _index_view(run_id: str, indexes: Sequence[Dict[str, Any]],
+                view: str, show: str, sort: str, direction: str) -> str:
+    """The index list: grouped as the submission was built, or flat.
+
+    Grouping shows the shape of the run, which is what somebody wants when
+    they arrive. It is the wrong shape for the other question -- "show me
+    everything that is not finished, across the whole run" -- because the
+    answer is spread across every container and they would have to open each
+    one. So a filter or a sort flattens the list: those are global questions,
+    and a global question deserves one table.
+
+    Getting back is always one click; the grouped view is never further away
+    than the row of chips above the table.
+    """
+    base = _q("run", run_id)
+    chips = _index_filter_bar(base, indexes, view, show)
+
+    flat = bool(show) or bool(sort) or view == "flat"
+    if not flat:
+        return chips + _index_sections(run_id, indexes)
+
+    selected = [i for i in indexes if not show or _index_matches(i, show)]
+    if sort in _INDEX_SORTS:
+        keys = {
+            "index": lambda i: _natural_key(i.get("index_key", "")),
+            "cases": lambda i: sum((i.get("counts") or {}).values()),
+            "done": lambda i: (i.get("counts") or {}).get("DONE", 0),
+            "attention": lambda i: i.get("attention", 0),
+        }
+        chosen = (direction if direction in ("asc", "desc")
+                  else _INDEX_SORTS[sort])
+        selected = sorted(selected, key=keys[sort],
+                          reverse=(chosen == "desc"))
+
+    extra = {"view": "flat"}
+    if show:
+        extra["show"] = show
+    headers = [_sort_header(name, sort, direction, _INDEX_SORTS, base, extra)
+               for name in _INDEX_COLUMNS]
+    return chips + _progress_block(_counts_of(selected)) + table(
+        _INDEX_COLUMNS, _index_rows(run_id, selected), numeric=[2, 3, 4],
+        empty="no index matches this filter", header_html=headers)
+
+
+def _index_filter_bar(base: str, indexes: Sequence[Dict[str, Any]],
+                      view: str, show: str) -> str:
+    """Filter chips, and the way back to the grouped view.
+
+    Counted, so a filter that would show nothing says so before it is pressed
+    rather than after.
+    """
+    chips = []
+    grouped = not (show or view == "flat")
+    chips.append(_chip(base, "grouped", len(indexes), grouped, {}))
+    chips.append(_chip(base, "all", len(indexes),
+                       (view == "flat" and not show), {"view": "flat"}))
+    for name, label in _INDEX_FILTERS:
+        count = sum(1 for i in indexes if _index_matches(i, name))
+        if not count:
+            continue
+        chips.append(_chip(base, label, count, show == name,
+                           {"view": "flat", "show": name},
+                           alert=(name == "attention")))
+    return ("<p style='display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px'>"
+            "%s</p>" % "".join(chips))
+
+
+def _chip(base: str, label: str, count: int, selected: bool,
+          params: Dict[str, str], alert: bool = False) -> str:
+    klass = "pill %s" % ("bad" if alert else "muted")
+    if selected:
+        return ("<span class='%s' style='font-weight:600;"
+                "text-decoration:underline'>%s %d</span>"
+                % (klass, esc(label), count))
+    href = base + ("?" + urllib.parse.urlencode(params) if params else "")
+    return "<a class='%s' href='%s'>%s %d</a>" % (klass, esc(href),
+                                                  esc(label), count)
 
 
 def _index_sections(run_id: str, indexes: Sequence[Dict[str, Any]]) -> str:
@@ -356,9 +519,11 @@ def _index_sections(run_id: str, indexes: Sequence[Dict[str, Any]]) -> str:
         for folder, items in folders:
             inner.append(_container(
                 _folder_label(folder), items, _index_table(run_id, items),
-                only_one=len(folders) == 1))
+                only_one=len(folders) == 1,
+                key="%s/%s" % (name, folder)))
         out.append(_container("<strong>%s</strong>" % esc(name), members,
-                              "".join(inner), only_one=len(groups) == 1))
+                              "".join(inner), only_one=len(groups) == 1,
+                              key=name))
     return "".join(out)
 
 
@@ -376,21 +541,35 @@ def _folder_label(folder: str) -> str:
 
 
 def _container(label: str, indexes: Sequence[Dict[str, Any]],
-               inner: str, only_one: bool = False) -> str:
-    """One collapsible level, with enough on the closed line to skip it."""
+               inner: str, only_one: bool = False, key: str = "") -> str:
+    """One collapsible level, with enough on the closed line to skip it.
+
+    The closed line carries its own progress bar, so a cfg or a folder can be
+    read without opening it -- which is the only way a collapsed view is
+    better than a flat one.
+
+    ``key`` identifies the section across a refresh: the page puts back what
+    the reader had open, and it can only do that if a section is still the
+    same section after the reload.
+    """
     attention = sum(i.get("attention", 0) for i in indexes)
-    cases = sum(sum((i.get("counts") or {}).values()) for i in indexes)
+    counts = _counts_of(indexes)
+    cases = sum(counts.values())
     summary = ("%s <span class='muted'>%d index, %d case(s)</span>"
                % (label, len(indexes), cases))
     if attention:
         summary += " <span class='pill bad'>%d need a person</span>" % attention
+    bar = progress_bar(counts)
+    if bar:
+        summary += ("<span style='display:inline-flex;width:180px;"
+                    "margin-left:10px;vertical-align:middle'>%s</span>" % bar)
     # Open when there is something to act on, or when it is the only one.
     # Everything open is the flat table again.
     is_open = " open" if (attention or only_one) else ""
-    return ("<details%s style='margin:6px 0;padding:4px 0 4px 10px;"
+    return ("<details%s data-key='%s' style='margin:6px 0;padding:4px 0 4px 10px;"
             "border-left:3px solid rgba(128,128,128,.35)'>"
             "<summary style='cursor:pointer'>%s</summary>%s</details>"
-            % (is_open, summary, inner))
+            % (is_open, esc(key or label), summary, inner))
 
 
 def _finished_banner(state: Dict[str, Any]) -> str:
@@ -529,10 +708,11 @@ def _issue_targets(run_id: str, group: Sequence[Dict[str, Any]]) -> str:
         return ", ".join(links)
     head = ", ".join(links[:_TARGETS_SHOWN])
     rest = ", ".join(links[_TARGETS_SHOWN:])
-    return ("%s <details style='display:inline'>"
+    return ("%s <details style='display:inline' data-key='targets:%s'>"
             "<summary style='display:inline;cursor:pointer' class='muted'>"
             "+%d more</summary> %s</details>"
-            % (head, len(links) - _TARGETS_SHOWN, rest))
+            % (head, esc(group[0].get("id") or ""),
+               len(links) - _TARGETS_SHOWN, rest))
 
 
 def _target_link(run_id: str, index_key: str, case_id: str) -> str:

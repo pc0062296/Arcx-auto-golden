@@ -70,6 +70,115 @@ pre { background:var(--bg); border:1px solid var(--line); border-radius:6px;
 .bar { display:flex; height:6px; border-radius:99px; overflow:hidden;
   background:var(--line); min-width:120px; }
 .bar span { display:block; }
+.bar.big { height:14px; border-radius:6px; }
+.legend { display:flex; gap:14px; flex-wrap:wrap; margin:6px 0 0;
+  font-size:12px; color:var(--dim); }
+.legend b { font-weight:600; }
+.key { display:inline-block; width:9px; height:9px; border-radius:2px;
+  margin-right:5px; vertical-align:baseline; }
+button.link { background:none; border:none; padding:0; font:inherit;
+  color:var(--busy); cursor:pointer; }
+button.link:hover { text-decoration:underline; }
+"""
+
+#: Keeping the page still while it refreshes.
+#:
+#: A monitoring page has to update itself -- that is what it is for. But a
+#: plain meta refresh throws away everything the reader was doing: the scroll
+#: position, and every section they had opened. Reviewing a run means opening
+#: a few things and reading, and being yanked back to the top every thirty
+#: seconds makes that impossible.
+#:
+#: So the reload is driven from here instead, and the two pieces of state that
+#: belong to the reader -- where they were, and what they had open -- are
+#: saved before it and put back after. There is also a switch: sometimes the
+#: honest answer is to stop refreshing until they are done.
+#:
+#: sessionStorage can throw (private windows, blocked site data), so every
+#: access is wrapped. Failing means the page refreshes the old way, which is
+#: the behaviour this replaces, not a broken page.
+_KEEP_PLACE_JS = """
+(function () {
+  var SECONDS = %d;
+  var PLACE = "arcx:place:" + location.pathname + location.search;
+  var PAUSED = "arcx:paused";
+  var timer = null;
+
+  function store() { try { return window.sessionStorage; } catch (e) { return null; } }
+  function get(key) { var s = store(); try { return s && s.getItem(key); } catch (e) { return null; } }
+  function set(key, value) { var s = store(); try { s && s.setItem(key, value); } catch (e) {} }
+
+  function sections() { return document.querySelectorAll("details[data-key]"); }
+
+  function save() {
+    var open = {}, all = sections();
+    for (var i = 0; i < all.length; i++) {
+      open[all[i].getAttribute("data-key")] = all[i].open ? 1 : 0;
+    }
+    set(PLACE, JSON.stringify({ y: window.pageYOffset || 0, open: open }));
+  }
+
+  function restore() {
+    var raw = get(PLACE);
+    if (!raw) { return; }
+    var data;
+    try { data = JSON.parse(raw); } catch (e) { return; }
+    var open = data.open || {}, all = sections();
+    for (var i = 0; i < all.length; i++) {
+      var key = all[i].getAttribute("data-key");
+      // Only sections that existed when we saved: anything new keeps
+      // whatever the server decided, which is usually "open, because
+      // something in here needs a person".
+      if (open[key] !== undefined) { all[i].open = !!open[key]; }
+    }
+    if (data.y) { window.scrollTo(0, data.y); }
+  }
+
+  function paused() { return get(PAUSED) === "1"; }
+
+  function label() {
+    var button = document.getElementById("arcx-refresh");
+    if (button) {
+      button.textContent = paused()
+        ? "auto refresh: off" : "auto refresh: " + SECONDS + "s";
+    }
+  }
+
+  function schedule() {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (paused() || SECONDS <= 0) { return; }
+    timer = setTimeout(function () { save(); location.reload(); }, SECONDS * 1000);
+  }
+
+  function wire() {
+    restore();
+    label();
+    schedule();
+    var all = sections();
+    for (var i = 0; i < all.length; i++) {
+      all[i].addEventListener("toggle", save);
+    }
+    var button = document.getElementById("arcx-refresh");
+    if (button) {
+      button.addEventListener("click", function () {
+        set(PAUSED, paused() ? "0" : "1");
+        label();
+        schedule();
+      });
+    }
+    var now = document.getElementById("arcx-refresh-now");
+    if (now) {
+      now.addEventListener("click", function () { save(); location.reload(); });
+    }
+    window.addEventListener("beforeunload", save);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wire);
+  } else {
+    wire();
+  }
+})();
 """
 
 
@@ -87,8 +196,19 @@ def page(title: str, body: str, refresh: int = 0,
     starts a run, short of typing the URL. A tool whose main action is
     unreachable from its front page does not have that action.
     """
-    refresh_tag = ('<meta http-equiv="refresh" content="%d">' % refresh
-                   if refresh > 0 else "")
+    # Without JavaScript there is no way to put the reader back where they
+    # were, so the old behaviour is the fallback rather than no refresh at all.
+    refresh_tag = ('<noscript><meta http-equiv="refresh" content="%d">'
+                   '</noscript>' % refresh if refresh > 0 else "")
+    script = ("<script>%s</script>" % (_KEEP_PLACE_JS % refresh)
+              if refresh > 0 else "")
+    controls = ""
+    if refresh > 0:
+        controls = (
+            "<span class='meta'><button class='link' id='arcx-refresh'>"
+            "auto refresh: %ds</button></span>"
+            "<span class='meta'><button class='link' id='arcx-refresh-now'>"
+            "refresh now</button></span>" % refresh)
     trail = " / ".join(
         '<a href="%s">%s</a>' % (esc(href), esc(text)) for href, text in crumbs)
     return (
@@ -98,10 +218,12 @@ def page(title: str, body: str, refresh: int = 0,
         "<header><h1>%s</h1>"
         "<span class='meta'><a href='/submit'>new submission</a></span>"
         "<span class='meta'><a href='/commands'>queue</a></span>"
+        "%s"
         "<span class='meta'>%s</span>"
-        "<span class='meta'>%s</span></header><main>%s</main></body></html>"
-        % (refresh_tag, esc(title), CSS, trail or esc(title), esc(meta),
-           esc("updated " + time.strftime("%H:%M:%S")), body)
+        "<span class='meta'>%s</span></header><main>%s</main>%s</body></html>"
+        % (refresh_tag, esc(title), CSS, trail or esc(title), controls,
+           esc(meta), esc("updated " + time.strftime("%H:%M:%S")), body,
+           script)
     )
 
 
@@ -156,24 +278,57 @@ def severity_pill(severity: str) -> str:
         _SEVERITY_CLASS.get(severity, "muted"), esc(severity))
 
 
-def progress_bar(counts: Dict[str, int]) -> str:
+#: The order states appear in a progress bar, and their colour. Finished
+#: first, then in flight, then the ones that need somebody -- so the bar reads
+#: left to right as "how much is done" without anybody decoding it.
+STATE_COLORS: Tuple[Tuple[str, str], ...] = (
+    ("DONE", "var(--good)"), ("COMPLETED_MARKER", "var(--warn)"),
+    ("RUNNING", "var(--busy)"), ("QUEUED", "var(--busy)"),
+    ("PENDING", "var(--line)"), ("STALLED", "var(--bad)"),
+    ("SUSPENDED", "var(--warn)"), ("LOST", "var(--bad)"),
+    ("FAILED", "var(--bad)"), ("UNKNOWN", "var(--warn)"),
+)
+
+
+def progress_bar(counts: Dict[str, int], big: bool = False) -> str:
     """A proportional bar of the state mix."""
     total = sum(counts.values())
     if not total:
         return ""
-    order = [("DONE", "var(--good)"), ("COMPLETED_MARKER", "var(--warn)"),
-             ("RUNNING", "var(--busy)"), ("QUEUED", "var(--busy)"),
-             ("PENDING", "var(--line)"), ("STALLED", "var(--bad)"),
-             ("SUSPENDED", "var(--warn)"), ("LOST", "var(--bad)"),
-             ("FAILED", "var(--bad)"), ("UNKNOWN", "var(--warn)")]
     segments = []
-    for state, color in order:
+    for state, color in STATE_COLORS:
         count = counts.get(state, 0)
         if count:
             segments.append(
                 "<span style='width:%.2f%%;background:%s' title='%s %d'></span>"
                 % (100.0 * count / total, color, esc(state), count))
-    return "<div class='bar'>%s</div>" % "".join(segments)
+    return "<div class='bar%s'>%s</div>" % (" big" if big else "",
+                                            "".join(segments))
+
+
+def progress_legend(counts: Dict[str, int]) -> str:
+    """The numbers behind the bar.
+
+    A bar shows proportion and hides quantity: "nearly done" reads the same
+    whether two cases are left or two hundred. Both are wanted, so both are
+    shown, in the same order and the same colours as the bar.
+    """
+    total = sum(counts.values())
+    if not total:
+        return ""
+    parts = []
+    for state, color in STATE_COLORS:
+        count = counts.get(state, 0)
+        if count:
+            parts.append(
+                "<span><span class='key' style='background:%s'></span>"
+                "%s <b>%d</b></span>" % (color, esc(state), count))
+    for state in sorted(counts):
+        if state not in dict(STATE_COLORS) and counts[state]:
+            parts.append("<span>%s <b>%d</b></span>"
+                         % (esc(state), counts[state]))
+    parts.append("<span>total <b>%d</b></span>" % total)
+    return "<div class='legend'>%s</div>" % "".join(parts)
 
 
 def duration(seconds: Optional[float]) -> str:

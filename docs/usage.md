@@ -273,6 +273,18 @@ send, and the auto refresh keeps the order instead of jumping back.
 
 The page refreshes itself every 30 seconds.
 
+Every page leads with a progress bar over all the cases it covers, and the
+numbers behind it:
+
+```
+[############################----------]
+DONE 120   RUNNING 8   QUEUED 40   FAILED 3   total 171
+```
+
+The front page counts every run; a run page counts that run; and each cfg and
+folder carries its own bar **on its closed line**, so a section can be read
+without opening it.
+
 A run page groups its indices the way the submission was built:
 
 ```
@@ -286,6 +298,35 @@ v chipA_typical.cfg        12 index, 240 case(s)   [3 need a person]
 Click to open and close. Anything with a case needing a person is **already
 open**; the rest stays shut, because the point is to stop having to read
 everything.
+
+That is the right shape for "what does this run look like" and the wrong one
+for "show me everything unfinished" -- the answer to that is spread across
+every container. So the chips above the table answer it in one table instead:
+
+```
+[ grouped 40 ]  [ all 40 ]  [ needs a person 3 ]  [ unfinished 12 ]
+[ running 4 ]  [ queued 8 ]  [ done 28 ]
+```
+
+Any of them flattens the list; **grouped** puts it back, and it is never more
+than one click away. The flat table sorts by index, cases, done or attention
+-- click a heading, click again to reverse -- and keeps the filter while you
+do. Every one of these is a URL, so the view you are looking at is one you can
+send.
+
+### It refreshes without losing your place
+
+The page reloads itself every 30 seconds and puts you back where you were:
+the same scroll position, and the same sections open. It used to jump to the
+top and close everything, which made reading a long run impossible.
+
+Two controls sit in the header:
+
+- **auto refresh: 30s** -- click to stop it while you are reading something.
+  It stays off until you turn it back on.
+- **refresh now** -- reload immediately without waiting.
+
+Both remember your choice for as long as the tab is open.
 
 ## 6. Read the states
 

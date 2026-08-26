@@ -376,11 +376,29 @@ class IndexGroupingTest(unittest.TestCase):
             _index("1000", group="typical", folder="/p/a/blkA"),
             _index("1002", group="cworst", folder="/p/a/blkB", attention=2),
         ])
-        opened = [block for block in body.split("<details")
-                  if block.startswith(" open")]
-        self.assertTrue(any("cworst" in block for block in opened))
-        self.assertFalse(any("typical" in block and "cworst" not in block
-                             for block in opened))
+        self.assertIn("<details open data-key='cworst'", body)
+        self.assertIn("<details data-key='typical'", body)
+
+    def test_every_section_is_identified_across_a_refresh(self):
+        """The page puts back what the reader had open, and can only do that
+        if a section is still the same section after the reload.
+        """
+        body = self.render([
+            _index("1000", group="typical", folder="/p/a/blkA")])
+        self.assertIn("data-key='typical'", body)
+        self.assertIn("data-key='typical//p/a/blkA'", body)
+
+    def test_a_closed_container_still_shows_its_progress(self):
+        """A collapsed view is only better than a flat one if you can read a
+        section without opening it.
+        """
+        body = self.render([
+            _index("1000", group="typical", folder="/p/a/blkA", done=3),
+            _index("1002", group="cworst", folder="/p/a/blkB", attention=2),
+        ])
+        closed = body.split("<details data-key='typical'")[1].split(
+            "</summary>")[0]
+        self.assertIn("class='bar'", closed)
 
     def test_the_only_container_is_open(self):
         """Nothing is gained by making somebody click once to see everything
@@ -409,6 +427,144 @@ class IndexGroupingTest(unittest.TestCase):
         body = self.render([_index("1000", cfg="chipA_cbt.cfg",
                                    folder="/p/a/blkA")])
         self.assertIn("chipA_cbt.cfg", body)
+
+
+class IndexViewTest(unittest.TestCase):
+    """Filtering and sorting the whole run's indices at once.
+
+    Grouping shows the shape of the run, which is what somebody wants when
+    they arrive. It is the wrong shape for "show me everything unfinished",
+    because the answer is spread across every container and they would have
+    to open each one.
+    """
+
+    INDEXES = [
+        _index("1000", group="typical", folder="/p/a/blkA", done=8),
+        _index("1001", group="typical", folder="/p/a/blkA", done=2,
+               attention=3),
+        _index("1002", group="cworst", folder="/p/a/blkB", done=1),
+    ]
+
+    def render(self, **kwargs):
+        kwargs.setdefault("view", "")
+        kwargs.setdefault("show", "")
+        kwargs.setdefault("sort", "")
+        kwargs.setdefault("direction", "")
+        return pages._index_view("r1", self.INDEXES, **kwargs)
+
+    def test_grouped_by_default(self):
+        self.assertIn("<details", self.render())
+
+    def test_a_flat_view_has_no_containers_to_open(self):
+        body = self.render(view="flat")
+        self.assertNotIn("<details", body)
+        for key in ("1000", "1001", "1002"):
+            self.assertIn(key, body)
+
+    def test_a_filter_flattens_the_list(self):
+        """A global question deserves one table, not one per container."""
+        body = self.render(show="attention")
+        self.assertNotIn("<details", body)
+        self.assertIn("/run/r1/index/1001", body)
+        self.assertNotIn("/run/r1/index/1000'", body)
+
+    def test_unfinished_is_the_question_people_actually_ask(self):
+        body = self.render(show="unfinished")
+        self.assertIn("/run/r1/index/1001", body)
+
+    def test_done_selects_only_the_finished_ones(self):
+        body = self.render(show="done")
+        self.assertIn("/run/r1/index/1000'", body)
+        self.assertNotIn("/run/r1/index/1001'", body)
+
+    def test_the_chips_are_counted(self):
+        body = self.render()
+        self.assertIn("needs a person 1", body)
+        self.assertIn("all 3", body)
+
+    def test_a_filter_that_would_show_nothing_is_not_offered(self):
+        body = pages._index_view(
+            "r1", [_index("1000", group="g", folder="/p/a", done=1)],
+            "", "", "", "")
+        self.assertNotIn("needs a person", body)
+
+    def test_getting_back_is_one_click(self):
+        body = self.render(show="attention")
+        self.assertIn("grouped 3", body)
+        self.assertIn("href='/run/r1'", body)
+
+    def test_the_flat_table_can_be_sorted(self):
+        body = self.render(view="flat", sort="attention")
+        order = [body.index("/run/r1/index/%s'" % key)
+                 for key in ("1001", "1000", "1002")]
+        self.assertEqual(order, sorted(order))
+
+    def test_sorting_keeps_the_filter(self):
+        body = self.render(show="unfinished", sort="cases")
+        self.assertIn("show=unfinished", body)
+
+    def test_the_filtered_view_shows_the_progress_of_what_is_selected(self):
+        body = self.render(show="done")
+        self.assertIn("class='bar big'", body)
+
+
+class RefreshTest(unittest.TestCase):
+    """A monitoring page has to update itself. It must not throw away what
+    the reader was doing to do it.
+    """
+
+    def test_a_refreshing_page_can_put_the_reader_back(self):
+        body = pages.page("t", "<p>x</p>", refresh=30)
+        self.assertIn("arcx:place:", body)
+        self.assertIn("scrollTo", body)
+        self.assertIn("details[data-key]", body)
+
+    def test_the_refresh_can_be_switched_off_while_reviewing(self):
+        body = pages.page("t", "<p>x</p>", refresh=30)
+        self.assertIn("id='arcx-refresh'", body)
+        self.assertIn("auto refresh: 30s", body)
+        self.assertIn("refresh now", body)
+
+    def test_without_javascript_it_still_refreshes_the_old_way(self):
+        body = pages.page("t", "<p>x</p>", refresh=30)
+        self.assertIn("<noscript><meta http-equiv=\"refresh\"", body)
+
+    def test_a_page_that_does_not_refresh_carries_none_of_it(self):
+        body = pages.page("t", "<p>x</p>", refresh=0)
+        self.assertNotIn("<script", body)
+        self.assertNotIn("arcx-refresh", body)
+        self.assertNotIn("noscript", body)
+
+
+class ProgressBlockTest(unittest.TestCase):
+    """A bar shows proportion and hides quantity: "nearly done" reads the
+    same whether two cases are left or two hundred.
+    """
+
+    def test_the_bar_and_the_numbers_are_both_there(self):
+        body = pages._progress_block({"DONE": 90, "RUNNING": 8, "FAILED": 2})
+        self.assertIn("class='bar big'", body)
+        self.assertIn("DONE <b>90</b>", body)
+        self.assertIn("FAILED <b>2</b>", body)
+        self.assertIn("total <b>100</b>", body)
+
+    def test_nothing_is_drawn_for_nothing(self):
+        self.assertEqual(pages._progress_block({}), "")
+        self.assertEqual(pages._progress_block({"DONE": 0}), "")
+
+    def test_a_state_the_bar_does_not_know_still_gets_counted(self):
+        body = pages._progress_block({"DONE": 1, "SOMETHING_NEW": 2})
+        self.assertIn("SOMETHING_NEW <b>2</b>", body)
+        self.assertIn("total <b>3</b>", body)
+
+    def test_the_run_page_leads_with_it(self):
+        state = {"run_id": "r", "updated_at": 0, "daemon": {},
+                 "totals": {"states": {}, "cases": 3, "indexes": 1,
+                            "attention": 0, "issues": 0, "severities": {}},
+                 "lsf": {"available": True}, "issues": [],
+                 "indexes": [_index("1000", group="g", folder="/p/a", done=3)]}
+        body = pages.render_run(state, refresh=0)
+        self.assertIn("total <b>3</b>", body)
 
 
 class LsfWordingTest(unittest.TestCase):
